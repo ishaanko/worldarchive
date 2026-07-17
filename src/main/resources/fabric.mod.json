@@ -1,0 +1,31 @@
+{
+    "schemaVersion": 1,
+    "id": "worldarchive",
+    "version": "${version}",
+    "name": "WorldArchive",
+    "description": "A clean-room client-side backup mod for Minecraft worlds.",
+    "authors": [
+        "Ishaan Kothari"
+    ],
+    "contact": {
+        "sources": "https://github.com/ishaankot/worldarchive",
+        "issues": "https://github.com/ishaankot/worldarchive/issues"
+    },
+    "license": "Apache-2.0",
+    "environment": "client",
+    "entrypoints": {
+        "client": [
+            "dev.ishaankot.worldarchive.WorldArchiveClient"
+        ],
+        "modmenu": [
+            "dev.ishaankot.worldarchive.integration.WorldArchiveModMenu"
+        ]
+    },
+    "depends": {
+        "fabricloader": ">=0.19.3",
+        "minecraft": "~26.2",
+        "java": ">=25",
+        "fabric-api": "*",
+        "modmenu": ">=20.0.1"
+    }
+}

@@ -1,0 +1,36 @@
+# Local reference and agent state
+.temp/
+.agent/
+AGENTS.md
+.worktrees/
+
+# Gradle and Java
+.gradle/
+build/
+out/
+classes/
+*.class
+
+# IDEs and editors
+.idea/
+.vscode/
+.settings/
+*.iml
+*.ipr
+*.iws
+.classpath
+.project
+*/bin/
+*~
+\#*
+
+# Minecraft development runtime
+run/
+logs/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Build diagnostics
+hs_err_pid*

@@ -1,0 +1,80 @@
+plugins {
+    id 'net.fabricmc.fabric-loom' version "${loom_version}"
+    id 'java'
+    id 'checkstyle'
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+    archivesName = 'worldarchive'
+}
+
+repositories {
+    maven {
+        name = 'TerraformersMC'
+        url = 'https://maven.terraformersmc.com/releases/'
+    }
+}
+
+loom {
+    splitEnvironmentSourceSets()
+
+    mods {
+        worldarchive {
+            sourceSet sourceSets.main
+            sourceSet sourceSets.client
+        }
+    }
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${minecraft_version}"
+    implementation "net.fabricmc:fabric-loader:${loader_version}"
+    implementation "net.fabricmc.fabric-api:fabric-api:${fabric_api_version}"
+    implementation "com.terraformersmc:modmenu:${modmenu_version}"
+
+    testImplementation platform('org.junit:junit-bom:5.13.4')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+processResources {
+    inputs.property 'version', project.version
+
+    filesMatching('fabric.mod.json') {
+        expand version: inputs.properties.version
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 25
+    options.encoding = 'UTF-8'
+}
+
+tasks.withType(Test).configureEach {
+    useJUnitPlatform()
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+    withSourcesJar()
+}
+
+checkstyle {
+    toolVersion = '11.0.1'
+    configFile = file('config/checkstyle/checkstyle.xml')
+}
+
+tasks.named('jar') {
+    inputs.property 'projectName', project.name
+
+    from('LICENSE') {
+        rename { "${it}_${project.name}" }
+    }
+}
+
+apply from: 'gradle/quality.gradle'
