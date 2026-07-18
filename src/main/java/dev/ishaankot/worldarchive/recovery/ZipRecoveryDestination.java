@@ -48,7 +48,7 @@ final class ZipRecoveryDestination implements RecoveryDestination {
     }
 
     @Override
-    public void materialize(
+    public Materialization materialize(
             BackupRecord record,
             DestinationResult destination,
             Path emptyTarget) throws Exception {
@@ -59,6 +59,7 @@ final class ZipRecoveryDestination implements RecoveryDestination {
             throw new BackupRecoveryException(
                     "ZIP artifact changed during restoration: " + after.message());
         }
+        return Materialization.preserved(emptyTarget);
     }
 
     @Override

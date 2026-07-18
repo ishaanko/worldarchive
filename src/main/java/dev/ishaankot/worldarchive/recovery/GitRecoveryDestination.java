@@ -43,6 +43,18 @@ final class GitRecoveryDestination implements RecoveryDestination {
         return verificationOutcome(record, destination, verification);
     }
 
+    @Override
+    public VerificationOutcome verifyForRestore(
+            BackupRecord record,
+            DestinationResult destination) throws Exception {
+        requireArtifact(record, destination);
+        GitVerification verification = awaitDrained(backend.verifyRestorableSnapshot(
+                record.manifest().worldId(),
+                record.manifest().backupId(),
+                record.manifest()));
+        return verificationOutcome(record, destination, verification);
+    }
+
     static VerificationOutcome verificationOutcome(
             BackupRecord record,
             DestinationResult destination,
@@ -68,19 +80,26 @@ final class GitRecoveryDestination implements RecoveryDestination {
     }
 
     @Override
-    public void materialize(
+    public Materialization materialize(
             BackupRecord record,
             DestinationResult destination,
             Path emptyTarget) throws Exception {
         requireArtifact(record, destination);
-        Path restored = awaitMaterialization(backend.restoreSnapshot(
+        GitBackupBackend.RestoreResult restored = awaitDrained(
+                backend.restoreSnapshotForRecovery(
                 record.manifest().worldId(),
                 record.manifest().backupId(),
                 record.manifest(),
                 emptyTarget));
-        if (!restored.toAbsolutePath().normalize().equals(emptyTarget.toAbsolutePath().normalize())) {
+        if (!restored.path().equals(emptyTarget.toAbsolutePath().normalize())) {
             throw new BackupRecoveryException("Git restored to an unexpected directory");
         }
+        return Materialization.replaced(
+                restored.path(),
+                restored.fileKey(),
+                restored.creationTime(),
+                restored.directoryIdentityMarker(),
+                restored.publicationProblem());
     }
 
     @Override
@@ -156,12 +175,29 @@ final class GitRecoveryDestination implements RecoveryDestination {
         }
     }
 
-    static <T> T awaitMaterialization(CompletionStage<T> stage) throws Exception {
+    static <T> T awaitDrained(CompletionStage<T> stage) throws Exception {
         try {
             return await(stage);
         } catch (InterruptedException exception) {
-            stage.toCompletableFuture().handle((ignored, failure) -> null).join();
-            Thread.currentThread().interrupt();
+            try {
+                return joinAfterInterrupt(stage);
+            } finally {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    private static <T> T joinAfterInterrupt(CompletionStage<T> stage) throws Exception {
+        try {
+            return stage.toCompletableFuture().join();
+        } catch (CompletionException exception) {
+            Throwable cause = exception.getCause();
+            if (cause instanceof Exception checked) {
+                throw checked;
+            }
+            if (cause instanceof Error error) {
+                throw error;
+            }
             throw exception;
         }
     }

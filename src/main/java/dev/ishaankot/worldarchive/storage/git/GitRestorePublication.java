@@ -1,6 +1,7 @@
 package dev.ishaankot.worldarchive.storage.git;
 
 import com.sun.nio.file.ExtendedOpenOption;
+import dev.ishaankot.worldarchive.core.DirectoryIdentityMarker;
 import java.io.IOException;
 import java.nio.channels.FileChannel;
 import java.nio.file.DirectoryStream;
@@ -16,6 +17,7 @@ import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
 import java.nio.file.attribute.PosixFilePermission;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Stream;
@@ -85,8 +87,10 @@ final class GitRestorePublication implements AutoCloseable {
                     staging,
                     "Private Git restore staging is unsafe");
             DirectoryIdentity stagingIdentity = DirectoryIdentity.capture(
+                    staging,
                     stagingAttributes,
                     parentPin.requiresFileKey(),
+                    true,
                     "Private Git restore staging has no stable identity");
             parentPin.revalidate();
             return new GitRestorePublication(
@@ -119,6 +123,7 @@ final class GitRestorePublication implements AutoCloseable {
         }
         parentPin.revalidate();
         stagingIdentity.requireMatches(
+                staging,
                 safeDirectoryAttributes(staging, "Private Git restore staging changed before publication"),
                 "Private Git restore staging changed before publication");
         originalTarget.requireUnchanged(target);
@@ -136,6 +141,7 @@ final class GitRestorePublication implements AutoCloseable {
             moved = true;
             parentPin.revalidate();
             stagingIdentity.requireMatches(
+                    target,
                     safeDirectoryAttributes(target, "Published Git restore target is unsafe"),
                     "Published Git restore target changed during publication");
             published = true;
@@ -157,6 +163,13 @@ final class GitRestorePublication implements AutoCloseable {
             }
             throw exception;
         }
+    }
+
+    DirectoryIdentity publishedIdentity() {
+        if (!published) {
+            throw new IllegalStateException("Git restore staging has not been published");
+        }
+        return stagingIdentity;
     }
 
     @Override
@@ -195,12 +208,37 @@ final class GitRestorePublication implements AutoCloseable {
         return attributes;
     }
 
-    static record DirectoryIdentity(Object fileKey, FileTime creationTime) {
+    static record DirectoryIdentity(
+            Object fileKey,
+            FileTime creationTime,
+            Optional<String> marker) {
         DirectoryIdentity {
             Objects.requireNonNull(creationTime, "creationTime");
+            marker = Objects.requireNonNull(marker, "marker");
         }
 
         static DirectoryIdentity capture(
+                Path path,
+                BasicFileAttributes attributes,
+                boolean requireFileKey,
+                boolean createMarker,
+                String message) throws IOException, GitStorageException {
+            Object fileKey = attributes.fileKey();
+            if (requireFileKey && fileKey == null) {
+                throw new GitStorageException(message);
+            }
+            Optional<String> marker = fileKey != null
+                    ? Optional.empty()
+                    : createMarker
+                            ? DirectoryIdentityMarker.create(path)
+                            : DirectoryIdentityMarker.read(path);
+            if (fileKey == null && marker.isEmpty()) {
+                throw new GitStorageException(message);
+            }
+            return new DirectoryIdentity(fileKey, attributes.creationTime(), marker);
+        }
+
+        static DirectoryIdentity captureUnmarked(
                 BasicFileAttributes attributes,
                 boolean requireFileKey,
                 String message) throws GitStorageException {
@@ -208,14 +246,20 @@ final class GitRestorePublication implements AutoCloseable {
             if (requireFileKey && fileKey == null) {
                 throw new GitStorageException(message);
             }
-            return new DirectoryIdentity(fileKey, attributes.creationTime());
+            return new DirectoryIdentity(
+                    fileKey, attributes.creationTime(), Optional.empty());
         }
 
-        void requireMatches(BasicFileAttributes attributes, String message)
-                throws GitStorageException {
+        void requireMatches(Path path, BasicFileAttributes attributes, String message)
+                throws IOException, GitStorageException {
+            Optional<String> currentMarker = marker.isPresent()
+                    ? DirectoryIdentityMarker.read(path)
+                    : Optional.empty();
             boolean matches = fileKey != null
                     ? Objects.equals(fileKey, attributes.fileKey())
-                    : Objects.equals(creationTime, attributes.creationTime());
+                    : marker.isPresent()
+                            ? marker.equals(currentMarker)
+                            : Objects.equals(creationTime, attributes.creationTime());
             if (!matches) {
                 throw new GitStorageException(message);
             }
@@ -237,8 +281,10 @@ final class GitRestorePublication implements AutoCloseable {
                 }
             }
             return new TargetState(true, DirectoryIdentity.capture(
+                    target,
                     attributes,
                     requireFileKey,
+                    false,
                     "Git restore target has no stable identity"));
         }
 
@@ -252,7 +298,10 @@ final class GitRestorePublication implements AutoCloseable {
             BasicFileAttributes attributes = safeDirectoryAttributes(
                     target,
                     "Git restore target changed during restoration");
-            identity.requireMatches(attributes, "Git restore target changed during restoration");
+            identity.requireMatches(
+                    target,
+                    attributes,
+                    "Git restore target changed during restoration");
             try (Stream<Path> children = Files.list(target)) {
                 if (children.findAny().isPresent()) {
                     throw new GitStorageException("Git restore target changed during restoration");
@@ -289,7 +338,7 @@ final class GitRestorePublication implements AutoCloseable {
             if (stream instanceof SecureDirectoryStream<?> secureStream) {
                 @SuppressWarnings("unchecked")
                 SecureDirectoryStream<Path> typed = (SecureDirectoryStream<Path>) secureStream;
-                DirectoryIdentity identity = DirectoryIdentity.capture(
+                DirectoryIdentity identity = DirectoryIdentity.captureUnmarked(
                         attributes,
                         true,
                         "Git restore parent has no stable identity");
@@ -300,7 +349,7 @@ final class GitRestorePublication implements AutoCloseable {
                 throw new GitStorageException("Filesystem cannot pin the Git restore parent securely");
             }
             FileChannel pin = openWindowsPin(parent);
-            DirectoryIdentity identity = DirectoryIdentity.capture(
+            DirectoryIdentity identity = DirectoryIdentity.captureUnmarked(
                     attributes,
                     false,
                     "Git restore parent has no stable identity");
@@ -341,6 +390,7 @@ final class GitRestorePublication implements AutoCloseable {
 
         private void revalidate() throws IOException, GitStorageException {
             identity.requireMatches(
+                    parent,
                     safeDirectoryAttributes(parent, "Git restore parent changed during restoration"),
                     "Git restore parent changed during restoration");
             if (secure != null) {
@@ -349,6 +399,7 @@ final class GitRestorePublication implements AutoCloseable {
                     throw new GitStorageException("Git restore parent handle is unavailable");
                 }
                 identity.requireMatches(
+                        parent,
                         view.readAttributes(),
                         "Git restore parent handle changed during restoration");
             }

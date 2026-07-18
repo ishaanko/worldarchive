@@ -26,6 +26,7 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.FileTime;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
@@ -77,6 +78,23 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
     private final boolean ownsExecutor;
 
     private final ReentrantLock processLock = new ReentrantLock(true);
+
+    /** Identity of a directory atomically published by a recovery restore. */
+    public record RestoreResult(
+            Path path,
+            Object fileKey,
+            FileTime creationTime,
+            Optional<String> directoryIdentityMarker,
+            Optional<String> publicationProblem) {
+        public RestoreResult {
+            path = Objects.requireNonNull(path, "path").toAbsolutePath().normalize();
+            Objects.requireNonNull(creationTime, "creationTime");
+            directoryIdentityMarker = Objects.requireNonNull(
+                    directoryIdentityMarker, "directoryIdentityMarker");
+            publicationProblem = Objects.requireNonNull(
+                    publicationProblem, "publicationProblem");
+        }
+    }
 
     public GitBackupBackend(GitBackendSettings settings) {
         this(
@@ -133,6 +151,20 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
         return submit(() -> withRepositoryLock(() -> verifySnapshotBlocking(worldId, backupId)));
     }
 
+    /** Verifies a local snapshot or safely fetches and installs its configured remote copy. */
+    public CompletionStage<GitVerification> verifyRestorableSnapshot(
+            WorldId worldId,
+            BackupId backupId,
+            BackupManifest expectedManifest) {
+        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(backupId, "backupId");
+        Objects.requireNonNull(expectedManifest, "expectedManifest");
+        requireManifestIdentity(worldId, backupId, expectedManifest);
+        return submit(() -> withRepositoryLock(
+                () -> verifyRestorableSnapshotBlocking(
+                        worldId, backupId, expectedManifest)));
+    }
+
     public CompletionStage<Path> restoreSnapshot(WorldId worldId, BackupId backupId, Path emptyStaging) {
         Objects.requireNonNull(worldId, "worldId");
         Objects.requireNonNull(backupId, "backupId");
@@ -152,13 +184,29 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
         Objects.requireNonNull(backupId, "backupId");
         Objects.requireNonNull(expectedManifest, "expectedManifest");
         Objects.requireNonNull(emptyStaging, "emptyStaging");
-        if (!expectedManifest.worldId().equals(worldId)
-                || !expectedManifest.backupId().equals(backupId)) {
-            throw new IllegalArgumentException("Expected Git manifest identity does not match the snapshot");
-        }
+        requireManifestIdentity(worldId, backupId, expectedManifest);
         return submit(() -> withRepositoryLock(
                 () -> restoreSnapshotBlocking(
                         worldId, backupId, Optional.of(expectedManifest), emptyStaging)));
+    }
+
+    /** Atomically replaces an empty recovery staging directory and returns its exact new identity. */
+    public CompletionStage<RestoreResult> restoreSnapshotForRecovery(
+            WorldId worldId,
+            BackupId backupId,
+            BackupManifest expectedManifest,
+            Path emptyStaging) {
+        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(backupId, "backupId");
+        Objects.requireNonNull(expectedManifest, "expectedManifest");
+        Objects.requireNonNull(emptyStaging, "emptyStaging");
+        requireManifestIdentity(worldId, backupId, expectedManifest);
+        return submit(() -> withRepositoryLock(
+                () -> restoreSnapshotResultBlocking(
+                        worldId,
+                        backupId,
+                        Optional.of(expectedManifest),
+                        emptyStaging)));
     }
 
     public CompletionStage<Boolean> deleteSnapshot(WorldId worldId, BackupId backupId) {
@@ -397,66 +445,147 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
         }
     }
 
+    private GitVerification verifyRestorableSnapshotBlocking(
+            WorldId worldId,
+            BackupId backupId,
+            BackupManifest expectedManifest)
+            throws IOException, InterruptedException, GitStorageException {
+        ensureRepository();
+        ResolvedSnapshot resolved = resolveVerifiedSnapshotForRestore(
+                worldId, backupId, Optional.of(expectedManifest));
+        return new GitVerification(
+                resolved.snapshot(),
+                Optional.of(resolved.verified().manifest().manifest()),
+                true,
+                "Git and Git LFS objects verified");
+    }
+
     private Path restoreSnapshotBlocking(
             WorldId worldId,
             BackupId backupId,
             Optional<BackupManifest> expectedManifest,
             Path emptyStaging)
             throws IOException, InterruptedException, GitStorageException {
+        RestoreResult result = restoreSnapshotResultBlocking(
+                worldId, backupId, expectedManifest, emptyStaging);
+        if (result.publicationProblem().isPresent()) {
+            throw new GitStorageException(result.publicationProblem().orElseThrow());
+        }
+        return result.path();
+    }
+
+    private RestoreResult restoreSnapshotResultBlocking(
+            WorldId worldId,
+            BackupId backupId,
+            Optional<BackupManifest> expectedManifest,
+            Path emptyStaging)
+            throws IOException, InterruptedException, GitStorageException {
         ensureRepository();
-        ResolvedSnapshot resolved = resolveVerifiedSnapshotForRestore(worldId, backupId);
+        ResolvedSnapshot resolved = resolveVerifiedSnapshotForRestore(
+                worldId, backupId, expectedManifest);
         GitSnapshot snapshot = resolved.snapshot();
         VerifiedSnapshot verified = resolved.verified();
+        Path target = emptyStaging.toAbsolutePath().normalize();
+        rejectRepositoryTargetOverlap(target);
+        GitRestorePublication publication = GitRestorePublication.create(target);
+        GitRestorePublication.DirectoryIdentity identity;
+        try {
+            materializeVerifiedSnapshot(snapshot, verified, publication.staging());
+            publication.publish();
+            identity = publication.publishedIdentity();
+        } catch (IOException
+                | InterruptedException
+                | GitStorageException
+                | RuntimeException
+                | Error exception) {
+            try {
+                publication.close();
+            } catch (IOException closeFailure) {
+                exception.addSuppressed(closeFailure);
+            }
+            throw exception;
+        }
+        Optional<String> publicationProblem = Optional.empty();
+        try {
+            publication.close();
+        } catch (IOException exception) {
+            publicationProblem = Optional.of(
+                    "Git restore publication could not release its filesystem guard");
+        }
+        return new RestoreResult(
+                target,
+                identity.fileKey(),
+                identity.creationTime(),
+                identity.marker(),
+                publicationProblem);
+    }
+
+    private void materializeVerifiedSnapshot(
+            GitSnapshot snapshot,
+            VerifiedSnapshot verified,
+            Path staging) throws IOException, InterruptedException, GitStorageException {
+        Path temporary = Files.createTempDirectory("worldarchive-git-restore-");
+        Path checkout = temporary.resolve("worktree");
+        Path index = temporary.resolve("index");
+        Map<String, String> environment = indexEnvironment(index, false);
+        try {
+            Files.createDirectory(checkout);
+            runChecked(gitCommand(
+                    List.of(
+                            "--git-dir=" + settings.repository(),
+                            "read-tree",
+                            snapshot.commitId()),
+                    checkout,
+                    environment,
+                    new byte[0]));
+            runChecked(gitCommand(
+                    List.of(
+                            "--git-dir=" + settings.repository(),
+                            "--work-tree=" + checkout,
+                            "checkout-index",
+                            "--all",
+                            "--force"),
+                    checkout,
+                    environment,
+                    new byte[0]));
+            materializeLfsPointers(checkout, verified.lfsPointers());
+            copyMaterializedWorktree(checkout, staging);
+            ensureNoGitMetadata(staging);
+            try (GitSourceCapture ignored = GitSourceCapture.create(
+                    staging,
+                    verified.manifest().manifest())) {
+                // Re-hash the fully materialized restore before returning it to its publisher.
+            }
+        } finally {
+            deleteTemporaryDirectoryUnlessLocked(temporary);
+        }
+    }
+
+    private static void requireExpectedManifest(
+            Optional<BackupManifest> expectedManifest,
+            VerifiedSnapshot verified) throws GitStorageException {
         if (expectedManifest.isPresent()
                 && !expectedManifest.orElseThrow().equals(verified.manifest().manifest())) {
             throw new GitStorageException(
                     "Git snapshot manifest does not exactly match the catalog");
         }
-        Path target = emptyStaging.toAbsolutePath().normalize();
-        rejectRepositoryTargetOverlap(target);
-        try (GitRestorePublication publication = GitRestorePublication.create(target)) {
-            Path staging = publication.staging();
-            Path temporary = Files.createTempDirectory("worldarchive-git-restore-");
-            Path checkout = temporary.resolve("worktree");
-            Path index = temporary.resolve("index");
-            Map<String, String> environment = indexEnvironment(index, false);
-            try {
-                Files.createDirectory(checkout);
-                runChecked(gitCommand(
-                        List.of(
-                                "--git-dir=" + settings.repository(),
-                                "read-tree",
-                                snapshot.commitId()),
-                        checkout,
-                        environment,
-                        new byte[0]));
-                runChecked(gitCommand(
-                        List.of(
-                                "--git-dir=" + settings.repository(),
-                                "--work-tree=" + checkout,
-                                "checkout-index",
-                                "--all",
-                                "--force"),
-                        checkout,
-                        environment,
-                        new byte[0]));
-                materializeLfsPointers(checkout, verified.lfsPointers());
-                copyMaterializedWorktree(checkout, staging);
-                ensureNoGitMetadata(staging);
-                try (GitSourceCapture ignored = GitSourceCapture.create(
-                        staging,
-                        verified.manifest().manifest())) {
-                    // Re-hash the fully materialized restore before it is atomically published.
-                }
-                publication.publish();
-                return target;
-            } finally {
-                deleteTemporaryDirectoryUnlessLocked(temporary);
-            }
+    }
+
+    private static void requireManifestIdentity(
+            WorldId worldId,
+            BackupId backupId,
+            BackupManifest expectedManifest) {
+        if (!expectedManifest.worldId().equals(worldId)
+                || !expectedManifest.backupId().equals(backupId)) {
+            throw new IllegalArgumentException(
+                    "Expected Git manifest identity does not match the snapshot");
         }
     }
 
-    private ResolvedSnapshot resolveVerifiedSnapshotForRestore(WorldId worldId, BackupId backupId)
+    private ResolvedSnapshot resolveVerifiedSnapshotForRestore(
+            WorldId worldId,
+            BackupId backupId,
+            Optional<BackupManifest> expectedManifest)
             throws IOException, InterruptedException, GitStorageException {
         String refName = GitSnapshot.refName(worldId, backupId);
         Optional<String> localCommit = resolveRef(refName);
@@ -464,7 +593,9 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
         if (localCommit.isPresent()) {
             GitSnapshot local = snapshotForCommit(worldId, backupId, localCommit.get());
             try {
-                return new ResolvedSnapshot(local, verifySnapshotCommit(local));
+                VerifiedSnapshot verified = verifySnapshotCommit(local);
+                requireExpectedManifest(expectedManifest, verified);
+                return new ResolvedSnapshot(local, verified);
             } catch (IOException | GitStorageException exception) {
                 localFailure = exception;
             }
@@ -479,7 +610,8 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
             throw new GitStorageException("Git snapshot does not exist");
         }
         try {
-            return fetchAndVerifyRemoteSnapshot(worldId, backupId, localCommit);
+            return fetchAndVerifyRemoteSnapshot(
+                    worldId, backupId, localCommit, expectedManifest);
         } catch (IOException | InterruptedException | GitStorageException remoteFailure) {
             if (localFailure != null) {
                 remoteFailure.addSuppressed(localFailure);
@@ -491,7 +623,8 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
     private ResolvedSnapshot fetchAndVerifyRemoteSnapshot(
             WorldId worldId,
             BackupId backupId,
-            Optional<String> previousLocalCommit)
+            Optional<String> previousLocalCommit,
+            Optional<BackupManifest> expectedManifest)
             throws IOException, InterruptedException, GitStorageException {
         configureRemote();
         String snapshotRef = GitSnapshot.refName(worldId, backupId);
@@ -522,6 +655,7 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
                     new byte[0]));
             GitSnapshot candidate = snapshotForCommit(worldId, backupId, commit);
             VerifiedSnapshot verified = verifySnapshotCommit(candidate);
+            requireExpectedManifest(expectedManifest, verified);
             deleteExactRef(temporaryRef, commit);
             updateRefWithRollback(snapshotRef, commit, previousLocalCommit);
             return new ResolvedSnapshot(candidate, verified);

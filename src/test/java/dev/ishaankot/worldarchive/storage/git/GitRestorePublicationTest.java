@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.ishaankot.worldarchive.core.DirectoryIdentityMarker;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -36,6 +37,11 @@ class GitRestorePublicationTest {
     void failedRestorePreservesAnOriginallyEmptyTarget() throws Exception {
         Path target = temporaryDirectory.resolve("existing-empty");
         Files.createDirectory(target);
+        BasicFileAttributes attributes = Files.readAttributes(
+                target, BasicFileAttributes.class);
+        if (attributes.fileKey() == null) {
+            Assumptions.assumeTrue(DirectoryIdentityMarker.create(target).isPresent());
+        }
 
         try (GitRestorePublication publication = GitRestorePublication.create(target)) {
             Files.writeString(publication.staging().resolve("partial.dat"), "partial");
@@ -84,23 +90,40 @@ class GitRestorePublicationTest {
     }
 
     @Test
-    void nullFileKeyFallsBackToCreationTimeIdentity() throws Exception {
+    void nullFileKeyUsesDirectoryMarkerIdentity() throws Exception {
+        Path directory = Files.createDirectory(temporaryDirectory.resolve("marked-identity"));
         FileTime creationTime = FileTime.fromMillis(1_234L);
         GitRestorePublication.DirectoryIdentity identity =
                 GitRestorePublication.DirectoryIdentity.capture(
+                        directory,
                         directoryAttributes(null, creationTime),
                         false,
+                        true,
                         "identity unavailable");
+        Assumptions.assumeTrue(identity.marker().isPresent());
 
         assertDoesNotThrow(() -> identity.requireMatches(
+                directory,
                 directoryAttributes(null, creationTime),
                 "identity changed"));
+        Files.delete(directory);
+        Files.createDirectory(directory);
         assertThrows(GitStorageException.class, () -> identity.requireMatches(
-                directoryAttributes(null, FileTime.fromMillis(5_678L)),
+                directory,
+                directoryAttributes(null, creationTime),
                 "identity changed"));
         assertThrows(GitStorageException.class, () ->
                 GitRestorePublication.DirectoryIdentity.capture(
+                        directory,
                         directoryAttributes(null, creationTime),
+                        false,
+                        false,
+                        "identity unavailable"));
+        assertThrows(GitStorageException.class, () ->
+                GitRestorePublication.DirectoryIdentity.capture(
+                        directory,
+                        directoryAttributes(null, creationTime),
+                        true,
                         true,
                         "identity unavailable"));
     }

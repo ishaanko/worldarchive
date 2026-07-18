@@ -70,7 +70,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.function.UnaryOperator;
 import org.junit.jupiter.api.Assumptions;
@@ -547,6 +546,29 @@ class BackupRecoveryServiceTest {
         assertTrue(Files.isDirectory(unrelated));
         assertEquals("preserve me", Files.readString(unrelated.resolve("unrelated.txt")));
         assertTrue(Files.isDirectory(displacedRestore));
+    }
+
+    @Test
+    void materializationReplacementIsNeverDeletedDuringCleanup() throws IOException {
+        Fixture fixture = fixture(DestinationType.ZIP);
+        FakeDestination zip = new FakeDestination(DestinationType.ZIP, fixture.worldId());
+        zip.replaceStagingBeforeReturn = true;
+        Path worlds = Files.createDirectory(temporaryDirectory.resolve("replaced-staging-worlds"));
+        BackupRecoveryService service = service(
+                new InMemoryCatalog(fixture.record()),
+                Map.of(DestinationType.ZIP, zip),
+                new MutableClock(CREATED_AT.plusSeconds(2)));
+
+        assertRecoveryFailure(() -> service.restoreBackup(
+                        new RestoreBackupRequest(
+                                fixture.backupId(), worlds, "Replaced Staging Copy"),
+                        ProgressListener.NO_OP)
+                .toCompletableFuture().join());
+
+        try (var children = Files.list(worlds)) {
+            Path replacement = children.findFirst().orElseThrow();
+            assertEquals("preserve me", Files.readString(replacement.resolve("unrelated.txt")));
+        }
     }
 
     @Test
@@ -1116,6 +1138,8 @@ class BackupRecoveryServiceTest {
 
         private boolean writeUnexpectedInternalMetadata;
 
+        private boolean replaceStagingBeforeReturn;
+
         private BlockingStep verificationBlock;
 
         private BlockingStep materializationBlock;
@@ -1152,7 +1176,7 @@ class BackupRecoveryServiceTest {
         }
 
         @Override
-        public void materialize(
+        public Materialization materialize(
                 BackupRecord record,
                 DestinationResult destination,
                 Path emptyTarget) throws Exception {
@@ -1162,15 +1186,21 @@ class BackupRecoveryServiceTest {
             maximumActiveMaterializations.accumulateAndGet(active, Math::max);
             try {
                 if (nestedMaterialization != null) {
-                    GitRecoveryDestination.awaitMaterialization(
+                    GitRecoveryDestination.awaitDrained(
                             nestedMaterialization.apply(emptyTarget));
-                    return;
+                    return Materialization.preserved(emptyTarget);
                 }
                 if (materializationBlock != null) {
                     materializationBlock.block();
                 }
                 if (materializeFailure != null) {
                     throw materializeFailure;
+                }
+                if (replaceStagingBeforeReturn) {
+                    Files.delete(emptyTarget);
+                    Files.createDirectory(emptyTarget);
+                    Files.writeString(emptyTarget.resolve("unrelated.txt"), "preserve me");
+                    return Materialization.preserved(emptyTarget);
                 }
                 if (pauseMaterialization) {
                     Thread.sleep(Duration.ofMillis(30));
@@ -1187,6 +1217,7 @@ class BackupRecoveryServiceTest {
                         emptyTarget.resolve("payload.txt"),
                         "payload-" + type,
                         StandardCharsets.UTF_8);
+                return Materialization.preserved(emptyTarget);
             } finally {
                 activeMaterializations.decrementAndGet();
             }
@@ -1414,10 +1445,9 @@ class BackupRecoveryServiceTest {
         private final CountDownLatch drainStarted = new CountDownLatch(1);
 
         @Override
-        public <U> CompletableFuture<U> handle(
-                BiFunction<? super T, Throwable, ? extends U> function) {
+        public T join() {
             drainStarted.countDown();
-            return super.handle(function);
+            return super.join();
         }
 
         void awaitDrainStarted() throws InterruptedException {

@@ -6,6 +6,7 @@ import dev.ishaankot.worldarchive.core.BackupMaintenanceService;
 import dev.ishaankot.worldarchive.core.BackupOperation;
 import dev.ishaankot.worldarchive.core.DeleteBackupRequest;
 import dev.ishaankot.worldarchive.core.DeletePreparation;
+import dev.ishaankot.worldarchive.core.DirectoryIdentityMarker;
 import dev.ishaankot.worldarchive.core.OperationId;
 import dev.ishaankot.worldarchive.core.OperationPhase;
 import dev.ishaankot.worldarchive.core.OperationProgress;
@@ -249,7 +250,7 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
                         operationId, current, BackupOperation.RESTORE, OperationPhase.VERIFYING,
                         verified.size(), candidates.size(), "Verifying restore source"));
                 try {
-                    VerificationOutcome outcome = candidate.adapter().verify(
+                    VerificationOutcome outcome = candidate.adapter().verifyForRestore(
                             current, candidate.result());
                     if (outcome.valid()) {
                         verified.add(candidate);
@@ -275,7 +276,21 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
                         0, 0, "Materializing a private restored copy"));
                 RestoreStaging staging = createPrivateStaging(root);
                 try {
-                    candidate.adapter().materialize(current, candidate.result(), staging.path());
+                    RecoveryDestination.Materialization materialization =
+                            candidate.adapter().materialize(
+                                    current, candidate.result(), staging.path());
+                    boolean interruptedAfterMaterialization = Thread.interrupted();
+                    try {
+                        staging = staging.afterMaterialization(materialization);
+                    } finally {
+                        if (interruptedAfterMaterialization) {
+                            Thread.currentThread().interrupt();
+                        }
+                    }
+                    if (materialization.postMaterializationProblem().isPresent()) {
+                        throw new BackupRecoveryException(
+                                materialization.postMaterializationProblem().orElseThrow());
+                    }
                     cancellation.checkpoint();
                     staging.requireUnchanged();
                     if (Files.exists(
@@ -284,13 +299,19 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
                     }
                 } catch (InterruptedException exception) {
                     Thread.currentThread().interrupt();
-                    deleteTree(root.path(), staging.path());
+                    cleanupPrivateStaging(root, staging, exception);
                     throw exception;
                 } catch (InvalidMaterializationException exception) {
-                    deleteTree(root.path(), staging.path());
+                    if (!cleanupPrivateStaging(root, staging, exception)) {
+                        throw new BackupRecoveryException(
+                                "Private restore staging could not be cleaned safely", exception);
+                    }
                     continue;
                 } catch (Exception exception) {
-                    deleteTree(root.path(), staging.path());
+                    if (!cleanupPrivateStaging(root, staging, exception)) {
+                        throw new BackupRecoveryException(
+                                "Private restore staging could not be cleaned safely", exception);
+                    }
                     continue;
                 }
 
@@ -307,10 +328,10 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
                     staging.requireUnchanged();
                 } catch (InterruptedException exception) {
                     Thread.currentThread().interrupt();
-                    deleteTree(root.path(), staging.path());
+                    cleanupPrivateStaging(root, staging, exception);
                     throw exception;
                 } catch (IOException | RuntimeException exception) {
-                    deleteTree(root.path(), staging.path());
+                    cleanupPrivateStaging(root, staging, exception);
                     throw new BackupRecoveryException(
                             "Restored world metadata could not be finalized", exception);
                 }
@@ -328,14 +349,14 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
                             cancellation);
                 } catch (InterruptedException exception) {
                     Thread.currentThread().interrupt();
-                    deleteTree(root.path(), staging.path());
+                    cleanupPrivateStaging(root, staging, exception);
                     throw exception;
                 } catch (IOException | RuntimeException exception) {
-                    deleteTree(root.path(), staging.path());
+                    cleanupPrivateStaging(root, staging, exception);
                     throw new BackupRecoveryException(
                             "Restored world copy could not be published", exception);
                 } catch (Exception exception) {
-                    deleteTree(root.path(), staging.path());
+                    cleanupPrivateStaging(root, staging, exception);
                     throw new BackupRecoveryException(
                             "Restored world copy could not be published", exception);
                 }
@@ -767,8 +788,19 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
             deleteTree(root.path(), staging);
             throw new IOException("Private restore staging is unsafe");
         }
+        Optional<String> identityMarker = attributes.fileKey() == null
+                ? DirectoryIdentityMarker.create(staging)
+                : Optional.empty();
+        if (attributes.fileKey() == null && identityMarker.isEmpty()) {
+            deleteTree(root.path(), staging);
+            throw new IOException("Private restore staging has no stable identity");
+        }
         root.requireUnchanged();
-        return new RestoreStaging(staging, attributes.fileKey(), attributes.creationTime());
+        return new RestoreStaging(
+                staging,
+                attributes.fileKey(),
+                attributes.creationTime(),
+                identityMarker);
     }
 
     private static Path publishUnique(
@@ -930,6 +962,26 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
             names.add("LPT" + index);
         }
         return Set.copyOf(names);
+    }
+
+    private static boolean cleanupPrivateStaging(
+            RestoreRoot root,
+            RestoreStaging staging,
+            Throwable failure) {
+        boolean interrupted = Thread.interrupted();
+        try {
+            root.requireUnchanged();
+            staging.requireUnchanged();
+            deleteTree(root.path(), staging.path());
+            return true;
+        } catch (IOException | RuntimeException cleanupFailure) {
+            failure.addSuppressed(cleanupFailure);
+            return false;
+        } finally {
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     private static void deleteTree(Path root, Path target) throws IOException {
@@ -1250,7 +1302,33 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
         private static final long serialVersionUID = 1L;
     }
 
-    private record RestoreStaging(Path path, Object fileKey, FileTime creationTime) {
+    private record RestoreStaging(
+            Path path,
+            Object fileKey,
+            FileTime creationTime,
+            Optional<String> identityMarker) {
+        RestoreStaging afterMaterialization(
+                RecoveryDestination.Materialization materialization) throws IOException {
+            if (!path.equals(materialization.path())) {
+                throw new IOException("Restore destination changed its staging path");
+            }
+            if (materialization.preservesDirectoryIdentity()) {
+                requireUnchanged();
+                return this;
+            }
+            if (materialization.fileKey() == null
+                    && materialization.directoryIdentityMarker().isEmpty()) {
+                throw new IOException("Restored directory has no stable identity");
+            }
+            RestoreStaging replacement = new RestoreStaging(
+                    path,
+                    materialization.fileKey(),
+                    materialization.creationTime(),
+                    materialization.directoryIdentityMarker());
+            replacement.requireUnchanged();
+            return replacement;
+        }
+
         void requireUnchanged() throws IOException {
             requireIdentityAt(path);
         }
@@ -1258,10 +1336,15 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
         void requireIdentityAt(Path candidate) throws IOException {
             BasicFileAttributes attributes = Files.readAttributes(
                     candidate, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+            Optional<String> currentMarker = identityMarker.isPresent()
+                    ? DirectoryIdentityMarker.read(candidate)
+                    : Optional.empty();
             boolean sameIdentity = fileKey != null
                     ? Objects.equals(fileKey, attributes.fileKey())
-                    : Objects.equals(creationTime, attributes.creationTime());
+                    : identityMarker.isPresent() && identityMarker.equals(currentMarker);
+            boolean sameMarker = identityMarker.isEmpty() || identityMarker.equals(currentMarker);
             if (!sameIdentity
+                    || !sameMarker
                     || !attributes.isDirectory()
                     || attributes.isSymbolicLink()
                     || attributes.isOther()

@@ -3,18 +3,30 @@ package dev.ishaankot.worldarchive.storage.git;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.ishaankot.worldarchive.catalog.FileBackupCatalog;
+import dev.ishaankot.worldarchive.config.WorldIdentityStore;
 import dev.ishaankot.worldarchive.core.BackupCapture;
+import dev.ishaankot.worldarchive.core.LockingWorldOperationGate;
 import dev.ishaankot.worldarchive.core.ProgressListener;
+import dev.ishaankot.worldarchive.core.RestoreBackupRequest;
+import dev.ishaankot.worldarchive.core.RestoreBackupResult;
 import dev.ishaankot.worldarchive.model.BackupId;
 import dev.ishaankot.worldarchive.model.BackupManifest;
+import dev.ishaankot.worldarchive.model.BackupRecord;
+import dev.ishaankot.worldarchive.model.BackupResult;
 import dev.ishaankot.worldarchive.model.BackupTrigger;
 import dev.ishaankot.worldarchive.model.DestinationResult;
 import dev.ishaankot.worldarchive.model.DestinationStatus;
 import dev.ishaankot.worldarchive.model.SyncStatus;
 import dev.ishaankot.worldarchive.model.WorldId;
+import dev.ishaankot.worldarchive.model.WorldIdentity;
+import dev.ishaankot.worldarchive.recovery.BackupRecoveryException;
+import dev.ishaankot.worldarchive.recovery.BackupRecoveryService;
+import dev.ishaankot.worldarchive.recovery.RestoredWorldMetadataFinalizer;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AccessDeniedException;
@@ -30,6 +42,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
@@ -726,26 +739,245 @@ class GitBackupBackendIntegrationTest {
         WorldId worldId = WorldId.create();
         BackupId backupId = BackupId.create();
         GitBackendSettings remoteSettings = settings(Optional.of(remote.toUri().toString()));
+        BackupManifest manifest;
+        DestinationResult destination;
 
         try (GitBackupBackend backend = new GitBackupBackend(remoteSettings)) {
-            DestinationResult result = await(backend.createBackup(
-                    capture(world, worldId, backupId, Instant.now()),
-                    ProgressListener.NO_OP));
-            assertEquals(DestinationStatus.SUCCESS, result.status(), result.message().orElse(""));
-            assertEquals(SyncStatus.SYNCED, result.syncStatus());
+            BackupCapture capture = capture(world, worldId, backupId, Instant.now());
+            manifest = capture.manifest();
+            destination = await(backend.createBackup(capture, ProgressListener.NO_OP));
+            assertEquals(
+                    DestinationStatus.SUCCESS,
+                    destination.status(),
+                    destination.message().orElse(""));
+            assertEquals(SyncStatus.SYNCED, destination.syncStatus());
         }
+        FileBackupCatalog catalog = new FileBackupCatalog(
+                temporaryDirectory.resolve("remote-only-catalog.json"));
+        catalog.add(new BackupRecord(
+                manifest,
+                BackupResult.aggregate(
+                        backupId,
+                        worldId,
+                        List.of(destination),
+                        manifest.createdAt().plusSeconds(1))));
         deleteTree(remoteSettings.repository());
 
         try (GitBackupBackend recovered = new GitBackupBackend(remoteSettings)) {
-            Path restored = temporaryDirectory.resolve("remote-only-restored");
-            await(recovered.restoreSnapshot(worldId, backupId, restored));
-            assertWorldEquals(expected, restored);
+            BackupRecoveryService service = new BackupRecoveryService(
+                    catalog,
+                    Optional.of(recovered),
+                    Optional.empty(),
+                    new WorldIdentityStore(),
+                    RestoredWorldMetadataFinalizer.NO_OP,
+                    Runnable::run,
+                    new LockingWorldOperationGate());
+            Path worlds = Files.createDirectory(temporaryDirectory.resolve("remote-only-worlds"));
+            RestoreBackupResult restored = await(service.restoreBackup(
+                    new RestoreBackupRequest(backupId, worlds, "Remote Restored"),
+                    ProgressListener.NO_OP));
+
+            assertWorldEquals(expected, restored.restoredWorldDirectory());
+            WorldIdentity restoredIdentity = new WorldIdentityStore().loadOrCreateIdentity(
+                    restored.restoredWorldDirectory());
+            assertNotEquals(worldId, restoredIdentity.worldId());
+            assertEquals(backupId, restoredIdentity.sourceBackupId().orElseThrow());
             assertEquals(backupId, await(recovered.listSnapshots(Optional.of(worldId))).getFirst().backupId());
             assertTrue(nativeGit(
                     "--git-dir=" + remoteSettings.repository(),
                     "for-each-ref",
                     "--format=%(refname)",
                     "refs/worldarchive/fetch/").isBlank());
+        }
+    }
+
+    @Test
+    void remoteCatalogMismatchDoesNotInstallCanonicalLocalRef() throws Exception {
+        Path remote = temporaryDirectory.resolve("catalog-mismatch.git");
+        nativeGit("init", "--bare", remote.toString());
+        Path world = Files.createDirectory(temporaryDirectory.resolve("catalog-mismatch-world"));
+        Files.writeString(world.resolve("level.dat"), "remote manifest");
+        WorldId worldId = WorldId.create();
+        BackupId backupId = BackupId.create();
+        GitBackendSettings remoteSettings = settings(Optional.of(remote.toUri().toString()));
+        BackupManifest captured;
+        DestinationResult destination;
+
+        try (GitBackupBackend backend = new GitBackupBackend(remoteSettings)) {
+            BackupCapture capture = capture(world, worldId, backupId, Instant.now());
+            captured = capture.manifest();
+            destination = await(backend.createBackup(capture, ProgressListener.NO_OP));
+            assertEquals(DestinationStatus.SUCCESS, destination.status());
+        }
+        BackupManifest divergentCatalogManifest = new BackupManifest(
+                captured.formatVersion(),
+                captured.backupId(),
+                captured.worldId(),
+                captured.worldName(),
+                Optional.of("divergent catalog label"),
+                captured.createdAt(),
+                captured.trigger(),
+                captured.sourceFileCount(),
+                captured.sourceByteCount(),
+                captured.changedFileCount(),
+                captured.contentSha256(),
+                captured.inventorySha256());
+        FileBackupCatalog catalog = new FileBackupCatalog(
+                temporaryDirectory.resolve("catalog-mismatch.json"));
+        catalog.add(new BackupRecord(
+                divergentCatalogManifest,
+                BackupResult.aggregate(
+                        backupId,
+                        worldId,
+                        List.of(destination),
+                        captured.createdAt().plusSeconds(1))));
+        deleteTree(remoteSettings.repository());
+
+        try (GitBackupBackend recovered = new GitBackupBackend(remoteSettings)) {
+            BackupRecoveryService service = new BackupRecoveryService(
+                    catalog,
+                    Optional.of(recovered),
+                    Optional.empty(),
+                    new WorldIdentityStore(),
+                    RestoredWorldMetadataFinalizer.NO_OP,
+                    Runnable::run,
+                    new LockingWorldOperationGate());
+            Path worlds = Files.createDirectory(temporaryDirectory.resolve("catalog-mismatch-worlds"));
+
+            assertThrows(
+                    BackupRecoveryException.class,
+                    () -> await(service.restoreBackup(
+                            new RestoreBackupRequest(backupId, worlds, "Must Fail"),
+                            ProgressListener.NO_OP)));
+            assertTrue(nativeGit(
+                    "--git-dir=" + remoteSettings.repository(),
+                    "for-each-ref",
+                    "--format=%(refname)",
+                    GitSnapshot.refName(worldId, backupId)).isBlank());
+            assertTrue(nativeGit(
+                    "--git-dir=" + remoteSettings.repository(),
+                    "for-each-ref",
+                    "--format=%(refname)",
+                    "refs/worldarchive/fetch/").isBlank());
+        }
+    }
+
+    @Test
+    void cancelledRecoveryCleansAtomicallyReplacedGitStaging() throws Exception {
+        Path world = Files.createDirectory(temporaryDirectory.resolve("cancelled-recovery-world"));
+        Files.writeString(world.resolve("level.dat"), "cancel after Git publication");
+        WorldId worldId = WorldId.create();
+        BackupId backupId = BackupId.create();
+        BackupManifest manifest;
+        DestinationResult destination;
+        try (GitBackupBackend backend = new GitBackupBackend(settings)) {
+            BackupCapture capture = capture(world, worldId, backupId, Instant.now());
+            manifest = capture.manifest();
+            destination = await(backend.createBackup(capture, ProgressListener.NO_OP));
+        }
+        FileBackupCatalog catalog = new FileBackupCatalog(
+                temporaryDirectory.resolve("cancelled-recovery-catalog.json"));
+        catalog.add(new BackupRecord(
+                manifest,
+                BackupResult.aggregate(
+                        backupId,
+                        worldId,
+                        List.of(destination),
+                        manifest.createdAt().plusSeconds(1))));
+
+        CountDownLatch checkoutEntered = new CountDownLatch(1);
+        CountDownLatch releaseCheckout = new CountDownLatch(1);
+        SystemGitCommandRunner systemRunner = new SystemGitCommandRunner();
+        GitCommandRunner blockingCheckout = command -> {
+            if (command.arguments().contains("checkout-index")) {
+                checkoutEntered.countDown();
+                releaseCheckout.await();
+            }
+            return systemRunner.run(command);
+        };
+        Path worlds = Files.createDirectory(temporaryDirectory.resolve("cancelled-recovery-worlds"));
+        try (ExecutorService backendExecutor = Executors.newSingleThreadExecutor();
+                ExecutorService serviceExecutor = Executors.newSingleThreadExecutor();
+                GitBackupBackend recovered = new GitBackupBackend(
+                        settings, blockingCheckout, backendExecutor)) {
+            BackupRecoveryService service = new BackupRecoveryService(
+                    catalog,
+                    Optional.of(recovered),
+                    Optional.empty(),
+                    new WorldIdentityStore(),
+                    RestoredWorldMetadataFinalizer.NO_OP,
+                    serviceExecutor,
+                    new LockingWorldOperationGate());
+            CompletableFuture<RestoreBackupResult> future = service.restoreBackup(
+                            new RestoreBackupRequest(backupId, worlds, "Cancelled Restore"),
+                            ProgressListener.NO_OP)
+                    .toCompletableFuture();
+            try {
+                assertTrue(checkoutEntered.await(30, TimeUnit.SECONDS));
+                assertTrue(future.cancel(true));
+            } finally {
+                releaseCheckout.countDown();
+            }
+            assertThrows(CancellationException.class, future::join);
+        }
+
+        try (Stream<Path> children = Files.list(worlds)) {
+            assertEquals(List.of(), children.toList());
+        }
+    }
+
+    @Test
+    void failedGitMaterializationPreservesRecoveryStagingIdentityForCleanup() throws Exception {
+        Path world = Files.createDirectory(temporaryDirectory.resolve("failed-recovery-world"));
+        Files.writeString(world.resolve("level.dat"), "fail Git checkout");
+        WorldId worldId = WorldId.create();
+        BackupId backupId = BackupId.create();
+        BackupManifest manifest;
+        DestinationResult destination;
+        try (GitBackupBackend backend = new GitBackupBackend(settings)) {
+            BackupCapture capture = capture(world, worldId, backupId, Instant.now());
+            manifest = capture.manifest();
+            destination = await(backend.createBackup(capture, ProgressListener.NO_OP));
+        }
+        FileBackupCatalog catalog = new FileBackupCatalog(
+                temporaryDirectory.resolve("failed-recovery-catalog.json"));
+        catalog.add(new BackupRecord(
+                manifest,
+                BackupResult.aggregate(
+                        backupId,
+                        worldId,
+                        List.of(destination),
+                        manifest.createdAt().plusSeconds(1))));
+
+        SystemGitCommandRunner systemRunner = new SystemGitCommandRunner();
+        GitCommandRunner failedCheckout = command -> {
+            if (command.arguments().contains("checkout-index")) {
+                throw new IOException("simulated Git checkout failure");
+            }
+            return systemRunner.run(command);
+        };
+        Path worlds = Files.createDirectory(temporaryDirectory.resolve("failed-recovery-worlds"));
+        try (ExecutorService backendExecutor = Executors.newSingleThreadExecutor();
+                GitBackupBackend recovered = new GitBackupBackend(
+                        settings, failedCheckout, backendExecutor)) {
+            BackupRecoveryService service = new BackupRecoveryService(
+                    catalog,
+                    Optional.of(recovered),
+                    Optional.empty(),
+                    new WorldIdentityStore(),
+                    RestoredWorldMetadataFinalizer.NO_OP,
+                    Runnable::run,
+                    new LockingWorldOperationGate());
+
+            assertThrows(
+                    BackupRecoveryException.class,
+                    () -> await(service.restoreBackup(
+                            new RestoreBackupRequest(backupId, worlds, "Failed Restore"),
+                            ProgressListener.NO_OP)));
+        }
+
+        try (Stream<Path> children = Files.list(worlds)) {
+            assertEquals(List.of(), children.toList());
         }
     }
 
