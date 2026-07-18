@@ -85,7 +85,9 @@ import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.PauseScreen;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.client.gui.screens.worldselection.SelectWorldScreen;
+import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
@@ -579,9 +581,13 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
             if (storageName.isEmpty()) {
                 return;
             }
-            SelectWorldScreen screen = new SelectWorldScreen(returnTo);
-            minecraft.setScreenAndShow(screen);
-            RestoredWorldSelection.install(screen, storageName.orElseThrow());
+            String name = storageName.orElseThrow();
+            RestoredWorldTransition.afterLeavingActiveWorld(
+                    this::hasActiveWorldSession,
+                    () -> minecraft.disconnectFromWorld(ClientLevel.DEFAULT_QUIT_MESSAGE),
+                    leftActiveWorld -> showRestoredWorldSelection(
+                            leftActiveWorld ? new TitleScreen() : returnTo,
+                            name));
         });
     }
 
@@ -598,18 +604,57 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
                 return;
             }
             String name = storageName.orElseThrow();
-            try (LevelStorageSource.LevelStorageAccess ignored =
-                    minecraft.getLevelSource().validateAndCreateAccess(name)) {
-                // Validation and a clean session close happen before vanilla starts the world.
-            } catch (IOException | ContentValidationException exception) {
-                logFailure("Restored world validation failed", exception);
-                minecraft.setScreenAndShow(returnTo);
-                return;
-            }
-            minecraft.createWorldOpenFlows().openWorld(
-                    name,
-                    () -> minecraft.setScreenAndShow(returnTo));
+            RestoredWorldTransition.afterLeavingActiveWorld(
+                    this::hasActiveWorldSession,
+                    () -> minecraft.disconnectFromWorld(ClientLevel.DEFAULT_QUIT_MESSAGE),
+                    leftActiveWorld -> playRestoredWorld(
+                            leftActiveWorld ? new TitleScreen() : returnTo,
+                            name,
+                            leftActiveWorld));
         });
+    }
+
+    private boolean hasActiveWorldSession() {
+        return minecraft.hasSingleplayerServer()
+                || minecraft.level != null
+                || minecraft.getConnection() != null;
+    }
+
+    private void showRestoredWorldSelection(Screen returnTo, String storageName) {
+        SelectWorldScreen screen = new SelectWorldScreen(returnTo);
+        minecraft.setScreenAndShow(screen);
+        RestoredWorldSelection.install(screen, storageName);
+    }
+
+    private void playRestoredWorld(
+            Screen returnTo,
+            String storageName,
+            boolean selectOnFailure) {
+        try (LevelStorageSource.LevelStorageAccess ignored =
+                minecraft.getLevelSource().validateAndCreateAccess(storageName)) {
+            // Validation and a clean session close happen before vanilla starts the world.
+        } catch (IOException | ContentValidationException exception) {
+            logFailure("Restored world validation failed", exception);
+            handleRestoredWorldPlayFailure(returnTo, storageName, selectOnFailure);
+            return;
+        }
+        minecraft.createWorldOpenFlows().openWorld(
+                storageName,
+                () -> handleRestoredWorldPlayFailure(
+                        returnTo,
+                        storageName,
+                        selectOnFailure));
+    }
+
+    private void handleRestoredWorldPlayFailure(
+            Screen returnTo,
+            String storageName,
+            boolean selectRestoredWorld) {
+        if (selectRestoredWorld) {
+            showRestoredWorldSelection(returnTo, storageName);
+        } else {
+            minecraft.setScreenAndShow(returnTo);
+        }
     }
 
     @Override
