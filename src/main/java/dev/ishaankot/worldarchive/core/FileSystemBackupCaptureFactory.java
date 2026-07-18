@@ -792,7 +792,7 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
             directories.add(new SourceDirectory(
                     directory,
                     portable,
-                    FileFingerprint.create(attributes)));
+                    DirectoryFingerprint.create(attributes)));
             requireCapacity();
             return FileVisitResult.CONTINUE;
         }
@@ -882,7 +882,7 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
     private record SourceDirectory(
             Path path,
             String portablePath,
-            FileFingerprint fingerprint) {
+            DirectoryFingerprint fingerprint) {
         private SourceDirectory {
             Objects.requireNonNull(path, "path");
             Objects.requireNonNull(portablePath, "portablePath");
@@ -930,6 +930,21 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
                     attributes.fileKey(),
                     attributes.size(),
                     attributes.lastModifiedTime(),
+                    attributes.creationTime());
+        }
+    }
+
+    /** Directory mtimes are deferred on Windows; identity and membership remain authoritative. */
+    private record DirectoryFingerprint(
+            Object fileKey,
+            FileTime creationTime) {
+        private DirectoryFingerprint {
+            Objects.requireNonNull(creationTime, "creationTime");
+        }
+
+        private static DirectoryFingerprint create(BasicFileAttributes attributes) {
+            return new DirectoryFingerprint(
+                    attributes.fileKey(),
                     attributes.creationTime());
         }
     }

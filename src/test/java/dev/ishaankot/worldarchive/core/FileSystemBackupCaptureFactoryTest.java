@@ -15,6 +15,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.HexFormat;
@@ -313,6 +314,41 @@ final class FileSystemBackupCaptureFactoryTest {
 
             assertTrue(store.verify(artifact.archivePath()).valid());
             assertEquals(captured.capture().manifest(), artifact.manifest());
+        } finally {
+            captured.close();
+        }
+    }
+
+    @Test
+    void ignoresDirectoryTimestampDriftWhileFileTreeRemainsStable() throws Exception {
+        Path world = Files.createDirectory(temporaryDirectory.resolve("world-directory-time"));
+        Files.writeString(world.resolve("level.dat"), "contents", StandardCharsets.UTF_8);
+        Path region = Files.createDirectory(world.resolve("region"));
+        Files.write(region.resolve("r.0.0.mca"), new byte[] {4, 3, 2, 1});
+        FileTime changedTime = FileTime.from(Instant.parse("2026-07-17T12:01:00Z"));
+        SourceCaptureObserver timestampDrift = new SourceCaptureObserver() {
+            @Override
+            public void afterFileCopy(Path relativePath) throws IOException {
+                Files.setLastModifiedTime(region, changedTime);
+            }
+        };
+        FileSystemBackupCaptureFactory factory = new FileSystemBackupCaptureFactory(
+                temporaryDirectory.resolve("captures-directory-time"), timestampDrift);
+
+        CapturedBackup captured = factory.capture(
+                request(world, BackupTrigger.MANUAL),
+                BackupId.create(),
+                CREATED_AT,
+                Optional.empty(),
+                CaptureProgressListener.NO_OP);
+        try {
+            assertEquals(2, captured.inventory().fileCount());
+            assertArrayEquals(
+                    new byte[] {4, 3, 2, 1},
+                    Files.readAllBytes(captured.capture()
+                            .worldDirectory()
+                            .resolve("region")
+                            .resolve("r.0.0.mca")));
         } finally {
             captured.close();
         }
