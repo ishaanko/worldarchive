@@ -570,17 +570,81 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
         if (current.isEmpty()) {
             return false;
         }
-        runChecked(gitCommand(
+        if (settings.remoteUrl().isPresent()) {
+            deleteRemoteSnapshotRef(refName, current.get());
+        }
+        deleteExactRef(refName, current.get());
+        return true;
+    }
+
+    private void deleteRemoteSnapshotRef(String refName, String expectedCommit)
+            throws IOException, InterruptedException, GitStorageException {
+        Optional<String> remoteCommit = resolveRemoteRef(refName);
+        if (remoteCommit.isPresent() && !expectedCommit.equals(remoteCommit.orElseThrow())) {
+            throw new GitStorageException(
+                    "Configured Git remote snapshot no longer matches the local snapshot");
+        }
+        List<String> arguments = List.of(
+                "--git-dir=" + settings.repository(),
+                "push",
+                "--atomic",
+                "--porcelain",
+                "--force-with-lease=" + refName + ":" + remoteCommit.orElse(""),
+                settings.remoteName(),
+                ":" + refName);
+        try {
+            runChecked(gitCommand(
+                    arguments,
+                    settings.repository(),
+                    Map.of(),
+                    new byte[0]));
+        } catch (IOException | GitStorageException exception) {
+            try {
+                if (resolveRemoteRef(refName).isEmpty()) {
+                    return;
+                }
+            } catch (InterruptedException verificationFailure) {
+                exception.addSuppressed(verificationFailure);
+                Thread.currentThread().interrupt();
+                throw verificationFailure;
+            } catch (IOException | GitStorageException verificationFailure) {
+                exception.addSuppressed(verificationFailure);
+            }
+            throw exception;
+        }
+        if (resolveRemoteRef(refName).isPresent()) {
+            throw new GitStorageException("Configured Git remote snapshot ref could not be removed");
+        }
+    }
+
+    private Optional<String> resolveRemoteRef(String refName)
+            throws IOException, InterruptedException, GitStorageException {
+        configureRemote();
+        GitCommandResult result = runChecked(gitCommand(
                 List.of(
                         "--git-dir=" + settings.repository(),
-                        "update-ref",
-                        "-d",
-                        refName,
-                        current.get()),
+                        "ls-remote",
+                        "--refs",
+                        settings.remoteName(),
+                        refName),
                 settings.repository(),
                 Map.of(),
                 new byte[0]));
-        return true;
+        List<String> lines = result.standardOutput().lines()
+                .filter(line -> !line.isBlank())
+                .toList();
+        if (lines.isEmpty()) {
+            return Optional.empty();
+        }
+        if (lines.size() != 1) {
+            throw new GitStorageException("Configured Git remote returned an ambiguous snapshot ref");
+        }
+        String line = lines.getFirst();
+        int separator = line.indexOf('\t');
+        if (separator < 1 || !line.substring(separator + 1).equals(refName)) {
+            throw new GitStorageException("Configured Git remote returned an invalid snapshot ref");
+        }
+        return Optional.of(objectId(line.substring(0, separator)));
     }
 
     private DestinationResult syncSnapshotBlocking(WorldId worldId, BackupId backupId)
@@ -922,7 +986,7 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
                 Map.of(),
                 new byte[0]));
         if (resolveRef(refName).isPresent()) {
-            throw new GitStorageException("Temporary Git fetch ref could not be removed");
+            throw new GitStorageException("Git ref could not be removed");
         }
     }
 

@@ -221,6 +221,52 @@ class GitBackupBackendIntegrationTest {
     }
 
     @Test
+    void deletesRemoteRefBeforeLocalRefAndRetriesAfterLocalFailure() throws Exception {
+        Path remote = temporaryDirectory.resolve("remote-delete.git");
+        nativeGit("init", "--bare", remote.toString());
+        Path world = temporaryDirectory.resolve("remote-delete-world");
+        Files.createDirectories(world);
+        Files.writeString(world.resolve("level.dat"), "remote deletion", StandardCharsets.UTF_8);
+        WorldId worldId = WorldId.create();
+        BackupId backupId = BackupId.create();
+        String snapshotRef = GitSnapshot.refName(worldId, backupId);
+        GitBackendSettings remoteSettings = settings(Optional.of(remote.toUri().toString()));
+        SystemGitCommandRunner systemRunner = new SystemGitCommandRunner();
+        AtomicInteger localDeleteAttempts = new AtomicInteger();
+        GitCommandRunner failFirstLocalDelete = command -> {
+            if (command.arguments().contains("update-ref")
+                    && command.arguments().contains("-d")
+                    && command.arguments().contains(snapshotRef)
+                    && localDeleteAttempts.getAndIncrement() == 0) {
+                throw new IOException("simulated local ref deletion failure");
+            }
+            return systemRunner.run(command);
+        };
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try (GitBackupBackend backend = new GitBackupBackend(
+                remoteSettings,
+                failFirstLocalDelete,
+                executor)) {
+            DestinationResult result = await(backend.createBackup(
+                    capture(world, worldId, backupId, Instant.now()),
+                    ProgressListener.NO_OP));
+            assertEquals(DestinationStatus.SUCCESS, result.status(), result.message().orElse(""));
+
+            assertThrows(IOException.class, () -> await(backend.deleteSnapshot(worldId, backupId)));
+            assertTrue(remoteRef(remote, snapshotRef).isEmpty());
+            assertEquals(
+                    backupId,
+                    await(backend.listSnapshots(Optional.of(worldId))).getFirst().backupId());
+
+            assertTrue(await(backend.deleteSnapshot(worldId, backupId)));
+            assertTrue(remoteRef(remote, snapshotRef).isEmpty());
+            assertTrue(await(backend.listSnapshots(Optional.of(worldId))).isEmpty());
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void rejectsPreparedManifestThatDoesNotMatchCapturedWorld() throws Exception {
         Path world = temporaryDirectory.resolve("manifest-mismatch-world");
         Files.createDirectories(world);
@@ -856,6 +902,15 @@ class GitBackupBackendIntegrationTest {
         assertTrue(process.waitFor(30, TimeUnit.SECONDS));
         assertEquals(0, process.exitValue(), output);
         return output;
+    }
+
+    private Optional<String> remoteRef(Path remote, String refName) throws Exception {
+        String output = nativeGit(
+                "--git-dir=" + remote,
+                "for-each-ref",
+                "--format=%(objectname)",
+                refName).trim();
+        return output.isEmpty() ? Optional.empty() : Optional.of(output);
     }
 
     private static <T> T await(java.util.concurrent.CompletionStage<T> stage) throws Exception {
