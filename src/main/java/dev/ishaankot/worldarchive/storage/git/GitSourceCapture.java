@@ -193,7 +193,7 @@ final class GitSourceCapture implements AutoCloseable {
                         BasicFileAttributes.class,
                         LinkOption.NOFOLLOW_LINKS);
                 GitSourceScanner.requireDirectory(directory.path(), attributes);
-                if (!directory.fingerprint().equals(FileFingerprint.create(attributes))) {
+                if (!directory.matches(attributes)) {
                     throw new UnsafeCaptureException("A live-world directory changed during Git capture");
                 }
             }
@@ -288,9 +288,26 @@ final class GitSourceCapture implements AutoCloseable {
     private record CopyResult(long size, String sha256) {
     }
 
-    private record DirectoryFingerprint(Path path, FileFingerprint fingerprint) {
+    /** Directory mtimes are deferred on Windows; identity and membership remain authoritative. */
+    private record DirectoryFingerprint(
+            Path path,
+            Object fileKey,
+            FileTime creationTime) {
+        private DirectoryFingerprint {
+            Objects.requireNonNull(path, "path");
+            Objects.requireNonNull(creationTime, "creationTime");
+        }
+
         private static DirectoryFingerprint create(Path path, BasicFileAttributes attributes) {
-            return new DirectoryFingerprint(path, FileFingerprint.create(attributes));
+            return new DirectoryFingerprint(
+                    path,
+                    attributes.fileKey(),
+                    attributes.creationTime());
+        }
+
+        private boolean matches(BasicFileAttributes attributes) {
+            return Objects.equals(fileKey, attributes.fileKey())
+                    && creationTime.equals(attributes.creationTime());
         }
     }
 
