@@ -56,16 +56,22 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiFunction;
+import java.util.function.Function;
 import java.util.function.UnaryOperator;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
@@ -320,6 +326,59 @@ class BackupRecoveryServiceTest {
     }
 
     @Test
+    void cancellingRestoreDrainsNestedGitMaterializationBeforeStagingCleanup() throws Exception {
+        Fixture fixture = fixture(DestinationType.GIT);
+        FakeDestination git = new FakeDestination(DestinationType.GIT, fixture.worldId());
+        BlockingStep nestedWork = new BlockingStep();
+        DrainAwareFuture<Path> nestedResult = new DrainAwareFuture<>();
+        AtomicBoolean nestedFinished = new AtomicBoolean();
+        Path worlds = Files.createDirectory(temporaryDirectory.resolve("nested-cancel-worlds"));
+        try (ExecutorService nestedExecutor = Executors.newSingleThreadExecutor();
+                ExecutorService serviceExecutor = Executors.newThreadPerTaskExecutor(
+                        Thread.ofVirtual().factory())) {
+            git.nestedMaterialization = emptyTarget -> {
+                nestedExecutor.execute(() -> {
+                    nestedWork.blockUnchecked();
+                    try {
+                        Files.createDirectories(emptyTarget);
+                        Files.writeString(emptyTarget.resolve("nested.txt"), "finished");
+                        nestedFinished.set(true);
+                        nestedResult.complete(emptyTarget);
+                    } catch (IOException exception) {
+                        nestedResult.completeExceptionally(exception);
+                    }
+                });
+                return nestedResult;
+            };
+            BackupRecoveryService service = service(
+                    new InMemoryCatalog(fixture.record()),
+                    Map.of(DestinationType.GIT, git),
+                    new MutableClock(CREATED_AT.plusSeconds(2)),
+                    RestoredWorldMetadataFinalizer.NO_OP,
+                    serviceExecutor);
+
+            var future = service.restoreBackup(
+                            new RestoreBackupRequest(
+                                    fixture.backupId(), worlds, "Nested Cancel Copy"),
+                            ProgressListener.NO_OP)
+                    .toCompletableFuture();
+            nestedWork.awaitEntered();
+            try {
+                assertTrue(future.cancel(true));
+                nestedResult.awaitDrainStarted();
+            } finally {
+                nestedWork.release();
+            }
+            assertThrows(CancellationException.class, future::join);
+        }
+
+        assertTrue(nestedFinished.get());
+        try (var children = Files.list(worlds)) {
+            assertEquals(0, children.count());
+        }
+    }
+
+    @Test
     void restoreCancellationIsRejectedAfterAtomicPublicationBegins() throws Exception {
         Fixture fixture = fixture(DestinationType.ZIP);
         FakeDestination zip = new FakeDestination(DestinationType.ZIP, fixture.worldId());
@@ -431,6 +490,66 @@ class BackupRecoveryServiceTest {
     }
 
     @Test
+    void moveThenThrowIsReconciledByExactStagingIdentity() throws IOException {
+        Fixture fixture = fixture(DestinationType.ZIP);
+        FakeDestination zip = new FakeDestination(DestinationType.ZIP, fixture.worldId());
+        Path worlds = Files.createDirectory(temporaryDirectory.resolve("ambiguous-atomic-worlds"));
+        BackupRecoveryService service = service(
+                new InMemoryCatalog(fixture.record()),
+                Map.of(DestinationType.ZIP, zip),
+                new MutableClock(CREATED_AT.plusSeconds(2)),
+                (source, target, options) -> {
+                    Files.move(source, target, options);
+                    throw new IOException("simulated error after atomic publication");
+                });
+
+        RestoreBackupResult result = service.restoreBackup(
+                        new RestoreBackupRequest(
+                                fixture.backupId(), worlds, "Ambiguous Copy"),
+                        ProgressListener.NO_OP)
+                .toCompletableFuture().join();
+
+        assertTrue(Files.isDirectory(result.restoredWorldDirectory()));
+        assertEquals("payload-ZIP", Files.readString(
+                result.restoredWorldDirectory().resolve("payload.txt")));
+        try (var children = Files.list(worlds)) {
+            assertEquals(List.of(result.restoredWorldDirectory()), children.toList());
+        }
+    }
+
+    @Test
+    void validationFailurePreservesUnrelatedReplacementTarget() throws IOException {
+        Fixture fixture = fixture(DestinationType.ZIP);
+        FakeDestination zip = new FakeDestination(DestinationType.ZIP, fixture.worldId());
+        Path worlds = Files.createDirectory(temporaryDirectory.resolve("replaced-target-worlds"));
+        Path displacedRestore = temporaryDirectory.resolve("displaced-restore");
+        AtomicReference<Path> replacement = new AtomicReference<>();
+        BackupRecoveryService service = service(
+                new InMemoryCatalog(fixture.record()),
+                Map.of(DestinationType.ZIP, zip),
+                new MutableClock(CREATED_AT.plusSeconds(2)),
+                (source, target, options) -> {
+                    Files.move(source, target, options);
+                    Files.move(target, displacedRestore);
+                    Files.createDirectory(target);
+                    Files.writeString(target.resolve("unrelated.txt"), "preserve me");
+                    replacement.set(target);
+                    return target;
+                });
+
+        assertRecoveryFailure(() -> service.restoreBackup(
+                        new RestoreBackupRequest(
+                                fixture.backupId(), worlds, "Replaced Target Copy"),
+                        ProgressListener.NO_OP)
+                .toCompletableFuture().join());
+
+        Path unrelated = replacement.get();
+        assertTrue(Files.isDirectory(unrelated));
+        assertEquals("preserve me", Files.readString(unrelated.resolve("unrelated.txt")));
+        assertTrue(Files.isDirectory(displacedRestore));
+    }
+
+    @Test
     void windowsJunctionWorldsRootIsRejectedWithoutTouchingItsTarget() throws Exception {
         Assumptions.assumeTrue(System.getProperty("os.name", "").startsWith("Windows"));
         Fixture fixture = fixture(DestinationType.ZIP);
@@ -505,6 +624,74 @@ class BackupRecoveryServiceTest {
     }
 
     @Test
+    void deletionRemovesCatalogRecordWithNoDurableDestinations() {
+        Fixture fixture = fixture();
+        InMemoryCatalog catalog = new InMemoryCatalog(fixture.record());
+        BackupRecoveryService service = service(
+                catalog, Map.of(), new MutableClock(CREATED_AT.plusSeconds(2)));
+        DeletePreparation preparation = service.prepareDelete(fixture.backupId())
+                .toCompletableFuture().join();
+
+        BackupResult result = service.deleteBackup(
+                        new DeleteBackupRequest(
+                                fixture.backupId(), preparation.confirmationToken()),
+                        ProgressListener.NO_OP)
+                .toCompletableFuture().join();
+
+        assertEquals(BackupStatus.SKIPPED, result.status());
+        assertTrue(catalog.findUnchecked(fixture.backupId()).isEmpty());
+    }
+
+    @Test
+    void alreadyAbsentExactZipArtifactRepairsCatalogAsSuccessfulDeletion() throws Exception {
+        Path world = Files.createDirectory(temporaryDirectory.resolve("absent-zip-world"));
+        Files.writeString(world.resolve("level.dat"), "zip contents");
+        WorldId worldId = WorldId.create();
+        BackupId backupId = BackupId.create();
+        ZipBackupStore store = new ZipBackupStore(temporaryDirectory.resolve("absent-zip-store"));
+        ZipBackupArtifact artifact;
+        try (CapturedBackup captured = new FileSystemBackupCaptureFactory(
+                        temporaryDirectory.resolve("absent-zip-captures"))
+                .capture(
+                        new CreateBackupRequest(
+                                worldId,
+                                world,
+                                "Absent ZIP",
+                                BackupTrigger.MANUAL),
+                        backupId,
+                        CREATED_AT,
+                        Optional.empty(),
+                        CaptureProgressListener.NO_OP)) {
+            artifact = store.create(captured.capture());
+        }
+        DestinationResult destination = DestinationResult.success(
+                DestinationType.ZIP, artifact.artifactId());
+        BackupRecord record = new BackupRecord(
+                artifact.manifest(),
+                BackupResult.aggregate(
+                        backupId,
+                        worldId,
+                        List.of(destination),
+                        CREATED_AT.plusSeconds(1)));
+        InMemoryCatalog catalog = new InMemoryCatalog(record);
+        assertTrue(store.delete(artifact.archivePath()));
+        BackupRecoveryService service = service(
+                catalog,
+                Map.of(DestinationType.ZIP, new ZipRecoveryDestination(store, Clock.systemUTC())),
+                new MutableClock(CREATED_AT.plusSeconds(2)));
+        DeletePreparation preparation = service.prepareDelete(backupId)
+                .toCompletableFuture().join();
+
+        BackupResult result = service.deleteBackup(
+                        new DeleteBackupRequest(backupId, preparation.confirmationToken()),
+                        ProgressListener.NO_OP)
+                .toCompletableFuture().join();
+
+        assertEquals(BackupStatus.SUCCESS, result.status());
+        assertTrue(catalog.findUnchecked(backupId).isEmpty());
+    }
+
+    @Test
     void partialDeletionRemovesOnlySuccessfulDestinationFromCatalog() {
         Fixture fixture = fixture(DestinationType.GIT, DestinationType.ZIP);
         FakeDestination git = new FakeDestination(DestinationType.GIT, fixture.worldId());
@@ -576,7 +763,7 @@ class BackupRecoveryServiceTest {
     }
 
     @Test
-    void cancellingDeletionInterruptsCurrentDestinationAndRetainsCatalog() throws Exception {
+    void cancellingDeletionDefersInterruptUntilArtifactAndCatalogAreConsistent() throws Exception {
         Fixture fixture = fixture(DestinationType.GIT);
         FakeDestination git = new FakeDestination(DestinationType.GIT, fixture.worldId());
         BlockingStep deletion = new BlockingStep();
@@ -607,9 +794,9 @@ class BackupRecoveryServiceTest {
             assertThrows(CancellationException.class, future::join);
         }
 
-        assertTrue(deletion.interrupted());
+        assertFalse(deletion.interrupted());
         assertEquals(1, git.deleteCalls.get());
-        assertEquals(fixture.record(), catalog.findUnchecked(fixture.backupId()).orElseThrow());
+        assertTrue(catalog.findUnchecked(fixture.backupId()).isEmpty());
     }
 
     @Test
@@ -677,6 +864,51 @@ class BackupRecoveryServiceTest {
         assertTrue(synchronization.interrupted());
         assertEquals(1, git.syncCalls.get());
         assertEquals(fixture.record(), catalog.findUnchecked(fixture.backupId()).orElseThrow());
+    }
+
+    @Test
+    void delayedCancellationInterruptCannotEnterAfterMandatoryCommitStarts() throws Exception {
+        Fixture fixture = fixture(DestinationType.GIT);
+        FakeDestination git = new FakeDestination(DestinationType.GIT, fixture.worldId());
+        BlockingStep synchronization = new BlockingStep();
+        git.syncBlock = synchronization;
+        git.syncResult = DestinationResult.pendingSync(
+                DestinationType.GIT,
+                fixture.destination(DestinationType.GIT).artifactId().orElseThrow(),
+                "retry remote");
+        InMemoryCatalog catalog = new InMemoryCatalog(fixture.record());
+        BlockingStep catalogCommit = new BlockingStep();
+        catalog.beforeUpdate = catalogCommit::blockUnchecked;
+        try (DelayedInterruptExecutor serviceExecutor = new DelayedInterruptExecutor();
+                ExecutorService cancellationExecutor = Executors.newSingleThreadExecutor()) {
+            BackupRecoveryService service = service(
+                    catalog,
+                    Map.of(DestinationType.GIT, git),
+                    new MutableClock(CREATED_AT.plusSeconds(2)),
+                    RestoredWorldMetadataFinalizer.NO_OP,
+                    serviceExecutor);
+            var future = service.syncBackup(fixture.backupId(), ProgressListener.NO_OP)
+                    .toCompletableFuture();
+            synchronization.awaitEntered();
+
+            Future<Boolean> cancellation = cancellationExecutor.submit(() -> future.cancel(true));
+            serviceExecutor.awaitInterruptEntered();
+            synchronization.release();
+            assertFalse(catalogCommit.enteredWithin(250, TimeUnit.MILLISECONDS));
+            serviceExecutor.releaseInterrupt();
+            assertTrue(cancellation.get(5, TimeUnit.SECONDS));
+            catalogCommit.awaitEntered();
+            catalogCommit.release();
+            serviceExecutor.awaitFinished();
+
+            assertThrows(CancellationException.class, future::join);
+        }
+
+        assertFalse(catalogCommit.interrupted());
+        DestinationResult persisted = destination(
+                catalog.findUnchecked(fixture.backupId()).orElseThrow().result(),
+                DestinationType.GIT);
+        assertEquals(DestinationStatus.PENDING_SYNC, persisted.status());
     }
 
     @Test
@@ -892,6 +1124,8 @@ class BackupRecoveryServiceTest {
 
         private BlockingStep syncBlock;
 
+        private Function<Path, CompletionStage<Path>> nestedMaterialization;
+
         private DestinationResult syncResult;
 
         private List<DestinationType> calls = new ArrayList<>();
@@ -927,6 +1161,11 @@ class BackupRecoveryServiceTest {
             int active = activeMaterializations.incrementAndGet();
             maximumActiveMaterializations.accumulateAndGet(active, Math::max);
             try {
+                if (nestedMaterialization != null) {
+                    GitRecoveryDestination.awaitMaterialization(
+                            nestedMaterialization.apply(emptyTarget));
+                    return;
+                }
                 if (materializationBlock != null) {
                     materializationBlock.block();
                 }
@@ -988,6 +1227,8 @@ class BackupRecoveryServiceTest {
     private static final class InMemoryCatalog implements BackupCatalog {
         private final ConcurrentMap<BackupId, BackupRecord> records = new ConcurrentHashMap<>();
 
+        private Runnable beforeUpdate;
+
         private Runnable afterUpdate;
 
         private InMemoryCatalog(BackupRecord... records) {
@@ -1033,6 +1274,9 @@ class BackupRecoveryServiceTest {
             if (existing == null) {
                 return Optional.empty();
             }
+            if (beforeUpdate != null) {
+                beforeUpdate.run();
+            }
             BackupRecord replacement = update.apply(existing);
             records.put(backupId, replacement);
             if (afterUpdate != null) {
@@ -1066,6 +1310,10 @@ class BackupRecoveryServiceTest {
             return interrupted.get();
         }
 
+        boolean enteredWithin(long timeout, TimeUnit unit) throws InterruptedException {
+            return entered.await(timeout, unit);
+        }
+
         void block() throws InterruptedException {
             entered.countDown();
             try {
@@ -1094,6 +1342,88 @@ class BackupRecoveryServiceTest {
                 Thread.currentThread().interrupt();
                 throw new AssertionError("Catalog publication was interrupted", exception);
             }
+        }
+    }
+
+    private static final class DelayedInterruptExecutor implements Executor, AutoCloseable {
+        private final CountDownLatch interruptEntered = new CountDownLatch(1);
+
+        private final CountDownLatch releaseInterrupt = new CountDownLatch(1);
+
+        private final CountDownLatch finished = new CountDownLatch(1);
+
+        private final AtomicReference<Thread> worker = new AtomicReference<>();
+
+        @Override
+        public void execute(Runnable command) {
+            Thread thread = new Thread(() -> {
+                try {
+                    command.run();
+                } finally {
+                    finished.countDown();
+                }
+            }, "delayed-recovery-interrupt") {
+                @Override
+                public void interrupt() {
+                    interruptEntered.countDown();
+                    boolean interrupted = false;
+                    while (true) {
+                        try {
+                            releaseInterrupt.await();
+                            break;
+                        } catch (InterruptedException exception) {
+                            interrupted = true;
+                        }
+                    }
+                    super.interrupt();
+                    if (interrupted) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            };
+            if (!worker.compareAndSet(null, thread)) {
+                throw new IllegalStateException("Delayed executor supports one task");
+            }
+            thread.start();
+        }
+
+        void awaitInterruptEntered() throws InterruptedException {
+            assertTrue(interruptEntered.await(5, TimeUnit.SECONDS));
+        }
+
+        void releaseInterrupt() {
+            releaseInterrupt.countDown();
+        }
+
+        void awaitFinished() throws InterruptedException {
+            assertTrue(finished.await(5, TimeUnit.SECONDS));
+        }
+
+        @Override
+        public void close() throws InterruptedException {
+            releaseInterrupt();
+            Thread thread = worker.get();
+            if (thread != null) {
+                thread.join(TimeUnit.SECONDS.toMillis(5));
+                assertFalse(thread.isAlive(), "Delayed executor worker did not finish");
+            }
+        }
+    }
+
+    private static final class DrainAwareFuture<T> extends CompletableFuture<T> {
+        private final CountDownLatch drainStarted = new CountDownLatch(1);
+
+        @Override
+        public <U> CompletableFuture<U> handle(
+                BiFunction<? super T, Throwable, ? extends U> function) {
+            drainStarted.countDown();
+            return super.handle(function);
+        }
+
+        void awaitDrainStarted() throws InterruptedException {
+            assertTrue(
+                    drainStarted.await(5, TimeUnit.SECONDS),
+                    "Interrupted materialization was not drained before cleanup");
         }
     }
 

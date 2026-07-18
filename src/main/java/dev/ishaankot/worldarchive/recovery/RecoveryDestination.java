@@ -17,6 +17,7 @@ interface RecoveryDestination {
     void materialize(BackupRecord record, DestinationResult destination, Path emptyTarget)
             throws Exception;
 
+    /** Returns true when the exact artifact was removed or its exact absence was confirmed. */
     boolean delete(BackupRecord record, DestinationResult destination) throws Exception;
 
     DestinationResult sync(BackupRecord record, DestinationResult destination) throws Exception;

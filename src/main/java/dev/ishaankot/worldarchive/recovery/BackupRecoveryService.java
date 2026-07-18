@@ -404,26 +404,27 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
             report(progressListener, progress(
                     operationId, current, BackupOperation.DELETE, OperationPhase.PREPARING,
                     0, present.size(), "Preparing destination deletion"));
+            if (present.isEmpty()) {
+                cancellation.commitIfActive(() -> {
+                    removeRecordWithoutArtifacts(current);
+                    return null;
+                });
+                cancellation.checkpoint();
+            }
             for (DestinationResult destination : present) {
                 cancellation.checkpoint();
                 RecoveryDestination adapter = destinations.get(destination.destination());
                 boolean removed = false;
                 if (adapter != null) {
                     try {
-                        removed = adapter.delete(current, destination);
+                        removed = cancellation.commitIfActive(() ->
+                                deleteAndPersist(current, destination, adapter));
                     } catch (InterruptedException exception) {
                         Thread.currentThread().interrupt();
                         throw exception;
-                    } catch (Exception exception) {
-                        removed = false;
                     }
                 }
                 if (removed) {
-                    DestinationKey deleted = DestinationKey.from(destination);
-                    cancellation.mandatoryCommit(() -> {
-                        persistSuccessfulDeletion(current, deleted);
-                        return null;
-                    });
                     attempts.add(new DestinationResult(
                             destination.destination(),
                             DestinationStatus.SUCCESS,
@@ -606,6 +607,37 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
         return List.copyOf(health);
     }
 
+    private boolean deleteAndPersist(
+            BackupRecord current,
+            DestinationResult destination,
+            RecoveryDestination adapter) throws Exception {
+        boolean removed;
+        try {
+            removed = adapter.delete(current, destination);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw exception;
+        } catch (Exception exception) {
+            return false;
+        }
+        if (removed) {
+            persistSuccessfulDeletion(current, DestinationKey.from(destination));
+        }
+        return removed;
+    }
+
+    private void removeRecordWithoutArtifacts(BackupRecord expected) throws IOException {
+        BackupRecord current = requireRecord(expected.manifest().backupId());
+        requireSameManifest(expected, current);
+        if (!presentDestinations(current).isEmpty()) {
+            throw new BackupRecoveryException(
+                    "Backup gained a destination before the catalog was updated");
+        }
+        if (!catalog.remove(current.manifest().backupId())) {
+            throw new BackupRecoveryException("Backup disappeared while updating the catalog");
+        }
+    }
+
     private void persistSuccessfulDeletion(
             BackupRecord expected,
             DestinationKey deleted) throws IOException {
@@ -768,27 +800,19 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
                 }
                 try {
                     return cancellation.pointOfNoReturn(() -> {
-                        directoryMove.move(
-                                staging.path(), target, StandardCopyOption.ATOMIC_MOVE);
                         try {
-                            root.requireUnchanged();
-                            BasicFileAttributes attributes = Files.readAttributes(
-                                    target,
-                                    BasicFileAttributes.class,
-                                    LinkOption.NOFOLLOW_LINKS);
-                            if (!attributes.isDirectory()
-                                    || attributes.isSymbolicLink()
-                                    || attributes.isOther()
-                                    || isWindowsReparsePoint(target)
-                                    || !Objects.equals(
-                                            target.toRealPath().getParent(), root.path())) {
-                                throw new IOException("Published restore target is unsafe");
-                            }
-                            staging.requireIdentityAt(target);
-                            return target;
-                        } catch (IOException | RuntimeException exception) {
-                            deleteTree(root.path(), target);
-                            throw exception;
+                            directoryMove.move(
+                                    staging.path(), target, StandardCopyOption.ATOMIC_MOVE);
+                        } catch (IOException moveFailure) {
+                            return reconcileAmbiguousPublication(
+                                    root, staging, target, moveFailure);
+                        }
+                        try {
+                            return requirePublishedRestore(root, staging, target);
+                        } catch (IOException | RuntimeException validationFailure) {
+                            cleanupPublishedStaging(
+                                    root, staging, target, validationFailure);
+                            throw validationFailure;
                         }
                     });
                 } catch (FileAlreadyExistsException exception) {
@@ -799,6 +823,53 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
         } finally {
             lock.unlock();
         }
+    }
+
+    private static Path reconcileAmbiguousPublication(
+            RestoreRoot root,
+            RestoreStaging staging,
+            Path target,
+            IOException moveFailure) throws IOException {
+        try {
+            return requirePublishedRestore(root, staging, target);
+        } catch (IOException | RuntimeException validationFailure) {
+            moveFailure.addSuppressed(validationFailure);
+            cleanupPublishedStaging(root, staging, target, moveFailure);
+            throw moveFailure;
+        }
+    }
+
+    private static void cleanupPublishedStaging(
+            RestoreRoot root,
+            RestoreStaging staging,
+            Path target,
+            Throwable failure) {
+        try {
+            staging.requireIdentityAt(target);
+            deleteTree(root.path(), target);
+        } catch (IOException | RuntimeException cleanupFailure) {
+            failure.addSuppressed(cleanupFailure);
+        }
+    }
+
+    private static Path requirePublishedRestore(
+            RestoreRoot root,
+            RestoreStaging staging,
+            Path target) throws IOException {
+        root.requireUnchanged();
+        BasicFileAttributes attributes = Files.readAttributes(
+                target,
+                BasicFileAttributes.class,
+                LinkOption.NOFOLLOW_LINKS);
+        if (!attributes.isDirectory()
+                || attributes.isSymbolicLink()
+                || attributes.isOther()
+                || isWindowsReparsePoint(target)
+                || !Objects.equals(target.toRealPath().getParent(), root.path())) {
+            throw new IOException("Published restore target is unsafe");
+        }
+        staging.requireIdentityAt(target);
+        return target;
     }
 
     private static String safeDirectoryName(String requestedName) {
@@ -1100,19 +1171,17 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
 
         @Override
         public boolean cancel(boolean mayInterruptIfRunning) {
-            Thread active = null;
             synchronized (this) {
                 if (pointOfNoReturn || isDone() || !super.cancel(false)) {
                     return false;
                 }
                 cancellationRequested = true;
                 interruptRequested = mayInterruptIfRunning;
-                if (mayInterruptIfRunning && mandatoryCommitDepth == 0) {
-                    active = runner;
+                if (mayInterruptIfRunning
+                        && mandatoryCommitDepth == 0
+                        && runner != null) {
+                    runner.interrupt();
                 }
-            }
-            if (active != null) {
-                active.interrupt();
             }
             return true;
         }

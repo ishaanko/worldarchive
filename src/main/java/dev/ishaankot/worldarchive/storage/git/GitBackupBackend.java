@@ -568,6 +568,10 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
         String refName = GitSnapshot.refName(worldId, backupId);
         Optional<String> current = resolveRef(refName);
         if (current.isEmpty()) {
+            if (settings.remoteUrl().isPresent() && resolveRemoteRef(refName).isPresent()) {
+                throw new GitStorageException(
+                        "Configured Git remote still contains the snapshot but its exact local commit is unavailable");
+            }
             return false;
         }
         if (settings.remoteUrl().isPresent()) {

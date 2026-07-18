@@ -73,7 +73,7 @@ final class GitRecoveryDestination implements RecoveryDestination {
             DestinationResult destination,
             Path emptyTarget) throws Exception {
         requireArtifact(record, destination);
-        Path restored = await(backend.restoreSnapshot(
+        Path restored = awaitMaterialization(backend.restoreSnapshot(
                 record.manifest().worldId(),
                 record.manifest().backupId(),
                 record.manifest(),
@@ -86,8 +86,9 @@ final class GitRecoveryDestination implements RecoveryDestination {
     @Override
     public boolean delete(BackupRecord record, DestinationResult destination) throws Exception {
         requireArtifact(record, destination);
-        return await(backend.deleteSnapshot(
-                record.manifest().worldId(), record.manifest().backupId()));
+        await(backend.deleteSnapshot(record.manifest().worldId(), record.manifest().backupId()));
+        // A false backend result means the exact local and configured remote refs are absent.
+        return true;
     }
 
     @Override
@@ -152,6 +153,16 @@ final class GitRecoveryDestination implements RecoveryDestination {
                 throw error;
             }
             throw new CompletionException(cause);
+        }
+    }
+
+    static <T> T awaitMaterialization(CompletionStage<T> stage) throws Exception {
+        try {
+            return await(stage);
+        } catch (InterruptedException exception) {
+            stage.toCompletableFuture().handle((ignored, failure) -> null).join();
+            Thread.currentThread().interrupt();
+            throw exception;
         }
     }
 }

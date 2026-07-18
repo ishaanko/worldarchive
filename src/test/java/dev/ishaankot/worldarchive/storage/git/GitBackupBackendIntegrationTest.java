@@ -341,9 +341,39 @@ class GitBackupBackendIntegrationTest {
             assertTrue(await(backend.deleteSnapshot(worldId, backupId)));
             assertTrue(remoteRef(remote, snapshotRef).isEmpty());
             assertTrue(await(backend.listSnapshots(Optional.of(worldId))).isEmpty());
+            assertFalse(await(backend.deleteSnapshot(worldId, backupId)));
             assertEquals(2, localDeleteAttempts.get());
         } finally {
             executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void refusesToReconcileMissingLocalSnapshotWhileExactRemoteRefExists() throws Exception {
+        Path remote = temporaryDirectory.resolve("remote-only-delete.git");
+        nativeGit("init", "--bare", remote.toString());
+        Path world = temporaryDirectory.resolve("remote-only-delete-world");
+        Files.createDirectories(world);
+        Files.writeString(world.resolve("level.dat"), "remote-only deletion");
+        WorldId worldId = WorldId.create();
+        BackupId backupId = BackupId.create();
+        String snapshotRef = GitSnapshot.refName(worldId, backupId);
+        GitBackendSettings remoteSettings = settings(Optional.of(remote.toUri().toString()));
+
+        try (GitBackupBackend backend = new GitBackupBackend(remoteSettings)) {
+            DestinationResult result = await(backend.createBackup(
+                    capture(world, worldId, backupId, Instant.now()),
+                    ProgressListener.NO_OP));
+            assertEquals(DestinationStatus.SUCCESS, result.status(), result.message().orElse(""));
+            nativeGit(
+                    "--git-dir=" + remoteSettings.repository(),
+                    "update-ref",
+                    "-d",
+                    snapshotRef);
+
+            assertThrows(GitStorageException.class, () ->
+                    await(backend.deleteSnapshot(worldId, backupId)));
+            assertTrue(remoteRef(remote, snapshotRef).isPresent());
         }
     }
 

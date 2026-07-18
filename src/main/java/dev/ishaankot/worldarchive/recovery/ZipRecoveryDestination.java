@@ -63,7 +63,9 @@ final class ZipRecoveryDestination implements RecoveryDestination {
 
     @Override
     public boolean delete(BackupRecord record, DestinationResult destination) throws Exception {
-        return store.delete(archivePath(record, destination));
+        store.delete(archivePath(record, destination));
+        // Successful exact-path inspection also reconciles an already-absent archive and sidecar.
+        return true;
     }
 
     @Override
