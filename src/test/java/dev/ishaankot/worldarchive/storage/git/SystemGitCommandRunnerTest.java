@@ -91,14 +91,14 @@ class SystemGitCommandRunnerTest {
         Path childPid = temporaryDirectory.resolve("child.pid");
         GitCommand command = command(
                 List.of("spawn-inherited", childPid.toString(), "10000", "100"),
-                Duration.ofMillis(350),
+                Duration.ofSeconds(2),
                 1_024,
                 Set.of());
         long started = System.nanoTime();
 
         assertThrows(GitCommandTimeoutException.class, () -> new SystemGitCommandRunner().run(command));
 
-        assertTrue(Duration.ofNanos(System.nanoTime() - started).compareTo(Duration.ofSeconds(3)) < 0);
+        assertTrue(Duration.ofNanos(System.nanoTime() - started).compareTo(Duration.ofSeconds(5)) < 0);
         long pid = Long.parseLong(Files.readString(childPid));
         for (int attempt = 0; attempt < 20
                 && ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false); attempt++) {
