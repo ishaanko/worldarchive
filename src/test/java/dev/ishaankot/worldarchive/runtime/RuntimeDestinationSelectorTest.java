@@ -1,6 +1,8 @@
 package dev.ishaankot.worldarchive.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.ishaankot.worldarchive.config.WorldArchiveConfig;
 import dev.ishaankot.worldarchive.core.BackupBackend;
@@ -40,14 +42,25 @@ final class RuntimeDestinationSelectorTest {
                 BackupTrigger.MANUAL);
 
         assertEquals(List.of(DestinationType.ZIP), types(selector.select(request)));
+        assertTrue(selector.warning().isEmpty());
+
+        selector.gitToolsAvailable(false);
+        assertEquals(List.of(DestinationType.ZIP), types(selector.select(request)));
+        assertTrue(selector.warning().isPresent());
 
         selector.gitToolsAvailable(true);
         assertEquals(
                 List.of(DestinationType.GIT, DestinationType.ZIP),
                 types(selector.select(request)));
+        assertTrue(selector.warning().isEmpty());
 
         selector.gitToolsAvailable(false);
         assertEquals(List.of(DestinationType.ZIP), types(selector.select(request)));
+        assertTrue(selector.warning().isPresent());
+
+        selector.gitDisabled();
+        assertEquals(List.of(DestinationType.ZIP), types(selector.select(request)));
+        assertFalse(selector.warning().isPresent());
     }
 
     private static List<DestinationType> types(List<BackupBackend> backends) {

@@ -38,6 +38,11 @@ public final class BackupBrowserScreen extends Screen {
 
     private static final int ACTION_GAP = 3;
 
+    private static final int CAPABILITY_POLL_INTERVAL_TICKS = 20;
+
+    /** Covers both sequential five-minute Git tool probes plus scheduling headroom. */
+    private static final int MAXIMUM_CAPABILITY_POLLS = 660;
+
     private final Screen parent;
 
     private final BackupWorldContext world;
@@ -52,7 +57,8 @@ public final class BackupBrowserScreen extends Screen {
 
     private List<BackupRecord> records = List.of();
 
-    private BackupBrowserCapabilities capabilities = new BackupBrowserCapabilities(false, false, false, false);
+    private BackupBrowserCapabilities capabilities = new BackupBrowserCapabilities(
+            false, false, false, false, Optional.empty());
 
     private BackupSort sort = BackupSort.NEWEST;
 
@@ -75,6 +81,12 @@ public final class BackupBrowserScreen extends Screen {
     private long lifecycle;
 
     private long requestRevision;
+
+    private int capabilityPollTicks;
+
+    private int capabilityPollsRemaining;
+
+    private boolean capabilityRefreshPending;
 
     private EditBox filterWidget;
 
@@ -134,6 +146,9 @@ public final class BackupBrowserScreen extends Screen {
         super.added();
         active = true;
         lifecycle++;
+        capabilityPollTicks = CAPABILITY_POLL_INTERVAL_TICKS;
+        capabilityPollsRemaining = MAXIMUM_CAPABILITY_POLLS;
+        capabilityRefreshPending = false;
         reloadData();
     }
 
@@ -143,6 +158,44 @@ public final class BackupBrowserScreen extends Screen {
         lifecycle++;
         requestRevision++;
         super.removed();
+    }
+
+    @Override
+    public void tick() {
+        super.tick();
+        if (!active
+                || capabilityRefreshPending
+                || capabilityPollsRemaining <= 0
+                || --capabilityPollTicks > 0) {
+            return;
+        }
+        capabilityPollTicks = CAPABILITY_POLL_INTERVAL_TICKS;
+        capabilityPollsRemaining--;
+        refreshCapabilities();
+    }
+
+    private void refreshCapabilities() {
+        long token = lifecycle;
+        capabilityRefreshPending = true;
+        CompletionStage<BackupBrowserCapabilities> refresh;
+        try {
+            refresh = Objects.requireNonNull(
+                    facade.browserCapabilities(world),
+                    "browserCapabilities result");
+        } catch (RuntimeException exception) {
+            capabilityRefreshPending = false;
+            return;
+        }
+        refresh.whenComplete((updated, throwable) -> minecraft.execute(() -> {
+            if (!active || lifecycle != token) {
+                return;
+            }
+            capabilityRefreshPending = false;
+            if (throwable == null && updated != null && !updated.equals(capabilities)) {
+                capabilities = updated;
+                rebuildIfInitialized();
+            }
+        }));
     }
 
     @Override
@@ -166,7 +219,9 @@ public final class BackupBrowserScreen extends Screen {
                 font));
         addFilterAndSort(contentX, contentWidth);
 
-        int paginationY = Math.max(88, height - 84);
+        int paginationY = Math.max(
+                88,
+                height - (capabilities.warning().isPresent() ? 100 : 84));
         int rowTop = 64;
         int rowCapacity = Math.max(1, (paginationY - rowTop) / (ROW_HEIGHT + ROW_GAP));
         BackupBrowserPage page = page(rowCapacity);
@@ -174,6 +229,7 @@ public final class BackupBrowserScreen extends Screen {
         selectedBackupId = page.selectedBackupId().orElse(null);
         addRows(page, contentX, contentWidth, rowTop);
         addPagination(page, contentX, contentWidth, paginationY);
+        addWarning(contentX, contentWidth);
         addStatus(contentX, contentWidth);
         addActions(page, contentX, contentWidth);
     }
@@ -310,13 +366,24 @@ public final class BackupBrowserScreen extends Screen {
                 font));
     }
 
+    private void addWarning(int x, int contentWidth) {
+        capabilities.warning().ifPresent(message -> addRenderableOnly(new StringWidget(
+                x,
+                Math.max(94, height - 80),
+                contentWidth,
+                14,
+                Component.literal(message).withStyle(ChatFormatting.YELLOW),
+                font)));
+    }
+
     private void addActions(BackupBrowserPage page, int x, int contentWidth) {
         Optional<BackupRow> selection = page.selectedRow();
         BackupBrowserCapabilities effectiveCapabilities = new BackupBrowserCapabilities(
                 busy || loading,
                 capabilities.createDestinationConfigured(),
                 capabilities.gitRemoteConfigured(),
-                capabilities.managedFolderAvailable());
+                capabilities.managedFolderAvailable(),
+                capabilities.warning());
         Map<BackupAction, BackupActionAvailability> availability = BackupActionPolicy.evaluate(
                 effectiveCapabilities,
                 selection);

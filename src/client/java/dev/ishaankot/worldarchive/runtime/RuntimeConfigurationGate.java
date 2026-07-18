@@ -1,5 +1,6 @@
 package dev.ishaankot.worldarchive.runtime;
 
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Keeps backup publication and destination-path settings transactions from overlapping. */
@@ -8,9 +9,11 @@ final class RuntimeConfigurationGate {
 
     private boolean configurationChange;
 
+    private int waitingConfigurationChanges;
+
     synchronized Permit enterBackup() {
         boolean interrupted = false;
-        while (configurationChange) {
+        while (configurationChange || waitingConfigurationChanges != 0) {
             try {
                 wait();
             } catch (InterruptedException exception) {
@@ -25,12 +28,59 @@ final class RuntimeConfigurationGate {
     }
 
     synchronized Permit tryEnterConfigurationChange() {
-        if (configurationChange || activeBackups != 0) {
+        if (configurationChange || waitingConfigurationChanges != 0 || activeBackups != 0) {
             throw new IllegalStateException(
                     "Destination paths cannot change while a backup is in progress");
         }
         configurationChange = true;
         return new Permit(this::leaveConfigurationChange);
+    }
+
+    synchronized Permit enterConfigurationChange() {
+        waitingConfigurationChanges++;
+        boolean interrupted = false;
+        try {
+            while (configurationChange || activeBackups != 0) {
+                try {
+                    wait();
+                } catch (InterruptedException exception) {
+                    interrupted = true;
+                }
+            }
+            configurationChange = true;
+            return new Permit(this::leaveConfigurationChange);
+        } finally {
+            waitingConfigurationChanges--;
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    synchronized Permit transitionBackupToConfigurationChange(Permit backupPermit) {
+        Permit backup = Objects.requireNonNull(backupPermit, "backupPermit");
+        waitingConfigurationChanges++;
+        if (!backup.releaseOnce()) {
+            waitingConfigurationChanges--;
+            throw new IllegalStateException("Backup permit is already closed");
+        }
+        boolean interrupted = false;
+        try {
+            while (configurationChange || activeBackups != 0) {
+                try {
+                    wait();
+                } catch (InterruptedException exception) {
+                    interrupted = true;
+                }
+            }
+            configurationChange = true;
+            return new Permit(this::leaveConfigurationChange);
+        } finally {
+            waitingConfigurationChanges--;
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     private synchronized void leaveBackup() {
@@ -60,9 +110,15 @@ final class RuntimeConfigurationGate {
 
         @Override
         public void close() {
+            releaseOnce();
+        }
+
+        private boolean releaseOnce() {
             if (closed.compareAndSet(false, true)) {
                 release.run();
+                return true;
             }
+            return false;
         }
     }
 }

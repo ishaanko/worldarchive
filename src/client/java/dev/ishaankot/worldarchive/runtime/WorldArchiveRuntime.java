@@ -78,6 +78,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
+import net.minecraft.ChatFormatting;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
@@ -86,6 +87,7 @@ import net.minecraft.client.gui.screens.PauseScreen;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.worldselection.SelectWorldScreen;
 import net.minecraft.client.server.IntegratedServer;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.util.Util;
 import net.minecraft.world.level.storage.LevelResource;
@@ -107,6 +109,8 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
     private final Path storageRoot;
 
     private final BackupCatalog catalog;
+
+    private final RuntimeNoticeStore noticeStore;
 
     private final FileWorldInventoryStore inventoryStore;
 
@@ -130,6 +134,8 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
 
     private final RuntimeWorldPathRegistry worldPaths = new RuntimeWorldPathRegistry();
 
+    private final RuntimeStorageSafety storageSafety = new RuntimeStorageSafety();
+
     private final RuntimeConfigurationGate configurationGate = new RuntimeConfigurationGate();
 
     private final RuntimeActionContextRegistry actionContexts =
@@ -140,6 +146,16 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
     private final RuntimeCoordinator coordinatorView = new RuntimeCoordinator();
 
     private final AtomicBoolean closed = new AtomicBoolean();
+
+    private final AtomicReference<Optional<String>> backgroundWarning =
+            new AtomicReference<>(Optional.empty());
+
+    private final Set<WorldId> worldSettingsFailures = ConcurrentHashMap.newKeySet();
+
+    private final AtomicReference<Optional<String>> retainedStartupWarning =
+            new AtomicReference<>(Optional.empty());
+
+    private final AtomicBoolean retainedWarningShown = new AtomicBoolean();
 
     private final Object stateLock = new Object();
 
@@ -166,6 +182,13 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
                 .toAbsolutePath()
                 .normalize()
                 .resolve("worldarchive");
+        this.noticeStore = new RuntimeNoticeStore(
+                storageRoot.resolve("last-background-warning.txt"));
+        try {
+            retainedStartupWarning.set(noticeStore.load());
+        } catch (IOException exception) {
+            LOGGER.warn("Stored background backup notice could not be loaded");
+        }
         this.catalog = new FileBackupCatalog(storageRoot.resolve("catalog.json"));
         this.inventoryStore = new FileWorldInventoryStore(storageRoot.resolve("inventories"));
         this.captureFactory = new FileSystemBackupCaptureFactory(storageRoot.resolve("capture-temp"));
@@ -211,11 +234,14 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
             WorldArchiveConfig resolved = new SettingsDefaults(storageRoot).resolve(config);
             RuntimeState current = stateRegistry.currentOrNull();
             if (current != null && current.config().equals(resolved)) {
+                clearPersistedWorldSettingsFailures(resolved);
                 return;
             }
             RuntimeState replacement = buildState(resolved);
             stateRegistry.install(replacement);
             reconcileWorldPathsAndSchedule(replacement);
+            refreshStorageSafety(replacement);
+            clearPersistedWorldSettingsFailures(resolved);
         }
         ensureLiveWorldResolution();
     }
@@ -253,6 +279,13 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
     private Runnable acquireConfigurationChange(WorldArchiveConfig config) {
         WorldArchiveConfig resolved = new SettingsDefaults(storageRoot).resolve(
                 Objects.requireNonNull(config, "config"));
+        try {
+            resolved.validateDestinations(worldPaths.snapshotPaths());
+        } catch (IOException exception) {
+            throw new IllegalArgumentException(
+                    safeMessage(exception, "A destination overlaps a known world folder"),
+                    exception);
+        }
         synchronized (stateLock) {
             RuntimeState current = stateRegistry.currentOrNull();
             if (closed.get() || current == null || current.storagePaths().equals(
@@ -329,6 +362,9 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
                     new IllegalStateException("Minecraft stopped before the pending save completed"));
         }
         if (!awaitExitWork(CLIENT_SHUTDOWN_WAIT)) {
+            observeExitResult(
+                    null,
+                    new IllegalStateException("World-exit backup did not settle before shutdown"));
             LOGGER.warn("WorldArchive exit work exceeded the bounded shutdown wait");
         }
         synchronized (stateLock) {
@@ -420,6 +456,10 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
             if (state == null || closed.get()) {
                 return failedStage("WorldArchive is still loading");
             }
+            Optional<String> storageIssue = storageIssue(state);
+            if (storageIssue.isPresent()) {
+                return failedStage(storageIssue.orElseThrow());
+            }
             CreateBackupRequest request = request(world, label, BackupTrigger.MANUAL);
             if (!registerWorldPath(world.worldId(), world.worldDirectory(), state)) {
                 return failedStage("The world identity is already registered to a different folder");
@@ -459,11 +499,14 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         }
         boolean folderAvailable = config.zip().destination().isPresent()
                 || config.git().repository().isPresent();
+        Optional<String> storageIssue = storageIssue(state);
         return CompletableFuture.completedFuture(new BackupBrowserCapabilities(
                 busyAcrossStates(world.worldId()),
-                sourceAvailable && createAvailable,
+                storageIssue.isEmpty() && sourceAvailable && createAvailable,
                 config.git().enabled() && config.git().remoteUrl().isPresent(),
-                folderAvailable));
+                storageIssue.isEmpty() && folderAvailable,
+                storageIssue.or(() -> worldSettingsWarning()
+                        .or(() -> backgroundWarning.get().or(state.selector()::warning)))));
     }
 
     @Override
@@ -472,30 +515,47 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
             Optional<BackupRow> selectedBackup) {
         Objects.requireNonNull(world, "world");
         Objects.requireNonNull(selectedBackup, "selectedBackup");
-        RuntimeState state = requireCurrentState();
-        Path destination = managedPath(state, world, selectedBackup);
+        RuntimeConfigurationGate.Permit permit = configurationGate.enterBackup();
+        boolean transferred = false;
         try {
+            RuntimeState state = requireCurrentState();
+            storageIssue(state).ifPresent(issue -> {
+                throw new IllegalStateException(issue);
+            });
+            Path destination = managedPath(state, world, selectedBackup);
             workerExecutor.execute(() -> {
+                boolean clientCallbackScheduled = false;
                 try {
                     Files.createDirectories(destination);
                     if (!closed.get()) {
                         minecraft.execute(() -> {
-                            if (closed.get()) {
-                                return;
-                            }
                             try {
-                                Util.getPlatform().openPath(destination);
+                                if (!closed.get()) {
+                                    Util.getPlatform().openPath(destination);
+                                }
                             } catch (RuntimeException exception) {
                                 logFailure("Managed backup folder could not be opened", exception);
+                            } finally {
+                                permit.close();
                             }
                         });
+                        clientCallbackScheduled = true;
                     }
-                } catch (IOException | SecurityException exception) {
+                } catch (IOException | RuntimeException exception) {
                     logFailure("Managed backup folder could not be opened", exception);
+                } finally {
+                    if (!clientCallbackScheduled) {
+                        permit.close();
+                    }
                 }
             });
+            transferred = true;
         } catch (RejectedExecutionException exception) {
             throw new IllegalStateException("WorldArchive is shutting down");
+        } finally {
+            if (!transferred) {
+                permit.close();
+            }
         }
     }
 
@@ -627,10 +687,15 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
                 runtimeSelector,
                 coordinator);
         if (config.git().enabled()) {
-            gitBackend.probeTools().whenComplete((health, throwable) ->
-                    runtimeSelector.gitToolsAvailable(throwable == null
-                            && health != null
-                            && health.available()));
+            gitBackend.probeTools().whenComplete((health, throwable) -> {
+                if (throwable != null || health == null) {
+                    runtimeSelector.gitToolProbeFailed();
+                } else {
+                    runtimeSelector.gitToolsAvailable(health.available());
+                }
+            });
+        } else {
+            runtimeSelector.gitDisabled();
         }
         return state;
     }
@@ -705,14 +770,22 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         }
 
         BackupWorldContext world = liveWorldFor(integrated);
+        Throwable resolutionFailure = null;
         if (world == null) {
             try {
                 world = resolveWorldBlocking(selectionFor(integrated)).orElse(null);
             } catch (IOException | RuntimeException exception) {
+                resolutionFailure = exception;
                 logFailure("Exit backup world identity could not be resolved", exception);
             }
         }
         if (world == null) {
+            observeExitResult(
+                    null,
+                    resolutionFailure == null
+                            ? new IllegalStateException(
+                                    "Exit backup world identity was unavailable")
+                            : resolutionFailure);
             return;
         }
         RuntimeConfigurationGate.Permit permit = configurationGate.enterBackup();
@@ -720,6 +793,17 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         try {
             RuntimeState state = stateRegistry.currentOrNull();
             if (state == null || closed.get()) {
+                observeExitResult(
+                        null,
+                        new IllegalStateException(
+                                "World-exit backup runtime was unavailable"));
+                return;
+            }
+            Optional<String> storageIssue = storageIssue(state);
+            if (storageIssue.isPresent()) {
+                observeExitResult(
+                        null,
+                        new IllegalStateException(storageIssue.orElseThrow()));
                 return;
             }
             CreateBackupRequest request = request(
@@ -816,6 +900,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
     }
 
     private void clientTick(Minecraft ignored) {
+        showRetainedBackgroundWarning();
         RuntimeState state = stateRegistry.currentOrNull();
         if (closed.get() || state == null || !state.config().triggers().scheduledEnabled()) {
             return;
@@ -844,6 +929,10 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
                     || busyAcrossStates(world.worldId())) {
                 return failedStage("Scheduled backup configuration changed before capture");
             }
+            Optional<String> storageIssue = storageIssue(state);
+            if (storageIssue.isPresent()) {
+                return failedStage(storageIssue.orElseThrow());
+            }
             CreateBackupRequest request = request(
                     world,
                     Optional.empty(),
@@ -853,11 +942,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
             }
             return queueRequestedSave(state, server, request, ProgressListener.NO_OP);
         })
-                .whenComplete((result, throwable) -> {
-                    if (throwable != null && !closed.get()) {
-                        logFailure("Scheduled backup did not complete", throwable);
-                    }
-                });
+                .whenComplete(this::observeScheduledResult);
     }
 
     private CompletionStage<BackupResult> queueRequestedSave(
@@ -983,7 +1068,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
             return Optional.empty();
         }
         WorldId worldId = identityStore.loadOrCreate(realWorld);
-        if (!registerWorldPath(worldId, realWorld, stateRegistry.currentOrNull())) {
+        if (!registerDiscoveredWorldPath(worldId, realWorld)) {
             return Optional.empty();
         }
         return Optional.of(new BackupWorldContext(worldId, selection));
@@ -1086,7 +1171,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         if (state != null && !matchesConfiguredWorld(worldId, world, state.config())) {
             return false;
         }
-        return worldPaths.register(worldId, world);
+        return worldPaths.isRegistered(worldId, world);
     }
 
     private boolean matchesKnownWorld(
@@ -1116,12 +1201,85 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
                         && !world.worldId().equals(worldId));
     }
 
-    private void registerRestoredWorld(RestoreBackupResult result) {
-        Path restored = result.restoredWorldDirectory().toAbsolutePath().normalize();
-        if (!worldPaths.register(result.restoredWorldId(), restored)) {
-            throw new IllegalStateException(
-                    "The restored world identity is already registered to a different folder");
+    private boolean registerDiscoveredWorldPath(
+            WorldId worldId,
+            Path worldDirectory) {
+        Path world = worldDirectory.toAbsolutePath().normalize();
+        RuntimeConfigurationGate.Permit permit = configurationGate.enterConfigurationChange();
+        try {
+            RuntimeState current = stateRegistry.currentOrNull();
+            if ((current == null || matchesConfiguredWorld(worldId, world, current.config()))
+                    && worldPaths.isRegistered(worldId, world)) {
+                registerSettingsWorld(worldId, world);
+                return true;
+            }
+            return registerDiscoveredWorldPathHeld(worldId, world, current);
+        } finally {
+            permit.close();
         }
+    }
+
+    private boolean registerDiscoveredWorldPathHeld(
+            WorldId worldId,
+            Path world,
+            RuntimeState state) {
+        if (state != null && !matchesConfiguredWorld(worldId, world, state.config())) {
+            return false;
+        }
+        if (!worldPaths.register(worldId, world)) {
+            return false;
+        }
+        if (state != null) {
+            refreshStorageSafety(state);
+        }
+        registerSettingsWorld(worldId, world);
+        return true;
+    }
+
+    private void registerSettingsWorld(WorldId worldId, Path worldDirectory) {
+        CompletionStage<WorldArchiveConfig> registration;
+        try {
+            registration = ClientSettingsAccess.registerWorld(worldId, worldDirectory);
+        } catch (RuntimeException exception) {
+            worldSettingsFailures.add(worldId);
+            logFailure("World settings could not be updated", exception);
+            return;
+        }
+        registration.whenComplete((ignored, throwable) -> {
+            if (throwable == null) {
+                worldSettingsFailures.remove(worldId);
+                return;
+            }
+            worldSettingsFailures.add(worldId);
+            logFailure("World settings could not be updated", throwable);
+        });
+    }
+
+    private Optional<String> worldSettingsWarning() {
+        return worldSettingsFailures.isEmpty()
+                ? Optional.empty()
+                : Optional.of("World settings could not be saved; review WorldArchive settings");
+    }
+
+    private void clearPersistedWorldSettingsFailures(WorldArchiveConfig config) {
+        config.worlds().stream()
+                .map(WorldConfig::worldId)
+                .forEach(worldSettingsFailures::remove);
+    }
+
+    private void refreshStorageSafety(RuntimeState state) {
+        if (stateRegistry.currentOrNull() == state) {
+            storageSafety.refresh(state.config(), worldPaths.snapshotPaths());
+        }
+    }
+
+    private Optional<String> storageIssue(RuntimeState state) {
+        Optional<String> issue = RuntimeStorageSafety.issue(
+                state.config(), worldPaths.snapshotPaths());
+        if (stateRegistry.currentOrNull() == state) {
+            storageSafety.refresh(state.config(), worldPaths.snapshotPaths());
+        }
+        return issue;
     }
 
     private Path managedPath(
@@ -1277,7 +1435,69 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
 
     private void trackExit(CompletableFuture<BackupResult> result) {
         exitWork.add(result);
-        result.whenComplete((ignored, throwable) -> exitWork.remove(result));
+        result.whenComplete((value, throwable) -> {
+            observeExitResult(value, throwable);
+            exitWork.remove(result);
+        });
+    }
+
+    private void observeScheduledResult(BackupResult result, Throwable throwable) {
+        Optional<String> warning = BackgroundBackupWarnings.scheduled(result, throwable);
+        if (warning.isEmpty()) {
+            backgroundWarning.set(Optional.empty());
+            return;
+        }
+        backgroundWarning.set(warning);
+        if (!closed.get()) {
+            minecraft.execute(() -> {
+                if (!closed.get()) {
+                    showClientWarning(warning.orElseThrow());
+                }
+            });
+        }
+    }
+
+    private void observeExitResult(BackupResult result, Throwable throwable) {
+        Optional<String> warning = BackgroundBackupWarnings.worldExit(result, throwable);
+        try {
+            if (warning.isPresent()) {
+                noticeStore.retain(warning.orElseThrow());
+            }
+        } catch (IOException exception) {
+            logFailure("World-exit backup notice could not be stored", exception);
+        }
+        if (warning.isPresent() && !closed.get()) {
+            backgroundWarning.set(warning);
+            minecraft.execute(() -> {
+                if (!closed.get()) {
+                    showClientWarning(warning.orElseThrow());
+                }
+            });
+        }
+    }
+
+    private void showRetainedBackgroundWarning() {
+        if (closed.get()) {
+            return;
+        }
+        Optional<String> retained = retainedStartupWarning.get();
+        if (retained.isEmpty() || !retainedWarningShown.compareAndSet(false, true)) {
+            return;
+        }
+        showClientWarning(retained.orElseThrow());
+        retainedStartupWarning.compareAndSet(retained, Optional.empty());
+        try {
+            noticeStore.clear();
+        } catch (IOException exception) {
+            logFailure("Background backup notice could not be cleared", exception);
+        }
+    }
+
+    private void showClientWarning(String message) {
+        minecraft.gui.chatListener().handleSystemMessage(
+                Component.literal("WorldArchive: " + message)
+                        .withStyle(ChatFormatting.YELLOW),
+                false);
     }
 
     private RuntimeState requireCurrentState() {
@@ -1384,6 +1604,10 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
                 if (!registerWorldPath(request.worldId(), request.worldDirectory(), state)) {
                     throw new IOException("The world identity is registered to a different folder");
                 }
+                Optional<String> storageIssue = storageIssue(state);
+                if (storageIssue.isPresent()) {
+                    throw new IOException(storageIssue.orElseThrow());
+                }
                 PreparedBackup prepared = state.coordinator().prepareCapture(
                         request,
                         progressListener);
@@ -1431,6 +1655,17 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
             if (ownership == null) {
                 return failedStage("Prepared capture does not belong to this runtime");
             }
+            Optional<String> storageIssue = storageIssue(ownership.state());
+            if (storageIssue.isPresent()) {
+                try {
+                    preparedBackup.close();
+                } catch (IOException exception) {
+                    ownership.permit().close();
+                    return CompletableFuture.failedFuture(exception);
+                }
+                ownership.permit().close();
+                return failedStage(storageIssue.orElseThrow());
+            }
             try {
                 CompletionStage<BackupResult> stage = ownership.state()
                         .coordinator()
@@ -1454,6 +1689,10 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
                 }
                 if (!registerWorldPath(request.worldId(), request.worldDirectory(), state)) {
                     return failedStage("The world identity is registered to a different folder");
+                }
+                Optional<String> storageIssue = storageIssue(state);
+                if (storageIssue.isPresent()) {
+                    return failedStage(storageIssue.orElseThrow());
                 }
                 return state.coordinator().createBackup(request, progressListener);
             });
@@ -1499,16 +1738,61 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         public CompletionStage<RestoreBackupResult> restoreBackup(
                 RestoreBackupRequest request,
                 ProgressListener progressListener) {
+            RuntimeConfigurationGate.Permit operationPermit = configurationGate.enterBackup();
             RuntimeState state = stateRegistry.currentOrNull();
             if (state == null || closed.get()) {
+                operationPermit.close();
                 return failedStage("WorldArchive is still loading");
             }
-            return state.coordinator()
-                    .restoreBackup(request, progressListener)
-                    .thenApply(result -> {
-                        registerRestoredWorld(result);
-                        return result;
-                    });
+            Optional<String> storageIssue = storageIssue(state);
+            if (storageIssue.isPresent()) {
+                operationPermit.close();
+                return failedStage(storageIssue.orElseThrow());
+            }
+            CompletionStage<RestoreBackupResult> operation;
+            try {
+                operation = state.coordinator().restoreBackup(request, progressListener);
+            } catch (RuntimeException | Error exception) {
+                operationPermit.close();
+                throw exception;
+            }
+            CompletableFuture<RestoreBackupResult> completion = new CompletableFuture<>();
+            operation.whenComplete((result, throwable) -> {
+                if (throwable != null || result == null) {
+                    operationPermit.close();
+                    completion.completeExceptionally(throwable == null
+                            ? new IllegalStateException("Restore completed without a result")
+                            : throwable);
+                    return;
+                }
+                RuntimeConfigurationGate.Permit registrationPermit = null;
+                Throwable registrationFailure = null;
+                try {
+                    registrationPermit = configurationGate
+                            .transitionBackupToConfigurationChange(operationPermit);
+                    Path restored = result.restoredWorldDirectory()
+                            .toAbsolutePath()
+                            .normalize();
+                    if (!registerDiscoveredWorldPathHeld(
+                            result.restoredWorldId(), restored, stateRegistry.currentOrNull())) {
+                        throw new IllegalStateException(
+                                "The restored world identity is registered to another folder");
+                    }
+                } catch (RuntimeException | Error exception) {
+                    operationPermit.close();
+                    registrationFailure = exception;
+                } finally {
+                    if (registrationPermit != null) {
+                        registrationPermit.close();
+                    }
+                }
+                if (registrationFailure == null) {
+                    completion.complete(result);
+                } else {
+                    completion.completeExceptionally(registrationFailure);
+                }
+            });
+            return completion;
         }
 
         @Override
@@ -1523,55 +1807,103 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         public CompletionStage<BackupResult> deleteBackup(
                 DeleteBackupRequest request,
                 ProgressListener progressListener) {
-            RuntimeState state = stateRegistry.currentOrNull();
-            return state == null || closed.get()
-                    ? failedStage("WorldArchive is still loading")
-                    : state.coordinator().deleteBackup(request, progressListener);
+            return withBackupPermit(() -> {
+                RuntimeState state = stateRegistry.currentOrNull();
+                if (state == null || closed.get()) {
+                    return failedStage("WorldArchive is still loading");
+                }
+                Optional<String> storageIssue = storageIssue(state);
+                return storageIssue.isPresent()
+                        ? failedStage(storageIssue.orElseThrow())
+                        : state.coordinator().deleteBackup(request, progressListener);
+            });
         }
 
         @Override
         public CompletionStage<BackupResult> verifyBackup(
                 BackupId backupId,
                 ProgressListener progressListener) {
-            RuntimeState state = stateRegistry.currentOrNull();
-            return state == null || closed.get()
-                    ? failedStage("WorldArchive is still loading")
-                    : state.coordinator().verifyBackup(backupId, progressListener);
+            return withBackupPermit(() -> {
+                RuntimeState state = stateRegistry.currentOrNull();
+                if (state == null || closed.get()) {
+                    return failedStage("WorldArchive is still loading");
+                }
+                Optional<String> storageIssue = storageIssue(state);
+                return storageIssue.isPresent()
+                        ? failedStage(storageIssue.orElseThrow())
+                        : state.coordinator().verifyBackup(backupId, progressListener);
+            });
         }
 
         @Override
         public CompletionStage<BackupResult> syncBackup(
                 BackupId backupId,
                 ProgressListener progressListener) {
-            RuntimeState state = stateRegistry.currentOrNull();
-            return state == null || closed.get()
-                    ? failedStage("WorldArchive is still loading")
-                    : state.coordinator().syncBackup(backupId, progressListener);
+            return withBackupPermit(() -> {
+                RuntimeState state = stateRegistry.currentOrNull();
+                if (state == null || closed.get()) {
+                    return failedStage("WorldArchive is still loading");
+                }
+                Optional<String> storageIssue = storageIssue(state);
+                return storageIssue.isPresent()
+                        ? failedStage(storageIssue.orElseThrow())
+                        : state.coordinator().syncBackup(backupId, progressListener);
+            });
         }
 
         @Override
         public CompletionStage<List<DestinationHealth>> health(Optional<WorldId> worldId) {
-            RuntimeState state = stateRegistry.currentOrNull();
-            if (state == null || closed.get()) {
-                return failedStage("WorldArchive is still loading");
-            }
-            if (!state.config().git().enabled() && !state.config().zip().enabled()) {
-                return CompletableFuture.completedFuture(disabledHealth(state.config()));
-            }
-            return state.coordinator().health(worldId).thenApply(health -> {
-                health.stream()
-                        .filter(item -> item.destination() == DestinationType.GIT)
-                        .findFirst()
-                        .ifPresent(item -> {
-                            if (item.status() == DestinationHealthStatus.HEALTHY) {
-                                state.selector().gitToolsAvailable(true);
-                            } else if (item.status() == DestinationHealthStatus.TOOL_MISSING) {
-                                state.selector().gitToolsAvailable(false);
-                            }
-                        });
-                return configuredHealth(state.config(), health);
+            return withBackupPermit(() -> {
+                RuntimeState state = stateRegistry.currentOrNull();
+                if (state == null || closed.get()) {
+                    return failedStage("WorldArchive is still loading");
+                }
+                if (storageIssue(state).isPresent()) {
+                    return CompletableFuture.completedFuture(storageAwareHealth(
+                            state.config(), disabledHealth(state.config())));
+                }
+                if (!state.config().git().enabled() && !state.config().zip().enabled()) {
+                    return CompletableFuture.completedFuture(disabledHealth(state.config()));
+                }
+                return state.coordinator().health(worldId).thenApply(health -> {
+                    health.stream()
+                            .filter(item -> item.destination() == DestinationType.GIT)
+                            .findFirst()
+                            .ifPresent(item -> {
+                                if (item.status() == DestinationHealthStatus.HEALTHY) {
+                                    state.selector().gitToolsAvailable(true);
+                                } else if (item.status() == DestinationHealthStatus.TOOL_MISSING) {
+                                    state.selector().gitToolsAvailable(false);
+                                }
+                            });
+                    return storageAwareHealth(
+                            state.config(), configuredHealth(state.config(), health));
+                });
             });
         }
+    }
+
+    private List<DestinationHealth> storageAwareHealth(
+            WorldArchiveConfig config,
+            List<DestinationHealth> health) {
+        Optional<String> issue = storageSafety.warning();
+        if (issue.isEmpty()) {
+            return health;
+        }
+        return health.stream()
+                .map(item -> {
+                    boolean enabled = item.destination() == DestinationType.GIT
+                            ? config.git().enabled()
+                            : config.zip().enabled();
+                    return enabled
+                            ? new DestinationHealth(
+                                    item.destination(),
+                                    DestinationHealthStatus.UNAVAILABLE,
+                                    issue.orElseThrow(),
+                                    clock.instant())
+                            : item;
+                })
+                .toList();
     }
 
     private List<DestinationHealth> configuredHealth(

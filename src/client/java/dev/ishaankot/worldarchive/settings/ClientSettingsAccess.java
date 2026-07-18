@@ -4,7 +4,9 @@ import dev.ishaankot.worldarchive.WorldArchiveMetadata;
 import dev.ishaankot.worldarchive.config.WorldArchiveConfig;
 import dev.ishaankot.worldarchive.config.WorldArchiveConfigStore;
 import dev.ishaankot.worldarchive.config.WorldIdentityStore;
+import dev.ishaankot.worldarchive.config.WorldConfig;
 import dev.ishaankot.worldarchive.model.SensitiveDataRedactor;
+import dev.ishaankot.worldarchive.model.WorldId;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -13,6 +15,7 @@ import java.util.Objects;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -78,6 +81,8 @@ public final class ClientSettingsAccess {
 
     private static volatile SettingsHealthProbe healthProbe;
 
+    private static volatile Path worldsDirectory;
+
     private static volatile WorldArchiveConfig fallbackConfig = WorldArchiveConfig.defaults();
 
     private static volatile CompletableFuture<Void> initialization =
@@ -109,6 +114,7 @@ public final class ClientSettingsAccess {
         }
 
         Path savesDirectory = gameDirectory.resolve("saves");
+        worldsDirectory = savesDirectory;
         initialization = CompletableFuture.runAsync(
                 () -> loadAndDiscoverWorlds(savesDirectory),
                 SETTINGS_EXECUTOR);
@@ -142,7 +148,8 @@ public final class ClientSettingsAccess {
             List<Runnable> releases = List.of();
             try {
                 releases = acquireConfigurationGuards(config);
-                currentRepository.save(config);
+                WorldArchiveConfig refreshed = refreshWorlds(config);
+                currentRepository.save(refreshed);
                 WorldArchiveConfig saved = currentRepository.current();
                 STATUS.set("Settings saved");
                 publishConfiguration(saved);
@@ -164,7 +171,9 @@ public final class ClientSettingsAccess {
             List<Path> knownWorldPaths) {
         Objects.requireNonNull(draft, "draft");
         List<Path> worlds = List.copyOf(Objects.requireNonNull(knownWorldPaths, "knownWorldPaths"));
-        return CompletableFuture.supplyAsync(() -> draft.validate(worlds), SETTINGS_EXECUTOR);
+        return CompletableFuture.supplyAsync(
+                () -> draft.validate(mergedWorldPaths(worlds, KNOWN_WORLD_PATHS.get())),
+                SETTINGS_EXECUTOR);
     }
 
     public static CancellableRequest<SettingsHealthSnapshot> probeHealth(
@@ -214,6 +223,52 @@ public final class ClientSettingsAccess {
         return KNOWN_WORLD_PATHS.get();
     }
 
+    /** Immediately remembers a runtime world path and asynchronously persists its identity. */
+    public static CompletionStage<WorldArchiveConfig> registerWorld(
+            WorldId worldId,
+            Path worldDirectory) {
+        Objects.requireNonNull(worldId, "worldId");
+        Path world = Objects.requireNonNull(worldDirectory, "worldDirectory")
+                .toAbsolutePath()
+                .normalize();
+        initialize();
+        rememberWorldPaths(List.of(world));
+        WorldArchiveSettingsRepository currentRepository = repository;
+        if (currentRepository == null) {
+            return CompletableFuture.failedFuture(
+                    new IOException("Settings storage is unavailable"));
+        }
+        try {
+            currentRepository.current().validateDestinations(KNOWN_WORLD_PATHS.get());
+        } catch (IOException exception) {
+            STATUS.set(safeMessage(
+                    exception, "A destination overlaps the newly registered world"));
+            throw new IllegalArgumentException(
+                    safeMessage(exception, "A destination overlaps the newly registered world"),
+                    exception);
+        }
+        return initialization.thenApplyAsync(ignored -> {
+            try {
+                WorldArchiveConfig current = currentRepository.current();
+                WorldArchiveConfig candidate = upsertWorld(current, worldId, world);
+                WorldArchiveConfig refreshed = refreshWorlds(candidate);
+                if (!refreshed.equals(current)) {
+                    List<Runnable> releases = acquireConfigurationGuards(refreshed);
+                    try {
+                        currentRepository.save(refreshed);
+                        publishConfiguration(currentRepository.current());
+                    } finally {
+                        releaseConfigurationGuards(releases);
+                    }
+                }
+                return currentRepository.current();
+            } catch (IOException exception) {
+                STATUS.set(safeMessage(exception, "World settings could not be saved"));
+                throw new CompletionException(exception);
+            }
+        }, SETTINGS_EXECUTOR);
+    }
+
     public static String status() {
         return STATUS.get();
     }
@@ -233,11 +288,24 @@ public final class ClientSettingsAccess {
         if (!SHUT_DOWN.compareAndSet(false, true)) {
             return;
         }
-        CONFIGURATION_GUARDS.clear();
-        CONFIGURATION_LISTENERS.clear();
         HEALTH_EXECUTOR.shutdownNow();
         PICKER_EXECUTOR.shutdownNow();
-        SETTINGS_EXECUTOR.shutdownNow();
+        SETTINGS_EXECUTOR.shutdown();
+        boolean interrupted = false;
+        try {
+            if (!SETTINGS_EXECUTOR.awaitTermination(5, TimeUnit.SECONDS)) {
+                SETTINGS_EXECUTOR.shutdownNow();
+            }
+        } catch (InterruptedException exception) {
+            interrupted = true;
+            SETTINGS_EXECUTOR.shutdownNow();
+        } finally {
+            CONFIGURATION_GUARDS.clear();
+            CONFIGURATION_LISTENERS.clear();
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     private static void loadAndDiscoverWorlds(Path savesDirectory) {
@@ -247,7 +315,7 @@ public final class ClientSettingsAccess {
         }
         try {
             List<Path> paths = WorldFolderDiscovery.discover(savesDirectory);
-            KNOWN_WORLD_PATHS.set(paths);
+            rememberWorldPaths(paths);
             WorldArchiveConfig loaded = currentRepository.load();
             List<DiscoveredWorld> discovered = discoverWorldIdentities(paths);
             WorldReconciliation reconciliation = WorldConfigReconciler.reconcile(
@@ -292,6 +360,72 @@ public final class ClientSettingsAccess {
             }
         }
         return List.copyOf(discovered);
+    }
+
+    private static WorldArchiveConfig refreshWorlds(WorldArchiveConfig config) throws IOException {
+        Path savesDirectory = worldsDirectory;
+        if (savesDirectory == null) {
+            return config;
+        }
+        return refreshWorlds(config, savesDirectory, ClientSettingsAccess::rememberWorldPaths);
+    }
+
+    static WorldArchiveConfig refreshWorlds(
+            WorldArchiveConfig config,
+            Path savesDirectory,
+            Consumer<List<Path>> pathConsumer) throws IOException {
+        List<Path> paths = WorldFolderDiscovery.discover(savesDirectory);
+        pathConsumer.accept(paths);
+        WorldReconciliation reconciliation = WorldConfigReconciler.reconcile(
+                config.worlds(), discoverWorldIdentities(paths));
+        reconciliation.errors().forEach(error -> LOGGER.warn("World discovery: {}", error));
+        return withWorlds(config, reconciliation.worlds());
+    }
+
+    static WorldArchiveConfig upsertWorld(
+            WorldArchiveConfig config,
+            WorldId worldId,
+            Path worldDirectory) {
+        WorldReconciliation reconciliation = WorldConfigReconciler.reconcile(
+                config.worlds(),
+                List.of(DiscoveredWorld.success(worldDirectory, worldId)));
+        return withWorlds(config, reconciliation.worlds());
+    }
+
+    static List<Path> mergedWorldPaths(List<Path> existing, List<Path> additions) {
+        List<Path> merged = new ArrayList<>(existing.size() + additions.size());
+        for (Path path : existing) {
+            Path normalized = Objects.requireNonNull(path, "knownWorldPath")
+                    .toAbsolutePath()
+                    .normalize();
+            if (!merged.contains(normalized)) {
+                merged.add(normalized);
+            }
+        }
+        for (Path path : additions) {
+            Path normalized = Objects.requireNonNull(path, "knownWorldPath")
+                    .toAbsolutePath()
+                    .normalize();
+            if (!merged.contains(normalized)) {
+                merged.add(normalized);
+            }
+        }
+        return List.copyOf(merged);
+    }
+
+    private static void rememberWorldPaths(List<Path> paths) {
+        KNOWN_WORLD_PATHS.updateAndGet(existing -> mergedWorldPaths(existing, paths));
+    }
+
+    private static WorldArchiveConfig withWorlds(
+            WorldArchiveConfig config,
+            List<WorldConfig> worlds) {
+        return new WorldArchiveConfig(
+                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
+                config.triggers(),
+                config.git(),
+                config.zip(),
+                worlds);
     }
 
     private static void publishConfiguration(WorldArchiveConfig config) {
