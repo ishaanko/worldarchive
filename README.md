@@ -15,8 +15,10 @@ successful copy, and restores only into a new world.
 - System Git and Git LFS on `PATH` to use the Git destination
 
 Git and Git LFS are optional if only ZIP backups are wanted. Both tools must be
-available for Git backups; otherwise that destination is skipped and an enabled
-ZIP destination can still succeed.
+available for Git backups. If either is missing at startup, WorldArchive disables
+Git with a persistent warning and an enabled ZIP destination can still succeed.
+If a previously healthy tool disappears during a backup, Git fails visibly so
+a successful ZIP copy is reported as partial success rather than full success.
 
 ## Install
 
@@ -126,6 +128,9 @@ fresh UUID in `.worldarchive/world.json` together with the source backup ID, the
 can be selected on the world list or opened immediately. When restoring from
 the active world, WorldArchive fully saves and disconnects that world before it
 navigates to the restored copy, so the original session lock is released first.
+If the local Git repository was lost but the configured remote still has the
+snapshot, WorldArchive verifies the remote manifest against the catalog before it
+installs the exact local ref and restores the copy.
 
 WorldArchive rejects unsafe destination overlap, path traversal, symbolic links,
 Windows reparse points, special files, path collisions, and filesystem identity

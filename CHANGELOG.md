@@ -35,6 +35,8 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - Java 25 unit and Git/LFS/ZIP integration coverage, Checkstyle, formatting,
   license and clean-room checks, Gradle wrapper, and GitHub Actions builds on
   Windows and Linux.
+- Exact packaged Fabric API metadata, repository-wide implementation provenance
+  scanning, and focused legacy/unsupported manifest compatibility coverage.
 
 ### Fixed
 
@@ -58,6 +60,10 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   materialization before cleaning its staging directory.
 - Recovered abandoned private captures conservatively and closed prepared-capture,
   configuration-transaction, and live-startup ownership races.
+- Restored remote-only Git snapshots through the public recovery path, binding
+  the fetched manifest to the catalog before installing its canonical local ref.
+- Reported post-startup Git/Git LFS disappearance as an enabled-destination
+  failure so a durable ZIP copy remains a visible partial success.
 
 ### Security
 
@@ -70,5 +76,7 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   artifacts.
 - Destructive deletion requires a short-lived one-use confirmation, and stale
   Git lock files are never removed automatically.
+- Bound restore cleanup to exact directory identities across Windows filesystems
+  without file keys, interrupted Git publication, and adversarial path replacement.
 
 [Unreleased]: https://github.com/ishaankot/worldarchive
