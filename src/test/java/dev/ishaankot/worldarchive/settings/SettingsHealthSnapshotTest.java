@@ -57,4 +57,22 @@ class SettingsHealthSnapshotTest {
                 DestinationHealthStatus.UNCONFIGURED,
                 snapshot.zipDestinationHealth(Instant.EPOCH).status());
     }
+
+    @Test
+    void failedProbePreservesDisabledAndUnconfiguredComponents() {
+        SettingsHealthSnapshot snapshot = SettingsHealthSnapshot.unavailable(
+                new SettingsProbeRequest(
+                        true,
+                        "git",
+                        Optional.empty(),
+                        false,
+                        false,
+                        Optional.of(Path.of("archives"))),
+                "probe failed");
+
+        assertEquals(SettingsHealthStatus.UNAVAILABLE, snapshot.gitTool().status());
+        assertEquals(SettingsHealthStatus.UNCONFIGURED, snapshot.repository().status());
+        assertEquals(SettingsHealthStatus.UNCONFIGURED, snapshot.remote().status());
+        assertEquals(SettingsHealthStatus.DISABLED, snapshot.zipDirectory().status());
+    }
 }

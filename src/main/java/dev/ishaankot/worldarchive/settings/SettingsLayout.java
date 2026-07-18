@@ -7,7 +7,7 @@ public record SettingsLayout(
         int buttonsY,
         int worldPageSize,
         int gitSectionCount) {
-    public static final int COMPACT_HEIGHT_THRESHOLD = 235;
+    public static final int COMPACT_HEIGHT_THRESHOLD = 240;
 
     public SettingsLayout {
         if (statusY < 0 || buttonsY < 0 || worldPageSize < 1 || gitSectionCount < 1) {
@@ -32,10 +32,13 @@ public record SettingsLayout(
     }
 
     public int gitLastRow(int section) {
+        if (section < 0 || section >= gitSectionCount) {
+            throw new IllegalArgumentException("Git settings section is out of range");
+        }
         if (!compact) {
             return 165;
         }
-        return section == 0 ? 119 : 119;
+        return 99;
     }
 
     public boolean contentClearsStatus(int lastRow, int widgetHeight) {

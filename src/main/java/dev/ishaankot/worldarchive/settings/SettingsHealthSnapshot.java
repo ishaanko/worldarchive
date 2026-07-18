@@ -43,6 +43,55 @@ public record SettingsHealthSnapshot(
                 zipState);
     }
 
+    /** Produces a safe failed-probe result while preserving disabled and unconfigured states. */
+    public static SettingsHealthSnapshot unavailable(SettingsProbeRequest request, String message) {
+        Objects.requireNonNull(request, "request");
+        SettingsHealthItem unavailable = new SettingsHealthItem(
+                SettingsHealthStatus.UNAVAILABLE,
+                Objects.requireNonNull(message, "message"));
+        SettingsHealthItem disabled = SettingsHealthItem.disabled();
+        SettingsHealthItem unconfigured = new SettingsHealthItem(
+                SettingsHealthStatus.UNCONFIGURED,
+                "not configured");
+        SettingsHealthItem gitToolState = request.gitEnabled() ? unavailable : disabled;
+        SettingsHealthItem repositoryState = componentFailureState(
+                request.gitEnabled(),
+                request.gitRepository().isPresent(),
+                unavailable,
+                disabled,
+                unconfigured);
+        SettingsHealthItem remoteState = componentFailureState(
+                request.gitEnabled(),
+                request.remoteConfigured(),
+                unavailable,
+                disabled,
+                unconfigured);
+        SettingsHealthItem zipState = componentFailureState(
+                request.zipEnabled(),
+                request.zipDirectory().isPresent(),
+                unavailable,
+                disabled,
+                unconfigured);
+        return new SettingsHealthSnapshot(
+                gitToolState,
+                gitToolState,
+                repositoryState,
+                remoteState,
+                zipState);
+    }
+
+    private static SettingsHealthItem componentFailureState(
+            boolean enabled,
+            boolean configured,
+            SettingsHealthItem unavailable,
+            SettingsHealthItem disabled,
+            SettingsHealthItem unconfigured) {
+        if (!enabled) {
+            return disabled;
+        }
+        return configured ? unavailable : unconfigured;
+    }
+
     private static SettingsHealthItem configuredState(boolean enabled, boolean configured) {
         if (!enabled) {
             return SettingsHealthItem.disabled();
