@@ -789,7 +789,7 @@ public final class WorldArchiveSettingsScreen extends Screen {
                 closeToParent();
                 return;
             }
-            transientStatus = Component.translatable("screen.worldarchive.settings.save_failed");
+            transientStatus = Component.literal(ClientSettingsAccess.status());
             rebuildIfInitialized();
         }));
     }

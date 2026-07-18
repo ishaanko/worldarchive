@@ -52,6 +52,28 @@ public final class PreparedBackup implements AutoCloseable {
         return operationId;
     }
 
+    /** Adds an observer that runs once when this capture is claimed or closed. */
+    public void addReleaseObserver(Runnable observer) {
+        Runnable additional = Objects.requireNonNull(observer, "observer");
+        while (true) {
+            Runnable current = releaseObserver.get();
+            if (current == null) {
+                additional.run();
+                return;
+            }
+            Runnable chained = () -> {
+                try {
+                    current.run();
+                } finally {
+                    additional.run();
+                }
+            };
+            if (releaseObserver.compareAndSet(current, chained)) {
+                return;
+            }
+        }
+    }
+
     Resources claim() {
         Resources resources = ownership.getAndSet(null);
         if (resources == null) {

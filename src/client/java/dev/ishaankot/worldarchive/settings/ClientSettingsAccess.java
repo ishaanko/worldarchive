@@ -13,12 +13,16 @@ import java.util.Objects;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
+import java.util.function.Function;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.Screen;
@@ -59,6 +63,15 @@ public final class ClientSettingsAccess {
     private static final AtomicReference<String> STATUS =
             new AtomicReference<>("Loading settings...");
 
+    private static final CopyOnWriteArrayList<Consumer<WorldArchiveConfig>> CONFIGURATION_LISTENERS =
+            new CopyOnWriteArrayList<>();
+
+    private static final CopyOnWriteArrayList<Function<WorldArchiveConfig, Runnable>>
+            CONFIGURATION_GUARDS =
+            new CopyOnWriteArrayList<>();
+
+    private static final AtomicBoolean SHUT_DOWN = new AtomicBoolean();
+
     private static volatile WorldArchiveSettingsRepository repository;
 
     private static volatile SettingsDefaults settingsDefaults;
@@ -74,7 +87,7 @@ public final class ClientSettingsAccess {
     }
 
     public static synchronized void initialize() {
-        if (repository != null || settingsDefaults != null) {
+        if (SHUT_DOWN.get() || repository != null || settingsDefaults != null) {
             return;
         }
         Path gameDirectory = Minecraft.getInstance().gameDirectory.toPath()
@@ -126,13 +139,22 @@ public final class ClientSettingsAccess {
         }
         STATUS.set("Saving settings...");
         return initialization.thenApplyAsync(ignored -> {
+            List<Runnable> releases = List.of();
             try {
+                releases = acquireConfigurationGuards(config);
                 currentRepository.save(config);
+                WorldArchiveConfig saved = currentRepository.current();
                 STATUS.set("Settings saved");
-                return currentRepository.current();
+                publishConfiguration(saved);
+                return saved;
             } catch (IOException exception) {
                 STATUS.set(safeMessage(exception, "Settings could not be saved"));
                 throw new SettingsSaveException("Settings could not be saved", exception);
+            } catch (RuntimeException exception) {
+                STATUS.set(safeMessage(exception, "Settings could not be saved"));
+                throw exception;
+            } finally {
+                releaseConfigurationGuards(releases);
             }
         }, SETTINGS_EXECUTOR);
     }
@@ -196,6 +218,28 @@ public final class ClientSettingsAccess {
         return STATUS.get();
     }
 
+    /** Registers a process-lifetime listener for successfully loaded or saved configurations. */
+    public static void addConfigurationListener(Consumer<WorldArchiveConfig> listener) {
+        CONFIGURATION_LISTENERS.add(Objects.requireNonNull(listener, "listener"));
+    }
+
+    /** Registers a save guard held from pre-persistence validation through publication. */
+    public static void addConfigurationGuard(Function<WorldArchiveConfig, Runnable> guard) {
+        CONFIGURATION_GUARDS.add(Objects.requireNonNull(guard, "guard"));
+    }
+
+    /** Stops client-owned settings, health, and folder-picker workers. */
+    public static void shutdown() {
+        if (!SHUT_DOWN.compareAndSet(false, true)) {
+            return;
+        }
+        CONFIGURATION_GUARDS.clear();
+        CONFIGURATION_LISTENERS.clear();
+        HEALTH_EXECUTOR.shutdownNow();
+        PICKER_EXECUTOR.shutdownNow();
+        SETTINGS_EXECUTOR.shutdownNow();
+    }
+
     private static void loadAndDiscoverWorlds(Path savesDirectory) {
         WorldArchiveSettingsRepository currentRepository = repository;
         if (currentRepository == null) {
@@ -225,6 +269,7 @@ public final class ClientSettingsAccess {
                         + " world folder(s) need attention");
                 reconciliation.errors().forEach(error -> LOGGER.warn("World discovery: {}", error));
             }
+            publishConfiguration(currentRepository.current());
         } catch (IOException exception) {
             STATUS.set(safeMessage(exception, "Settings could not be loaded; using defaults"));
             LOGGER.error("WorldArchive settings could not be loaded", exception);
@@ -247,6 +292,39 @@ public final class ClientSettingsAccess {
             }
         }
         return List.copyOf(discovered);
+    }
+
+    private static void publishConfiguration(WorldArchiveConfig config) {
+        for (Consumer<WorldArchiveConfig> listener : CONFIGURATION_LISTENERS) {
+            try {
+                listener.accept(config);
+            } catch (RuntimeException exception) {
+                LOGGER.warn(
+                        "WorldArchive configuration listener failed: {}",
+                        safeMessage(exception, "Configuration listener failed"));
+            }
+        }
+    }
+
+    private static List<Runnable> acquireConfigurationGuards(WorldArchiveConfig config) {
+        List<Runnable> releases = new ArrayList<>(CONFIGURATION_GUARDS.size());
+        try {
+            for (Function<WorldArchiveConfig, Runnable> guard : CONFIGURATION_GUARDS) {
+                releases.add(Objects.requireNonNull(
+                        guard.apply(config),
+                        "configuration guard release"));
+            }
+            return List.copyOf(releases);
+        } catch (RuntimeException | Error exception) {
+            releaseConfigurationGuards(releases);
+            throw exception;
+        }
+    }
+
+    private static void releaseConfigurationGuards(List<Runnable> releases) {
+        for (int index = releases.size() - 1; index >= 0; index--) {
+            releases.get(index).run();
+        }
     }
 
     private static CancellableRequest<SettingsHealthSnapshot> completedRequest(

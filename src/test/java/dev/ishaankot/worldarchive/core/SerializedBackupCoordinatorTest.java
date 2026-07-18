@@ -161,6 +161,41 @@ final class SerializedBackupCoordinatorTest {
     }
 
     @Test
+    void preparedCaptureReleaseObserversRunOnceForCloseAndClaim() throws Exception {
+        SerializedBackupCoordinator coordinator = coordinator(
+                new InMemoryCatalog(),
+                new InMemoryInventoryStore(),
+                new FakeCaptureFactory(temporaryDirectory.resolve("captures")),
+                List.of(FakeBackend.success(DestinationType.ZIP)),
+                BackupCaptureGate.DIRECT,
+                new LockingWorldOperationGate());
+        CreateBackupRequest request = request(
+                WorldId.create(), "world-a", BackupTrigger.MANUAL, Optional.empty());
+        AtomicInteger closedReleases = new AtomicInteger();
+        PreparedBackup closed = coordinator.prepareCapture(
+                request,
+                CaptureProgressListener.NO_OP);
+        closed.addReleaseObserver(closedReleases::incrementAndGet);
+
+        closed.close();
+        closed.close();
+        assertEquals(1, closedReleases.get());
+        AtomicInteger lateReleases = new AtomicInteger();
+        closed.addReleaseObserver(lateReleases::incrementAndGet);
+        assertEquals(1, lateReleases.get());
+
+        AtomicInteger claimedReleases = new AtomicInteger();
+        PreparedBackup claimed = coordinator.prepareCapture(
+                request,
+                CaptureProgressListener.NO_OP);
+        claimed.addReleaseObserver(claimedReleases::incrementAndGet);
+        coordinator.createPreparedBackup(claimed, ProgressListener.NO_OP)
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
+        assertEquals(1, claimedReleases.get());
+    }
+
+    @Test
     void coalescesCompatibleCreatesSerializesOneWorldAndRunsOtherWorld() throws Exception {
         InMemoryCatalog catalog = new InMemoryCatalog();
         InMemoryInventoryStore inventories = new InMemoryInventoryStore();
