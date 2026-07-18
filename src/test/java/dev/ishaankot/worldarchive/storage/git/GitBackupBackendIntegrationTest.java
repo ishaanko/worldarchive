@@ -77,8 +77,10 @@ class GitBackupBackendIntegrationTest {
         BackupId firstId = BackupId.create();
 
         try (GitBackupBackend backend = new GitBackupBackend(settings)) {
+            BackupCapture firstCapture = capture(
+                    world, worldId, firstId, Instant.now().minusSeconds(5));
             DestinationResult first = await(backend.createBackup(
-                    capture(world, worldId, firstId, Instant.now().minusSeconds(5)),
+                    firstCapture,
                     ProgressListener.NO_OP));
             assertEquals(DestinationStatus.SUCCESS, first.status(), first.message().orElse(""));
 
@@ -89,9 +91,10 @@ class GitBackupBackendIntegrationTest {
             Files.write(world.resolve("region/r.0.0.mca"), secondRegion);
             Map<String, byte[]> secondExpected = worldFiles(world);
             BackupId secondId = BackupId.create();
+            BackupCapture secondCapture = capture(world, worldId, secondId, Instant.now());
 
             DestinationResult second = await(backend.createBackup(
-                    capture(world, worldId, secondId, Instant.now()),
+                    secondCapture,
                     ProgressListener.NO_OP));
             assertEquals(DestinationStatus.SUCCESS, second.status(), second.message().orElse(""));
 
@@ -100,8 +103,12 @@ class GitBackupBackendIntegrationTest {
             assertEquals(2, snapshots.stream().map(GitSnapshot::commitId).distinct().count());
             assertTrue(snapshots.stream().allMatch(
                     snapshot -> snapshot.refName().startsWith("refs/heads/worldarchive/")));
-            assertTrue(await(backend.verifySnapshot(worldId, firstId)).valid());
-            assertTrue(await(backend.verifySnapshot(worldId, secondId)).valid());
+            GitVerification firstVerification = await(backend.verifySnapshot(worldId, firstId));
+            GitVerification secondVerification = await(backend.verifySnapshot(worldId, secondId));
+            assertTrue(firstVerification.valid());
+            assertTrue(secondVerification.valid());
+            assertEquals(firstCapture.manifest(), firstVerification.manifest().orElseThrow());
+            assertEquals(secondCapture.manifest(), secondVerification.manifest().orElseThrow());
 
             Path firstRestore = temporaryDirectory.resolve("restore first Ω");
             await(backend.restoreSnapshot(worldId, firstId, firstRestore));

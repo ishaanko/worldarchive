@@ -138,7 +138,27 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
         Objects.requireNonNull(backupId, "backupId");
         Objects.requireNonNull(emptyStaging, "emptyStaging");
         return submit(() -> withRepositoryLock(
-                () -> restoreSnapshotBlocking(worldId, backupId, emptyStaging)));
+                () -> restoreSnapshotBlocking(
+                        worldId, backupId, Optional.empty(), emptyStaging)));
+    }
+
+    /** Restores only when the verified embedded manifest exactly matches the catalog manifest. */
+    public CompletionStage<Path> restoreSnapshot(
+            WorldId worldId,
+            BackupId backupId,
+            BackupManifest expectedManifest,
+            Path emptyStaging) {
+        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(backupId, "backupId");
+        Objects.requireNonNull(expectedManifest, "expectedManifest");
+        Objects.requireNonNull(emptyStaging, "emptyStaging");
+        if (!expectedManifest.worldId().equals(worldId)
+                || !expectedManifest.backupId().equals(backupId)) {
+            throw new IllegalArgumentException("Expected Git manifest identity does not match the snapshot");
+        }
+        return submit(() -> withRepositoryLock(
+                () -> restoreSnapshotBlocking(
+                        worldId, backupId, Optional.of(expectedManifest), emptyStaging)));
     }
 
     public CompletionStage<Boolean> deleteSnapshot(WorldId worldId, BackupId backupId) {
@@ -362,19 +382,36 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
         requireBareRepository();
         GitSnapshot snapshot = resolveSnapshot(worldId, backupId);
         try {
-            verifySnapshotCommit(snapshot);
-            return new GitVerification(snapshot, true, "Git and Git LFS objects verified");
+            VerifiedSnapshot verified = verifySnapshotCommit(snapshot);
+            return new GitVerification(
+                    snapshot,
+                    Optional.of(verified.manifest().manifest()),
+                    true,
+                    "Git and Git LFS objects verified");
         } catch (IOException | GitStorageException exception) {
-            return new GitVerification(snapshot, false, safeMessage(exception));
+            return new GitVerification(
+                    snapshot,
+                    Optional.empty(),
+                    false,
+                    safeMessage(exception));
         }
     }
 
-    private Path restoreSnapshotBlocking(WorldId worldId, BackupId backupId, Path emptyStaging)
+    private Path restoreSnapshotBlocking(
+            WorldId worldId,
+            BackupId backupId,
+            Optional<BackupManifest> expectedManifest,
+            Path emptyStaging)
             throws IOException, InterruptedException, GitStorageException {
         ensureRepository();
         ResolvedSnapshot resolved = resolveVerifiedSnapshotForRestore(worldId, backupId);
         GitSnapshot snapshot = resolved.snapshot();
         VerifiedSnapshot verified = resolved.verified();
+        if (expectedManifest.isPresent()
+                && !expectedManifest.orElseThrow().equals(verified.manifest().manifest())) {
+            throw new GitStorageException(
+                    "Git snapshot manifest does not exactly match the catalog");
+        }
         Path target = emptyStaging.toAbsolutePath().normalize();
         rejectRepositoryTargetOverlap(target);
         try (GitRestorePublication publication = GitRestorePublication.create(target)) {
