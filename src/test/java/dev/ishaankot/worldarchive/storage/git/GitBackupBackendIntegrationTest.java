@@ -192,6 +192,80 @@ class GitBackupBackendIntegrationTest {
     }
 
     @Test
+    void remoteAuthenticationFailureIsPendingAndCredentialSafe() throws Exception {
+        Path remote = temporaryDirectory.resolve("auth-failure-remote.git");
+        nativeGit("init", "--bare", remote.toString());
+        Path world = Files.createDirectories(temporaryDirectory.resolve("auth-failure-world"));
+        Files.writeString(world.resolve("notes.txt"), "local remains durable", StandardCharsets.UTF_8);
+        WorldId worldId = WorldId.create();
+        BackupId backupId = BackupId.create();
+        GitBackendSettings remoteSettings = settings(Optional.of(remote.toUri().toString()));
+        SystemGitCommandRunner systemRunner = new SystemGitCommandRunner();
+        GitCommandRunner authenticationFailure = command -> {
+            if (command.arguments().contains("push")) {
+                throw new IOException(
+                        "authentication failed password=visible-secret token=ghp_1234567890abcdef");
+            }
+            return systemRunner.run(command);
+        };
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try (GitBackupBackend backend = new GitBackupBackend(
+                remoteSettings,
+                authenticationFailure,
+                executor)) {
+            DestinationResult result = await(backend.createBackup(
+                    capture(world, worldId, backupId, Instant.now()),
+                    ProgressListener.NO_OP));
+
+            assertEquals(DestinationStatus.PENDING_SYNC, result.status());
+            String message = result.message().orElseThrow();
+            assertTrue(message.toLowerCase(java.util.Locale.ROOT).contains("authentication"));
+            assertFalse(message.contains("visible-secret"));
+            assertFalse(message.contains("ghp_1234567890abcdef"));
+            assertEquals(backupId, await(backend.listSnapshots(Optional.of(worldId)))
+                    .getFirst().backupId());
+            assertTrue(remoteRef(remote, GitSnapshot.refName(worldId, backupId)).isEmpty());
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void remoteWithoutLfsLeavesVerifiedLocalSnapshotPendingSync() throws Exception {
+        Path remote = temporaryDirectory.resolve("no-lfs-remote.git");
+        nativeGit("init", "--bare", remote.toString());
+        Path world = Files.createDirectories(temporaryDirectory.resolve("no-lfs-world"));
+        Files.createDirectories(world.resolve("region"));
+        Files.write(world.resolve("region/r.0.0.mca"), bytes(8_192, 41));
+        WorldId worldId = WorldId.create();
+        BackupId backupId = BackupId.create();
+        GitBackendSettings remoteSettings = settings(Optional.of(remote.toUri().toString()));
+        SystemGitCommandRunner systemRunner = new SystemGitCommandRunner();
+        GitCommandRunner remoteWithoutLfs = command -> {
+            if (command.arguments().contains("lfs") && command.arguments().contains("push")) {
+                throw new IOException("remote does not support Git LFS uploads");
+            }
+            return systemRunner.run(command);
+        };
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try (GitBackupBackend backend = new GitBackupBackend(
+                remoteSettings,
+                remoteWithoutLfs,
+                executor)) {
+            DestinationResult result = await(backend.createBackup(
+                    capture(world, worldId, backupId, Instant.now()),
+                    ProgressListener.NO_OP));
+
+            assertEquals(DestinationStatus.PENDING_SYNC, result.status());
+            assertTrue(result.message().orElseThrow().contains("does not support Git LFS"));
+            assertTrue(await(backend.verifySnapshot(worldId, backupId)).valid());
+            assertTrue(remoteRef(remote, GitSnapshot.refName(worldId, backupId)).isEmpty());
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void successfulRemotePushUsesTheHeadsNamespace() throws Exception {
         Path remote = temporaryDirectory.resolve("remote repository.git");
         nativeGit("init", "--bare", remote.toString());
