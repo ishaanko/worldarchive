@@ -173,7 +173,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
 
     private boolean clientStopping;
 
-    private final LiveBackupSaveGate<PendingLiveBackup> liveSaveGate =
+    private final LiveBackupSaveGate<MinecraftServer, PendingLiveBackup> liveSaveGate =
             new LiveBackupSaveGate<>();
 
     private ScheduleState scheduleState;
@@ -865,15 +865,23 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
                     request,
                     ProgressListener.NO_OP,
                     new CompletableFuture<>());
-            PendingLiveBackup displaced;
+            LiveBackupSaveGate.ExitInstall<PendingLiveBackup> installation;
             synchronized (lifecycleLock) {
                 if (activeServer != integrated || stoppingServer != integrated) {
                     return;
                 }
-                displaced = liveSaveGate.replaceWithExit(exit).orElse(null);
+                installation = liveSaveGate.installExit(integrated, exit);
+            }
+            if (!installation.installed()) {
+                observeExitResult(
+                        null,
+                        new IllegalStateException(
+                                "Another integrated world is still completing its exit backup"));
+                return;
             }
             exit.settled().whenComplete((ignored, throwable) -> permit.close());
             transferred = true;
+            PendingLiveBackup displaced = installation.displaced().orElse(null);
             if (displaced != null) {
                 displaced.fail(
                         new IllegalStateException("World shutdown replaced the pending manual save"));
@@ -887,46 +895,52 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
     }
 
     private void afterSave(MinecraftServer server, boolean flush, boolean force) {
-        PendingLiveBackup pending;
+        PendingLiveBackup requested;
         synchronized (lifecycleLock) {
-            pending = liveSaveGate.pending().orElse(null);
-            if (pending == null || pending.server() != server) {
-                return;
+            requested = liveSaveGate.observeRequestedSave(server, flush, force).orElse(null);
+            if (requested == null) {
+                liveSaveGate.observeExitSave(
+                        server,
+                        flush,
+                        force);
             }
-            Optional<PendingLiveBackup> consumed = liveSaveGate.consume(
-                    pending,
-                    stoppingServer == server,
-                    flush,
-                    force);
-            if (consumed.isEmpty()) {
-                return;
-            }
-            pending = consumed.orElseThrow();
         }
-        captureAndDispatch(pending);
+        if (requested != null) {
+            captureAndDispatch(requested);
+        }
     }
 
     private void serverStopped(MinecraftServer server) {
-        PendingLiveBackup abandoned = null;
+        LiveBackupSaveGate.StopResult<PendingLiveBackup> stopped;
         boolean shutdownAfterServer;
         synchronized (lifecycleLock) {
-            if (activeServer != server && stoppingServer != server) {
+            if (activeServer != server
+                    && stoppingServer != server
+                    && !liveSaveGate.ownedBy(server)) {
                 return;
             }
-            PendingLiveBackup pending = liveSaveGate.pending().orElse(null);
-            if (pending != null && pending.server() == server) {
-                abandoned = liveSaveGate.clear(pending).orElse(null);
+            stopped = liveSaveGate.stop(server);
+            if (activeServer == server) {
+                activeServer = null;
+                liveWorld = null;
+                scheduleState = null;
+                liveWorldRevision++;
             }
-            activeServer = null;
-            stoppingServer = null;
-            liveWorld = null;
-            scheduleState = null;
-            liveWorldRevision++;
-            shutdownAfterServer = clientStopping;
+            if (stoppingServer == server) {
+                stoppingServer = null;
+            }
+            shutdownAfterServer = clientStopping
+                    && activeServer == null
+                    && stoppingServer == null;
         }
-        if (abandoned != null) {
-            abandoned.fail(
+        switch (stopped.kind()) {
+            case NONE -> { }
+            case REQUEST_ABANDONED -> stopped.value().orElseThrow().fail(
+                    new IllegalStateException("The server stopped before the pending save completed"));
+            case EXIT_MISSING_SAVE -> stopped.value().orElseThrow().fail(
                     new IllegalStateException("The server stopped before its final save completed"));
+            case EXIT_READY -> captureAndDispatch(stopped.value().orElseThrow());
+            default -> throw new IllegalStateException("Unknown live-save stop outcome");
         }
         if (shutdownAfterServer) {
             shutdown();
@@ -1011,7 +1025,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
             if (liveSaveGate.hasPending()) {
                 return failedStage("Another world save is already pending");
             }
-            if (!liveSaveGate.queueRequested(pending)) {
+            if (!liveSaveGate.queueRequested(server, pending)) {
                 return failedStage("Another world save is already pending");
             }
         }
@@ -1029,7 +1043,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
                     || stoppingServer == pending.server()) {
                 return;
             }
-            if (!liveSaveGate.armRequested(pending)) {
+            if (!liveSaveGate.armRequested(pending.server(), pending)) {
                 return;
             }
         }
@@ -1040,7 +1054,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
             logFailure("Requested world save failed", exception);
         } finally {
             synchronized (lifecycleLock) {
-                if (liveSaveGate.clear(pending).isPresent()) {
+                if (liveSaveGate.clear(pending.server(), pending).isPresent()) {
                     pending.fail(new IllegalStateException(
                             "The requested save produced no matching capture event"));
                 }
@@ -1473,7 +1487,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
 
     private void clearAndFailPending(PendingLiveBackup pending, String message) {
         synchronized (lifecycleLock) {
-            liveSaveGate.clear(pending);
+            liveSaveGate.clear(pending.server(), pending);
         }
         pending.fail(new IllegalStateException(message));
     }
@@ -1503,6 +1517,11 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
     }
 
     private void observeExitResult(BackupResult result, Throwable throwable) {
+        if (throwable != null) {
+            logFailure("World-exit backup did not complete", throwable);
+        } else if (result == null) {
+            LOGGER.warn("World-exit backup completed without a result");
+        }
         Optional<String> warning = BackgroundBackupWarnings.worldExit(result, throwable);
         try {
             if (warning.isPresent()) {
