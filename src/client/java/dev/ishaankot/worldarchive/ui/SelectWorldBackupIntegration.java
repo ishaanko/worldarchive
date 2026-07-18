@@ -258,10 +258,10 @@ public final class SelectWorldBackupIntegration {
                     .collect(ArrayList::new, ArrayList::add, ArrayList::addAll);
             if (bottomRow.isEmpty()) {
                 backupsButton.setRectangle(
-                        Math.max(10, (screen.width - 100) / 2),
-                        Math.max(5, screen.height - 28),
                         100,
-                        20);
+                        20,
+                        Math.max(10, (screen.width - 100) / 2),
+                        Math.max(5, screen.height - 28));
                 return;
             }
 
@@ -272,7 +272,7 @@ public final class SelectWorldBackupIntegration {
             int usedWidth = buttonWidth * bottomRow.size() + GAP * (bottomRow.size() - 1);
             int x = (screen.width - usedWidth) / 2;
             for (Button button : bottomRow) {
-                button.setRectangle(x, bottomY, buttonWidth, 20);
+                button.setRectangle(buttonWidth, 20, x, bottomY);
                 x += buttonWidth + GAP;
             }
         }
