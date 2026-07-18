@@ -236,9 +236,15 @@ class GitBackupBackendIntegrationTest {
         GitCommandRunner failFirstLocalDelete = command -> {
             if (command.arguments().contains("update-ref")
                     && command.arguments().contains("-d")
-                    && command.arguments().contains(snapshotRef)
-                    && localDeleteAttempts.getAndIncrement() == 0) {
-                throw new IOException("simulated local ref deletion failure");
+                    && command.arguments().contains(snapshotRef)) {
+                int attempt = localDeleteAttempts.getAndIncrement();
+                if (attempt == 0) {
+                    throw new IOException("simulated local ref deletion failure");
+                }
+                if (attempt == 1) {
+                    systemRunner.run(command);
+                    throw new GitCommandTimeoutException(Duration.ofMillis(1));
+                }
             }
             return systemRunner.run(command);
         };
@@ -261,6 +267,7 @@ class GitBackupBackendIntegrationTest {
             assertTrue(await(backend.deleteSnapshot(worldId, backupId)));
             assertTrue(remoteRef(remote, snapshotRef).isEmpty());
             assertTrue(await(backend.listSnapshots(Optional.of(worldId))).isEmpty());
+            assertEquals(2, localDeleteAttempts.get());
         } finally {
             executor.shutdownNow();
         }

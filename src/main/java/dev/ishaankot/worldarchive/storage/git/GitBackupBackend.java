@@ -975,16 +975,34 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
 
     private void deleteExactRef(String refName, String expectedCommit)
             throws IOException, InterruptedException, GitStorageException {
-        runChecked(gitCommand(
-                List.of(
-                        "--git-dir=" + settings.repository(),
-                        "update-ref",
-                        "-d",
-                        refName,
-                        expectedCommit),
-                settings.repository(),
-                Map.of(),
-                new byte[0]));
+        try {
+            runChecked(gitCommand(
+                    List.of(
+                            "--git-dir=" + settings.repository(),
+                            "update-ref",
+                            "-d",
+                            refName,
+                            expectedCommit),
+                    settings.repository(),
+                    Map.of(),
+                    new byte[0]));
+        } catch (IOException | InterruptedException | GitStorageException exception) {
+            boolean wasInterrupted = Thread.interrupted();
+            boolean restoreInterrupt = exception instanceof InterruptedException || wasInterrupted;
+            try {
+                if (resolveRef(refName).isEmpty()) {
+                    return;
+                }
+            } catch (IOException | InterruptedException | GitStorageException verificationFailure) {
+                exception.addSuppressed(verificationFailure);
+                restoreInterrupt = restoreInterrupt || verificationFailure instanceof InterruptedException;
+            } finally {
+                if (restoreInterrupt) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            throw exception;
+        }
         if (resolveRef(refName).isPresent()) {
             throw new GitStorageException("Git ref could not be removed");
         }
