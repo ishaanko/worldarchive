@@ -164,7 +164,21 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
                     0,
                     0,
                     "Preparing private world capture"));
-            Optional<WorldInventory> previous = inventoryStore.load(request.worldId());
+            Optional<WorldInventory> loadedInventory;
+            try {
+                loadedInventory = inventoryStore.load(request.worldId());
+            } catch (IOException exception) {
+                loadedInventory = Optional.empty();
+                capturePreparations.put(request.worldId(), preparationProgress(
+                        request,
+                        backupId,
+                        operationId,
+                        OperationPhase.PREPARING,
+                        0,
+                        0,
+                        "Change inventory is unavailable; capturing a full baseline"));
+            }
+            Optional<WorldInventory> previous = loadedInventory;
             captured = captureFactory.capture(
                     request,
                     backupId,
@@ -422,8 +436,19 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
             if (captured == null) {
                 try (WorldOperationGate.Permit ignored = captureMutex.enter(
                         operation.request.worldId())) {
-                    Optional<WorldInventory> previous = inventoryStore.load(
-                            operation.request.worldId());
+                    Optional<WorldInventory> loadedInventory;
+                    try {
+                        loadedInventory = inventoryStore.load(operation.request.worldId());
+                    } catch (IOException exception) {
+                        loadedInventory = Optional.empty();
+                        report(
+                                operation,
+                                OperationPhase.PREPARING,
+                                0,
+                                0,
+                                "Change inventory is unavailable; capturing a full baseline");
+                    }
+                    Optional<WorldInventory> previous = loadedInventory;
                     operation.previousInventoryPresent = previous.isPresent();
                     captured = captureGate.capture(() -> captureFactory.capture(
                             operation.request,

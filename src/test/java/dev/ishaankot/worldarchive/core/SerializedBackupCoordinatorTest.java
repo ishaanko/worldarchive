@@ -277,6 +277,40 @@ final class SerializedBackupCoordinatorTest {
     }
 
     @Test
+    void corruptInventoryDoesNotBlockManualOrPreparedExitBackups() throws Exception {
+        InMemoryCatalog catalog = new InMemoryCatalog();
+        InMemoryInventoryStore inventories = new InMemoryInventoryStore();
+        inventories.loadFailure = new IOException("simulated corrupt inventory");
+        FakeBackend backend = FakeBackend.success(DestinationType.ZIP);
+        SerializedBackupCoordinator coordinator = coordinator(
+                catalog,
+                inventories,
+                new FakeCaptureFactory(temporaryDirectory.resolve("corrupt-inventory-captures")),
+                List.of(backend),
+                BackupCaptureGate.DIRECT,
+                new LockingWorldOperationGate());
+        WorldId worldId = WorldId.create();
+
+        BackupResult manual = coordinator.createBackup(
+                        request(worldId, "world-corrupt-inventory", BackupTrigger.MANUAL, Optional.empty()),
+                        ProgressListener.NO_OP)
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
+        PreparedBackup preparedExit = coordinator.prepareCapture(
+                request(worldId, "world-corrupt-inventory", BackupTrigger.WORLD_EXIT, Optional.empty()),
+                CaptureProgressListener.NO_OP);
+        BackupResult exit = coordinator.createPreparedBackup(preparedExit, ProgressListener.NO_OP)
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
+
+        assertEquals(BackupStatus.SUCCESS, manual.status());
+        assertEquals(BackupStatus.SUCCESS, exit.status());
+        assertEquals(2, backend.calls.get());
+        assertEquals(2, catalog.records.size());
+        assertTrue(inventories.values.containsKey(worldId));
+    }
+
+    @Test
     void cancellationInterruptsCaptureAndPublishesNothing() throws Exception {
         Path world = Files.createDirectory(temporaryDirectory.resolve("world-cancel"));
         Files.writeString(world.resolve("level.dat"), "contents", StandardCharsets.UTF_8);
@@ -594,8 +628,13 @@ final class SerializedBackupCoordinatorTest {
     private static final class InMemoryInventoryStore implements WorldInventoryStore {
         private final Map<WorldId, WorldInventory> values = new ConcurrentHashMap<>();
 
+        private IOException loadFailure;
+
         @Override
-        public Optional<WorldInventory> load(WorldId worldId) {
+        public Optional<WorldInventory> load(WorldId worldId) throws IOException {
+            if (loadFailure != null) {
+                throw loadFailure;
+            }
             return Optional.ofNullable(values.get(worldId));
         }
 
