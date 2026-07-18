@@ -91,7 +91,7 @@ final class ZipSourceScanner {
         entries.sort(Comparator.comparing(SourceEntry::relativePath));
         return new SourceSnapshot(
                 worldDirectory,
-                SourceFingerprint.from(rootAttributes),
+                DirectoryFingerprint.from(rootAttributes),
                 List.copyOf(entries));
     }
 
@@ -152,10 +152,24 @@ final class ZipSourceScanner {
     private static void requireSameSnapshot(SourceSnapshot expected) throws IOException {
         SourceSnapshot current = snapshot(expected.worldDirectory());
         if (!expected.rootFingerprint().equals(current.rootFingerprint())
-                || !expected.entries().equals(current.entries())) {
+                || !sameEntries(expected.entries(), current.entries())) {
             throw new ZipBackupException(
                     "The world tree changed while the ZIP backup was being created");
         }
+    }
+
+    private static boolean sameEntries(
+            List<SourceEntry> expected,
+            List<SourceEntry> current) {
+        if (expected.size() != current.size()) {
+            return false;
+        }
+        for (int index = 0; index < expected.size(); index++) {
+            if (!expected.get(index).sameSource(current.get(index))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static boolean isExcludedTree(Path relative) {
@@ -192,7 +206,7 @@ final class ZipSourceScanner {
 
     record SourceSnapshot(
             Path worldDirectory,
-            SourceFingerprint rootFingerprint,
+            DirectoryFingerprint rootFingerprint,
             List<SourceEntry> entries) {
         SourceSnapshot {
             Objects.requireNonNull(worldDirectory, "worldDirectory");
@@ -205,16 +219,17 @@ final class ZipSourceScanner {
         }
     }
 
-    private record SourceFingerprint(
+    /** Directory mtimes are deferred on Windows; identity and membership remain authoritative. */
+    private record DirectoryFingerprint(
             Object fileKey,
-            long size,
-            FileTime lastModifiedTime,
             FileTime creationTime) {
-        static SourceFingerprint from(BasicFileAttributes attributes) {
-            return new SourceFingerprint(
+        private DirectoryFingerprint {
+            Objects.requireNonNull(creationTime, "creationTime");
+        }
+
+        static DirectoryFingerprint from(BasicFileAttributes attributes) {
+            return new DirectoryFingerprint(
                     attributes.fileKey(),
-                    attributes.size(),
-                    attributes.lastModifiedTime(),
                     attributes.creationTime());
         }
     }
@@ -257,6 +272,18 @@ final class ZipSourceScanner {
                     attributes.lastModifiedTime(),
                     attributes.creationTime(),
                     attributes.fileKey());
+        }
+
+        boolean sameSource(SourceEntry other) {
+            if (!path.equals(other.path)
+                    || !relativePath.equals(other.relativePath)
+                    || directory != other.directory
+                    || !creationTime.equals(other.creationTime)
+                    || !Objects.equals(fileKey, other.fileKey)) {
+                return false;
+            }
+            return directory
+                    || size == other.size && lastModifiedTime.equals(other.lastModifiedTime);
         }
     }
 }
