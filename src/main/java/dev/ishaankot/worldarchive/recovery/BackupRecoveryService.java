@@ -28,12 +28,14 @@ import dev.ishaankot.worldarchive.model.WorldIdentity;
 import dev.ishaankot.worldarchive.storage.git.GitBackupBackend;
 import dev.ishaankot.worldarchive.storage.zip.ZipBackupStore;
 import java.io.IOException;
+import java.nio.file.CopyOption;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
 import java.text.Normalizer;
@@ -88,6 +90,8 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
 
     private final WorldOperationGate operationGate;
 
+    private final DirectoryMove directoryMove;
+
     private final ConcurrentMap<OperationId, DeleteConfirmation> confirmations =
             new ConcurrentHashMap<>();
 
@@ -119,6 +123,28 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
             Clock clock,
             Duration confirmationLifetime,
             WorldOperationGate operationGate) {
+        this(
+                catalog,
+                destinations,
+                identityStore,
+                metadataFinalizer,
+                executor,
+                clock,
+                confirmationLifetime,
+                operationGate,
+                Files::move);
+    }
+
+    BackupRecoveryService(
+            BackupCatalog catalog,
+            Map<DestinationType, RecoveryDestination> destinations,
+            WorldIdentityStore identityStore,
+            RestoredWorldMetadataFinalizer metadataFinalizer,
+            Executor executor,
+            Clock clock,
+            Duration confirmationLifetime,
+            WorldOperationGate operationGate,
+            DirectoryMove directoryMove) {
         this.catalog = Objects.requireNonNull(catalog, "catalog");
         this.destinations = validatedDestinations(destinations);
         this.identityStore = Objects.requireNonNull(identityStore, "identityStore");
@@ -127,6 +153,7 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
         this.clock = Objects.requireNonNull(clock, "clock");
         this.confirmationLifetime = requireShortLifetime(confirmationLifetime);
         this.operationGate = Objects.requireNonNull(operationGate, "operationGate");
+        this.directoryMove = Objects.requireNonNull(directoryMove, "directoryMove");
     }
 
     @Override
@@ -279,7 +306,8 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
                         0, 0, "Publishing restored world copy"));
                 Path published;
                 try {
-                    published = publishUnique(root, staging, request.restoredWorldName());
+                    published = publishUnique(
+                            root, staging, request.restoredWorldName(), directoryMove);
                 } catch (IOException | RuntimeException exception) {
                     deleteTree(root.path(), staging.path());
                     throw new BackupRecoveryException(
@@ -651,7 +679,8 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
     private static Path publishUnique(
             RestoreRoot root,
             RestoreStaging staging,
-            String requestedName) throws IOException {
+            String requestedName,
+            DirectoryMove directoryMove) throws IOException {
         String base = safeDirectoryName(requestedName);
         ReentrantLock lock = PUBLICATION_LOCKS.computeIfAbsent(
                 root.path(), ignored -> new ReentrantLock(true));
@@ -674,7 +703,8 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
                     continue;
                 }
                 try {
-                    Files.move(staging.path(), target);
+                    directoryMove.move(
+                            staging.path(), target, StandardCopyOption.ATOMIC_MOVE);
                 } catch (FileAlreadyExistsException exception) {
                     continue;
                 }
@@ -921,6 +951,11 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
     @FunctionalInterface
     private interface CheckedSupplier<T> {
         T get() throws Exception;
+    }
+
+    @FunctionalInterface
+    interface DirectoryMove {
+        Path move(Path source, Path target, CopyOption... options) throws IOException;
     }
 
     private record DestinationCandidate(

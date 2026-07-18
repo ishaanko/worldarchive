@@ -40,8 +40,11 @@ import dev.ishaankot.worldarchive.storage.git.GitSnapshot;
 import dev.ishaankot.worldarchive.storage.git.GitVerification;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.CopyOption;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -59,6 +62,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.UnaryOperator;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
@@ -302,6 +306,53 @@ class BackupRecoveryServiceTest {
     }
 
     @Test
+    void restorePublicationRequiresAnAtomicMove() throws IOException {
+        Fixture fixture = fixture(DestinationType.ZIP);
+        FakeDestination zip = new FakeDestination(DestinationType.ZIP, fixture.worldId());
+        Path worlds = Files.createDirectory(temporaryDirectory.resolve("atomic-worlds"));
+        AtomicReference<List<CopyOption>> requestedOptions = new AtomicReference<>();
+        BackupRecoveryService service = service(
+                new InMemoryCatalog(fixture.record()),
+                Map.of(DestinationType.ZIP, zip),
+                new MutableClock(CREATED_AT.plusSeconds(2)),
+                (source, target, options) -> {
+                    requestedOptions.set(List.of(options));
+                    return Files.move(source, target, options);
+                });
+
+        RestoreBackupResult result = service.restoreBackup(
+                        new RestoreBackupRequest(fixture.backupId(), worlds, "Atomic Copy"),
+                        ProgressListener.NO_OP)
+                .toCompletableFuture().join();
+
+        assertEquals(List.of(StandardCopyOption.ATOMIC_MOVE), requestedOptions.get());
+        assertTrue(Files.isDirectory(result.restoredWorldDirectory()));
+    }
+
+    @Test
+    void unsupportedAtomicPublicationLeavesNoVisibleRestore() throws IOException {
+        Fixture fixture = fixture(DestinationType.ZIP);
+        FakeDestination zip = new FakeDestination(DestinationType.ZIP, fixture.worldId());
+        Path worlds = Files.createDirectory(temporaryDirectory.resolve("unsupported-atomic-worlds"));
+        BackupRecoveryService service = service(
+                new InMemoryCatalog(fixture.record()),
+                Map.of(DestinationType.ZIP, zip),
+                new MutableClock(CREATED_AT.plusSeconds(2)),
+                (source, target, options) -> {
+                    throw new AtomicMoveNotSupportedException(
+                            source.toString(), target.toString(), "simulated unsupported move");
+                });
+
+        assertRecoveryFailure(() -> service.restoreBackup(
+                        new RestoreBackupRequest(fixture.backupId(), worlds, "No Partial Copy"),
+                        ProgressListener.NO_OP)
+                .toCompletableFuture().join());
+        try (var children = Files.list(worlds)) {
+            assertEquals(0, children.count());
+        }
+    }
+
+    @Test
     void windowsJunctionWorldsRootIsRejectedWithoutTouchingItsTarget() throws Exception {
         Assumptions.assumeTrue(System.getProperty("os.name", "").startsWith("Windows"));
         Fixture fixture = fixture(DestinationType.ZIP);
@@ -471,6 +522,23 @@ class BackupRecoveryServiceTest {
             Clock clock,
             RestoredWorldMetadataFinalizer finalizer) {
         return service(catalog, destinations, clock, finalizer, Runnable::run);
+    }
+
+    private BackupRecoveryService service(
+            InMemoryCatalog catalog,
+            Map<DestinationType, RecoveryDestination> destinations,
+            Clock clock,
+            BackupRecoveryService.DirectoryMove directoryMove) {
+        return new BackupRecoveryService(
+                catalog,
+                destinations,
+                new WorldIdentityStore(),
+                RestoredWorldMetadataFinalizer.NO_OP,
+                Runnable::run,
+                clock,
+                BackupRecoveryService.DEFAULT_CONFIRMATION_LIFETIME,
+                new LockingWorldOperationGate(),
+                directoryMove);
     }
 
     private BackupRecoveryService service(
