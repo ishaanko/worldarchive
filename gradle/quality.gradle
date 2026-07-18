@@ -19,6 +19,19 @@ static boolean isTextFile(String path) {
         || path == 'LICENSE'
 }
 
+static boolean isImplementationTextFile(String path) {
+    def normalized = path.replace('\\', '/').toLowerCase(Locale.ROOT)
+    if (normalized.endsWith('.md') || normalized == 'license') {
+        return false
+    }
+    def additionalExtensions = [
+        '.bat', '.cmd', '.groovy', '.kt', '.kts', '.sh', '.toml'
+    ]
+    return isTextFile(normalized)
+        || normalized == 'gradlew'
+        || additionalExtensions.any { normalized.endsWith(it) }
+}
+
 tasks.register('verifyFormatting') {
     group = 'verification'
     description = 'Checks repository text files for basic formatting errors.'
@@ -54,20 +67,28 @@ tasks.register('cleanRoomScan') {
         def forbiddenTerms = [
             ['Fast', 'Back'].join(''),
             ['net', '.', 'pcal'].join(''),
+            ['net', '/', 'pcal'].join(''),
             ['GNU', ' GENERAL PUBLIC LICENSE'].join(''),
             ['GNU', ' LESSER GENERAL PUBLIC LICENSE'].join('')
+        ]
+        def forbiddenPathFragments = [
+            ['fast', 'back'].join(''),
+            ['net', 'pcal'].join('/')
         ]
         def failures = []
 
         repositoryFiles(project).each { path ->
-            if (path == '.temp' || path.startsWith('.temp/')) {
+            def normalized = path.replace('\\', '/').toLowerCase(Locale.ROOT)
+            if (normalized == '.temp' || normalized.startsWith('.temp/')) {
                 failures << "${path}: temporary content must not be tracked"
                 return
             }
-            if (!(path.startsWith('src/') || path.startsWith('config/'))) {
-                return
+            forbiddenPathFragments.each { fragment ->
+                if (normalized.contains(fragment)) {
+                    failures << "${path}: prohibited clean-room path"
+                }
             }
-            if (!isTextFile(path)) {
+            if (!isImplementationTextFile(path)) {
                 return
             }
 

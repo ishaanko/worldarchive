@@ -42,10 +42,14 @@ dependencies {
 }
 
 processResources {
-    inputs.property 'version', project.version
+    def resourceProperties = [
+        version: project.version,
+        fabric_api_version: project.fabric_api_version
+    ]
+    inputs.properties resourceProperties
 
     filesMatching('fabric.mod.json') {
-        expand version: inputs.properties.version
+        expand resourceProperties
     }
 }
 
