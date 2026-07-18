@@ -176,7 +176,7 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
             ProgressListener progressListener) {
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(progressListener, "progressListener");
-        return submit(() -> restoreBlocking(request, progressListener));
+        return submit(cancellation -> restoreBlocking(request, progressListener, cancellation));
     }
 
     @Override
@@ -191,7 +191,7 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
             ProgressListener progressListener) {
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(progressListener, "progressListener");
-        return submit(() -> deleteBlocking(request, progressListener));
+        return submit(cancellation -> deleteBlocking(request, progressListener, cancellation));
     }
 
     @Override
@@ -200,7 +200,7 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
             ProgressListener progressListener) {
         Objects.requireNonNull(backupId, "backupId");
         Objects.requireNonNull(progressListener, "progressListener");
-        return submit(() -> verifyBlocking(backupId, progressListener));
+        return submit(cancellation -> verifyBlocking(backupId, progressListener, cancellation));
     }
 
     @Override
@@ -209,7 +209,7 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
             ProgressListener progressListener) {
         Objects.requireNonNull(backupId, "backupId");
         Objects.requireNonNull(progressListener, "progressListener");
-        return submit(() -> syncBlocking(backupId, progressListener));
+        return submit(cancellation -> syncBlocking(backupId, progressListener, cancellation));
     }
 
     @Override
@@ -220,9 +220,12 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
 
     private RestoreBackupResult restoreBlocking(
             RestoreBackupRequest request,
-            ProgressListener progressListener) throws Exception {
+            ProgressListener progressListener,
+            OperationCancellation cancellation) throws Exception {
+        cancellation.checkpoint();
         BackupRecord record = requireRecord(request.sourceBackupId());
         try (WorldOperationGate.Permit ignored = operationGate.enter(record.manifest().worldId())) {
+            cancellation.checkpoint();
             BackupRecord current = requireRecord(request.sourceBackupId());
             requireSameManifest(record, current);
             OperationId operationId = OperationId.create();
@@ -241,6 +244,7 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
             List<DestinationCandidate> candidates = restorableCandidates(current);
             List<DestinationCandidate> verified = new ArrayList<>();
             for (DestinationCandidate candidate : candidates) {
+                cancellation.checkpoint();
                 report(progressListener, progress(
                         operationId, current, BackupOperation.RESTORE, OperationPhase.VERIFYING,
                         verified.size(), candidates.size(), "Verifying restore source"));
@@ -250,6 +254,7 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
                     if (outcome.valid()) {
                         verified.add(candidate);
                     }
+                    cancellation.checkpoint();
                 } catch (InterruptedException exception) {
                     Thread.currentThread().interrupt();
                     throw exception;
@@ -264,12 +269,14 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
             }
 
             for (DestinationCandidate candidate : verified) {
+                cancellation.checkpoint();
                 report(progressListener, progress(
                         operationId, current, BackupOperation.RESTORE, OperationPhase.WRITING,
                         0, 0, "Materializing a private restored copy"));
                 RestoreStaging staging = createPrivateStaging(root);
                 try {
                     candidate.adapter().materialize(current, candidate.result(), staging.path());
+                    cancellation.checkpoint();
                     staging.requireUnchanged();
                     if (Files.exists(
                             staging.path().resolve(".worldarchive"), LinkOption.NOFOLLOW_LINKS)) {
@@ -289,12 +296,19 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
 
                 WorldIdentity restoredIdentity;
                 try {
+                    cancellation.checkpoint();
                     staging.requireUnchanged();
                     metadataFinalizer.finalizeDisplayName(staging.path(), request.restoredWorldName());
+                    cancellation.checkpoint();
                     staging.requireUnchanged();
                     restoredIdentity = identityStore.createFreshRestoredCopyIdentity(
                             staging.path(), current.manifest().backupId());
+                    cancellation.checkpoint();
                     staging.requireUnchanged();
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    deleteTree(root.path(), staging.path());
+                    throw exception;
                 } catch (IOException | RuntimeException exception) {
                     deleteTree(root.path(), staging.path());
                     throw new BackupRecoveryException(
@@ -307,8 +321,20 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
                 Path published;
                 try {
                     published = publishUnique(
-                            root, staging, request.restoredWorldName(), directoryMove);
+                            root,
+                            staging,
+                            request.restoredWorldName(),
+                            directoryMove,
+                            cancellation);
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    deleteTree(root.path(), staging.path());
+                    throw exception;
                 } catch (IOException | RuntimeException exception) {
+                    deleteTree(root.path(), staging.path());
+                    throw new BackupRecoveryException(
+                            "Restored world copy could not be published", exception);
+                } catch (Exception exception) {
                     deleteTree(root.path(), staging.path());
                     throw new BackupRecoveryException(
                             "Restored world copy could not be published", exception);
@@ -354,7 +380,9 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
 
     private BackupResult deleteBlocking(
             DeleteBackupRequest request,
-            ProgressListener progressListener) throws Exception {
+            ProgressListener progressListener,
+            OperationCancellation cancellation) throws Exception {
+        cancellation.checkpoint();
         DeleteConfirmation confirmation = confirmations.remove(request.confirmationToken());
         Instant now = clock.instant();
         if (confirmation == null
@@ -367,16 +395,17 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
             throw new BackupRecoveryException("Delete confirmation does not match the backup world");
         }
         try (WorldOperationGate.Permit ignored = operationGate.enter(record.manifest().worldId())) {
+            cancellation.checkpoint();
             BackupRecord current = requireRecord(request.backupId());
             requireSameManifest(record, current);
             OperationId operationId = OperationId.create();
             List<DestinationResult> present = presentDestinations(current);
             List<DestinationResult> attempts = new ArrayList<>();
-            Set<DestinationKey> deleted = new HashSet<>();
             report(progressListener, progress(
                     operationId, current, BackupOperation.DELETE, OperationPhase.PREPARING,
                     0, present.size(), "Preparing destination deletion"));
             for (DestinationResult destination : present) {
+                cancellation.checkpoint();
                 RecoveryDestination adapter = destinations.get(destination.destination());
                 boolean removed = false;
                 if (adapter != null) {
@@ -390,6 +419,11 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
                     }
                 }
                 if (removed) {
+                    DestinationKey deleted = DestinationKey.from(destination);
+                    cancellation.mandatoryCommit(() -> {
+                        persistSuccessfulDeletion(current, deleted);
+                        return null;
+                    });
                     attempts.add(new DestinationResult(
                             destination.destination(),
                             DestinationStatus.SUCCESS,
@@ -397,7 +431,6 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
                             Optional.empty(),
                             destination.verificationStatus(),
                             destination.syncStatus()));
-                    deleted.add(DestinationKey.from(destination));
                 } else {
                     attempts.add(DestinationResult.failed(
                             destination.destination(), "Destination artifact could not be deleted"));
@@ -405,16 +438,7 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
                 report(progressListener, progress(
                         operationId, current, BackupOperation.DELETE, OperationPhase.WRITING,
                         attempts.size(), present.size(), "Deleting destination artifacts"));
-            }
-
-            if (deleted.size() == present.size()) {
-                if (!catalog.remove(current.manifest().backupId())) {
-                    throw new BackupRecoveryException("Backup disappeared while updating the catalog");
-                }
-            } else if (!deleted.isEmpty()) {
-                updateCatalog(current.manifest().backupId(), existing -> existing.stream()
-                        .filter(destination -> !deleted.contains(DestinationKey.from(destination)))
-                        .toList());
+                cancellation.checkpoint();
             }
             BackupResult result = BackupResult.aggregate(
                     current.manifest().backupId(),
@@ -430,9 +454,12 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
 
     private BackupResult verifyBlocking(
             BackupId backupId,
-            ProgressListener progressListener) throws Exception {
+            ProgressListener progressListener,
+            OperationCancellation cancellation) throws Exception {
+        cancellation.checkpoint();
         BackupRecord record = requireRecord(backupId);
         try (WorldOperationGate.Permit ignored = operationGate.enter(record.manifest().worldId())) {
+            cancellation.checkpoint();
             BackupRecord current = requireRecord(backupId);
             requireSameManifest(record, current);
             OperationId operationId = OperationId.create();
@@ -443,6 +470,7 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
                     0, present.size(), "Preparing backup verification"));
             int completed = 0;
             for (DestinationResult destination : present) {
+                cancellation.checkpoint();
                 VerificationStatus status = VerificationStatus.UNAVAILABLE;
                 RecoveryDestination adapter = destinations.get(destination.destination());
                 if (adapter != null) {
@@ -461,11 +489,14 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
                         operationId, current, BackupOperation.VERIFY, OperationPhase.VERIFYING,
                         completed, present.size(), "Verifying destination artifacts"));
             }
-            BackupRecord updated = updateCatalog(backupId, existing -> existing.stream()
-                    .map(destination -> Optional.ofNullable(updates.get(DestinationKey.from(destination)))
-                            .map(destination::withVerification)
-                            .orElse(destination))
-                    .toList());
+            BackupRecord updated = cancellation.commitIfActive(() ->
+                    updateCatalog(backupId, existing -> existing.stream()
+                            .map(destination -> Optional.ofNullable(
+                                            updates.get(DestinationKey.from(destination)))
+                                    .map(destination::withVerification)
+                                    .orElse(destination))
+                            .toList()));
+            cancellation.checkpoint();
             report(progressListener, progress(
                     operationId, updated, BackupOperation.VERIFY, OperationPhase.COMPLETE,
                     present.size(), present.size(), "Backup verification complete"));
@@ -475,9 +506,12 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
 
     private BackupResult syncBlocking(
             BackupId backupId,
-            ProgressListener progressListener) throws Exception {
+            ProgressListener progressListener,
+            OperationCancellation cancellation) throws Exception {
+        cancellation.checkpoint();
         BackupRecord record = requireRecord(backupId);
         try (WorldOperationGate.Permit ignored = operationGate.enter(record.manifest().worldId())) {
+            cancellation.checkpoint();
             BackupRecord current = requireRecord(backupId);
             requireSameManifest(record, current);
             Optional<DestinationResult> git = current.result().destinations().stream()
@@ -498,6 +532,7 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
                         "Git destination is unavailable", SyncStatus.FAILED);
             } else {
                 try {
+                    cancellation.checkpoint();
                     synchronizedResult = mergeSync(
                             git.orElseThrow(), adapter.sync(current, git.orElseThrow()));
                 } catch (InterruptedException exception) {
@@ -510,11 +545,13 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
             }
             DestinationKey key = DestinationKey.from(git.orElseThrow());
             DestinationResult replacement = synchronizedResult;
-            BackupRecord updated = updateCatalog(backupId, existing -> existing.stream()
-                    .map(destination -> DestinationKey.from(destination).equals(key)
-                            ? replacement
-                            : destination)
-                    .toList());
+            BackupRecord updated = cancellation.mandatoryCommit(() ->
+                    updateCatalog(backupId, existing -> existing.stream()
+                            .map(destination -> DestinationKey.from(destination).equals(key)
+                                    ? replacement
+                                    : destination)
+                            .toList()));
+            cancellation.checkpoint();
             report(progressListener, progress(
                     operationId, updated, BackupOperation.SYNC, OperationPhase.COMPLETE,
                     1, 1, "Git synchronization complete"));
@@ -567,6 +604,32 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
         }
         health.sort(Comparator.comparing(DestinationHealth::destination));
         return List.copyOf(health);
+    }
+
+    private void persistSuccessfulDeletion(
+            BackupRecord expected,
+            DestinationKey deleted) throws IOException {
+        BackupRecord current = requireRecord(expected.manifest().backupId());
+        requireSameManifest(expected, current);
+        boolean stillPresent = current.result().destinations().stream()
+                .anyMatch(destination -> deleted.equals(DestinationKey.from(destination))
+                        && isPresent(destination));
+        if (!stillPresent) {
+            throw new BackupRecoveryException(
+                    "Deleted destination disappeared before the catalog was updated");
+        }
+        List<DestinationResult> remaining = current.result().destinations().stream()
+                .filter(destination -> !deleted.equals(DestinationKey.from(destination)))
+                .toList();
+        if (remaining.stream().noneMatch(BackupRecoveryService::isPresent)) {
+            if (!catalog.remove(current.manifest().backupId())) {
+                throw new BackupRecoveryException("Backup disappeared while updating the catalog");
+            }
+            return;
+        }
+        updateCatalog(current.manifest().backupId(), existing -> existing.stream()
+                .filter(destination -> !deleted.equals(DestinationKey.from(destination)))
+                .toList());
     }
 
     private BackupRecord updateCatalog(
@@ -680,7 +743,8 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
             RestoreRoot root,
             RestoreStaging staging,
             String requestedName,
-            DirectoryMove directoryMove) throws IOException {
+            DirectoryMove directoryMove,
+            OperationCancellation cancellation) throws Exception {
         String base = safeDirectoryName(requestedName);
         ReentrantLock lock = PUBLICATION_LOCKS.computeIfAbsent(
                 root.path(), ignored -> new ReentrantLock(true));
@@ -703,27 +767,32 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
                     continue;
                 }
                 try {
-                    directoryMove.move(
-                            staging.path(), target, StandardCopyOption.ATOMIC_MOVE);
+                    return cancellation.pointOfNoReturn(() -> {
+                        directoryMove.move(
+                                staging.path(), target, StandardCopyOption.ATOMIC_MOVE);
+                        try {
+                            root.requireUnchanged();
+                            BasicFileAttributes attributes = Files.readAttributes(
+                                    target,
+                                    BasicFileAttributes.class,
+                                    LinkOption.NOFOLLOW_LINKS);
+                            if (!attributes.isDirectory()
+                                    || attributes.isSymbolicLink()
+                                    || attributes.isOther()
+                                    || isWindowsReparsePoint(target)
+                                    || !Objects.equals(
+                                            target.toRealPath().getParent(), root.path())) {
+                                throw new IOException("Published restore target is unsafe");
+                            }
+                            staging.requireIdentityAt(target);
+                            return target;
+                        } catch (IOException | RuntimeException exception) {
+                            deleteTree(root.path(), target);
+                            throw exception;
+                        }
+                    });
                 } catch (FileAlreadyExistsException exception) {
                     continue;
-                }
-                try {
-                    root.requireUnchanged();
-                    BasicFileAttributes attributes = Files.readAttributes(
-                            target, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-                    if (!attributes.isDirectory()
-                            || attributes.isSymbolicLink()
-                            || attributes.isOther()
-                            || isWindowsReparsePoint(target)
-                            || !Objects.equals(target.toRealPath().getParent(), root.path())) {
-                        throw new IOException("Published restore target is unsafe");
-                    }
-                    staging.requireIdentityAt(target);
-                    return target;
-                } catch (IOException | RuntimeException exception) {
-                    deleteTree(root.path(), target);
-                    throw exception;
                 }
             }
             throw new IOException("No unique restore target name is available");
@@ -885,19 +954,17 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
     }
 
     private <T> CompletionStage<T> submit(CheckedSupplier<T> operation) {
-        CompletableFuture<T> result = new CompletableFuture<>();
+        return submit(cancellation -> operation.get());
+    }
+
+    private <T> CompletionStage<T> submit(CancellableCheckedSupplier<T> operation) {
+        CancellableTask<T> task = new CancellableTask<>(operation);
         try {
-            executor.execute(() -> {
-                try {
-                    result.complete(operation.get());
-                } catch (Throwable exception) {
-                    result.completeExceptionally(exception);
-                }
-            });
+            executor.execute(task);
         } catch (RejectedExecutionException exception) {
-            result.completeExceptionally(exception);
+            task.completeExceptionally(exception);
         }
-        return result;
+        return task;
     }
 
     private static Map<DestinationType, RecoveryDestination> destinationMap(
@@ -954,6 +1021,21 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
     }
 
     @FunctionalInterface
+    private interface CancellableCheckedSupplier<T> {
+        T get(OperationCancellation cancellation) throws Exception;
+    }
+
+    private interface OperationCancellation {
+        void checkpoint() throws InterruptedException;
+
+        <T> T mandatoryCommit(CheckedSupplier<T> operation) throws Exception;
+
+        <T> T commitIfActive(CheckedSupplier<T> operation) throws Exception;
+
+        <T> T pointOfNoReturn(CheckedSupplier<T> operation) throws Exception;
+    }
+
+    @FunctionalInterface
     interface DirectoryMove {
         Path move(Path source, Path target, CopyOption... options) throws IOException;
     }
@@ -974,6 +1056,125 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
             BackupId backupId,
             WorldId worldId,
             Instant expiresAt) {
+    }
+
+    private static final class CancellableTask<T> extends CompletableFuture<T>
+            implements Runnable, OperationCancellation {
+        private final CancellableCheckedSupplier<T> operation;
+
+        private Thread runner;
+
+        private boolean cancellationRequested;
+
+        private boolean interruptRequested;
+
+        private int mandatoryCommitDepth;
+
+        private boolean pointOfNoReturn;
+
+        private CancellableTask(CancellableCheckedSupplier<T> operation) {
+            this.operation = Objects.requireNonNull(operation, "operation");
+        }
+
+        @Override
+        public void run() {
+            synchronized (this) {
+                if (isDone()) {
+                    return;
+                }
+                runner = Thread.currentThread();
+            }
+            try {
+                checkpoint();
+                complete(operation.get(this));
+            } catch (Throwable exception) {
+                if (!isCancelled()) {
+                    completeExceptionally(exception);
+                }
+            } finally {
+                synchronized (this) {
+                    runner = null;
+                }
+            }
+        }
+
+        @Override
+        public boolean cancel(boolean mayInterruptIfRunning) {
+            Thread active = null;
+            synchronized (this) {
+                if (pointOfNoReturn || isDone() || !super.cancel(false)) {
+                    return false;
+                }
+                cancellationRequested = true;
+                interruptRequested = mayInterruptIfRunning;
+                if (mayInterruptIfRunning && mandatoryCommitDepth == 0) {
+                    active = runner;
+                }
+            }
+            if (active != null) {
+                active.interrupt();
+            }
+            return true;
+        }
+
+        @Override
+        public void checkpoint() throws InterruptedException {
+            boolean cancelled;
+            synchronized (this) {
+                cancelled = cancellationRequested;
+            }
+            if (cancelled || Thread.currentThread().isInterrupted()) {
+                throw new InterruptedException("Backup maintenance operation was cancelled");
+            }
+        }
+
+        @Override
+        public <R> R mandatoryCommit(CheckedSupplier<R> commit) throws Exception {
+            return commit(commit, false);
+        }
+
+        @Override
+        public <R> R commitIfActive(CheckedSupplier<R> commit) throws Exception {
+            return commit(commit, true);
+        }
+
+        @Override
+        public <R> R pointOfNoReturn(CheckedSupplier<R> publication) throws Exception {
+            Objects.requireNonNull(publication, "publication");
+            synchronized (this) {
+                if (cancellationRequested || Thread.currentThread().isInterrupted()) {
+                    throw new InterruptedException("Backup maintenance operation was cancelled");
+                }
+                pointOfNoReturn = true;
+            }
+            return publication.get();
+        }
+
+        private <R> R commit(CheckedSupplier<R> commit, boolean requireActive) throws Exception {
+            Objects.requireNonNull(commit, "commit");
+            synchronized (this) {
+                if (requireActive
+                        && (cancellationRequested || Thread.currentThread().isInterrupted())) {
+                    throw new InterruptedException("Backup maintenance operation was cancelled");
+                }
+                mandatoryCommitDepth++;
+            }
+            boolean interruptedBeforeCommit = Thread.interrupted();
+            try {
+                return commit.get();
+            } finally {
+                boolean restoreInterrupt;
+                synchronized (this) {
+                    mandatoryCommitDepth--;
+                    restoreInterrupt = mandatoryCommitDepth == 0 && interruptRequested;
+                }
+                if (interruptedBeforeCommit
+                        || restoreInterrupt
+                        || Thread.currentThread().isInterrupted()) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        }
     }
 
     private static final class InvalidMaterializationException extends Exception {
