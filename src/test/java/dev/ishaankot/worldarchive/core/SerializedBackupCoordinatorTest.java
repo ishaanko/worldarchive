@@ -415,15 +415,8 @@ final class SerializedBackupCoordinatorTest {
     }
 
     @Test
-    void preparedCaptureThatWinsGateCannotDeadlockNormalCreateLane() throws Exception {
-        LockingWorldOperationGate underlyingGate = new LockingWorldOperationGate();
+    void preparedCaptureDoesNotWaitForActiveDestinationAndQueuesBehindIt() throws Exception {
         WorldId worldId = WorldId.create();
-        WorldOperationGate.Permit external = underlyingGate.enter(worldId);
-        AtomicInteger gateWaiters = new AtomicInteger();
-        WorldOperationGate observedGate = requestedWorld -> {
-            gateWaiters.incrementAndGet();
-            return underlyingGate.enter(requestedWorld);
-        };
         Map<BackupTrigger, CompletableFuture<DestinationResult>> releases = new ConcurrentHashMap<>();
         FakeBackend backend = new FakeBackend(DestinationType.ZIP, capture -> {
             CompletableFuture<DestinationResult> result = new CompletableFuture<>();
@@ -436,40 +429,37 @@ final class SerializedBackupCoordinatorTest {
                 new FakeCaptureFactory(temporaryDirectory.resolve("captures")),
                 List.of(backend),
                 BackupCaptureGate.DIRECT,
-                observedGate);
+                new LockingWorldOperationGate());
         ExecutorService serverExecutor = Executors.newSingleThreadExecutor();
         try {
-            Future<PreparedBackup> preparation = serverExecutor.submit(() -> coordinator.prepareCapture(
-                    request(worldId, "world-a", BackupTrigger.WORLD_EXIT, Optional.empty()),
-                    CaptureProgressListener.NO_OP));
-            await(() -> gateWaiters.get() == 1);
             CompletionStage<BackupResult> normal = coordinator.createBackup(
                     request(worldId, "world-a", BackupTrigger.MANUAL, Optional.empty()),
                     ProgressListener.NO_OP);
-            await(() -> gateWaiters.get() == 2);
+            await(() -> releases.containsKey(BackupTrigger.MANUAL));
 
-            external.close();
+            Future<PreparedBackup> preparation = serverExecutor.submit(() -> coordinator.prepareCapture(
+                    request(worldId, "world-a", BackupTrigger.WORLD_EXIT, Optional.empty()),
+                    CaptureProgressListener.NO_OP));
             PreparedBackup prepared = preparation.get(5, TimeUnit.SECONDS);
             assertEquals(OperationPhase.PREPARING,
                     coordinator.currentOperation(worldId).orElseThrow().phase());
-            assertFalse(releases.containsKey(BackupTrigger.MANUAL));
 
             CompletionStage<BackupResult> exit = coordinator.createPreparedBackup(
                     prepared,
                     ProgressListener.NO_OP);
+            assertFalse(releases.containsKey(BackupTrigger.WORLD_EXIT));
+
+            releases.get(BackupTrigger.MANUAL).complete(DestinationResult.success(
+                    DestinationType.ZIP,
+                    "manual"));
+            assertEquals(BackupStatus.SUCCESS, normal.toCompletableFuture().get(5, TimeUnit.SECONDS).status());
+
             await(() -> releases.containsKey(BackupTrigger.WORLD_EXIT));
             releases.get(BackupTrigger.WORLD_EXIT).complete(DestinationResult.success(
                     DestinationType.ZIP,
                     "exit"));
             assertEquals(BackupStatus.SUCCESS, exit.toCompletableFuture().get(5, TimeUnit.SECONDS).status());
-
-            await(() -> releases.containsKey(BackupTrigger.MANUAL));
-            releases.get(BackupTrigger.MANUAL).complete(DestinationResult.success(
-                    DestinationType.ZIP,
-                    "manual"));
-            assertEquals(BackupStatus.SUCCESS, normal.toCompletableFuture().get(5, TimeUnit.SECONDS).status());
         } finally {
-            external.close();
             serverExecutor.shutdownNow();
             assertTrue(serverExecutor.awaitTermination(5, TimeUnit.SECONDS));
         }

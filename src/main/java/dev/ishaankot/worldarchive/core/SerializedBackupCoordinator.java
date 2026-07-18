@@ -54,6 +54,8 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
 
     private final BackupCaptureGate captureGate;
 
+    private final WorldOperationGate captureMutex;
+
     private final WorldOperationGate operationGate;
 
     private final ExecutorService coordinatorExecutor;
@@ -61,8 +63,6 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
     private final Clock clock;
 
     private final ConcurrentMap<WorldId, WorldLane> lanes = new ConcurrentHashMap<>();
-
-    private final ConcurrentMap<WorldId, CreateOperation> preparedOperations = new ConcurrentHashMap<>();
 
     private final ConcurrentMap<WorldId, OperationProgress> capturePreparations = new ConcurrentHashMap<>();
 
@@ -82,6 +82,7 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
                 maintenanceService,
                 BackupCaptureGate.DIRECT,
                 new LockingWorldOperationGate(),
+                new LockingWorldOperationGate(),
                 coordinatorExecutor,
                 clock);
     }
@@ -96,12 +97,37 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
             WorldOperationGate operationGate,
             ExecutorService coordinatorExecutor,
             Clock clock) {
+        this(
+                catalog,
+                captureFactory,
+                inventoryStore,
+                destinationSelector,
+                maintenanceService,
+                captureGate,
+                new LockingWorldOperationGate(),
+                operationGate,
+                coordinatorExecutor,
+                clock);
+    }
+
+    public SerializedBackupCoordinator(
+            BackupCatalog catalog,
+            BackupCaptureFactory captureFactory,
+            WorldInventoryStore inventoryStore,
+            BackupDestinationSelector destinationSelector,
+            BackupMaintenanceService maintenanceService,
+            BackupCaptureGate captureGate,
+            WorldOperationGate captureMutex,
+            WorldOperationGate operationGate,
+            ExecutorService coordinatorExecutor,
+            Clock clock) {
         this.catalog = Objects.requireNonNull(catalog, "catalog");
         this.captureFactory = Objects.requireNonNull(captureFactory, "captureFactory");
         this.inventoryStore = Objects.requireNonNull(inventoryStore, "inventoryStore");
         this.destinationSelector = Objects.requireNonNull(destinationSelector, "destinationSelector");
         this.maintenanceService = Objects.requireNonNull(maintenanceService, "maintenanceService");
         this.captureGate = Objects.requireNonNull(captureGate, "captureGate");
+        this.captureMutex = Objects.requireNonNull(captureMutex, "captureMutex");
         this.operationGate = Objects.requireNonNull(operationGate, "operationGate");
         this.coordinatorExecutor = Objects.requireNonNull(coordinatorExecutor, "coordinatorExecutor");
         this.clock = Objects.requireNonNull(clock, "clock");
@@ -123,15 +149,13 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
                 OperationPhase.QUEUED,
                 0,
                 0,
-                "Waiting for other world operations");
+                "Waiting for another world capture");
         if (capturePreparations.putIfAbsent(request.worldId(), queued) != null) {
             throw new IllegalStateException("A synchronous capture is already pending for this world");
         }
-        WorldOperationGate.Permit permit = null;
         CapturedBackup captured = null;
         boolean transferred = false;
-        try {
-            permit = operationGate.enter(request.worldId());
+        try (WorldOperationGate.Permit ignored = captureMutex.enter(request.worldId())) {
             capturePreparations.put(request.worldId(), preparationProgress(
                     request,
                     backupId,
@@ -168,7 +192,6 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
             PreparedBackup prepared = new PreparedBackup(
                     request,
                     captured,
-                    permit,
                     previous.isPresent(),
                     operationId,
                     () -> capturePreparations.remove(request.worldId()));
@@ -177,14 +200,8 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
         } finally {
             if (!transferred) {
                 capturePreparations.remove(request.worldId());
-                try {
-                    if (captured != null) {
-                        captured.close();
-                    }
-                } finally {
-                    if (permit != null) {
-                        permit.close();
-                    }
+                if (captured != null) {
+                    captured.close();
                 }
             }
         }
@@ -217,15 +234,9 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
                     preparedBackup.operationId(),
                     false,
                     captured,
-                    resources.permit(),
                     preparedBackup.previousInventoryPresent(),
                     progressListener);
-            if (preparedOperations.putIfAbsent(
-                    preparedBackup.request().worldId(), operation) != null) {
-                throw new IllegalStateException("A prepared backup is already active for this world");
-            }
-            startOperation(operation);
-            return operation.result;
+            return enqueue(operation);
         } catch (IOException | RuntimeException exception) {
             closeAfterFailure(resources, exception);
             return CompletableFuture.failedFuture(exception);
@@ -259,7 +270,6 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
                 OperationId.create(),
                 true,
                 null,
-                null,
                 false,
                 progressListener));
     }
@@ -270,10 +280,6 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
         OperationProgress preparation = capturePreparations.get(worldId);
         if (preparation != null && preparation.phase() != OperationPhase.QUEUED) {
             return Optional.of(preparation);
-        }
-        CreateOperation prepared = preparedOperations.get(worldId);
-        if (prepared != null) {
-            return Optional.ofNullable(prepared.progress.get());
         }
         WorldLane lane = lanes.get(worldId);
         if (lane != null) {
@@ -414,19 +420,23 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
             }
             CapturedBackup captured = operation.capture.get();
             if (captured == null) {
-                Optional<WorldInventory> previous = inventoryStore.load(operation.request.worldId());
-                operation.previousInventoryPresent = previous.isPresent();
-                captured = captureGate.capture(() -> captureFactory.capture(
-                        operation.request,
-                        operation.backupId,
-                        clock.instant(),
-                        previous,
-                        (completed, total) -> report(
-                                operation,
-                                OperationPhase.READING,
-                                completed,
-                                total,
-                                "Capturing world files")));
+                try (WorldOperationGate.Permit ignored = captureMutex.enter(
+                        operation.request.worldId())) {
+                    Optional<WorldInventory> previous = inventoryStore.load(
+                            operation.request.worldId());
+                    operation.previousInventoryPresent = previous.isPresent();
+                    captured = captureGate.capture(() -> captureFactory.capture(
+                            operation.request,
+                            operation.backupId,
+                            clock.instant(),
+                            previous,
+                            (completed, total) -> report(
+                                    operation,
+                                    OperationPhase.READING,
+                                    completed,
+                                    total,
+                                    "Capturing world files")));
+                }
                 if (!operation.capture.compareAndSet(null, captured)) {
                     captured.close();
                     throw new IllegalStateException("Backup operation already owns a private capture");
@@ -625,8 +635,6 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
             report(operation, OperationPhase.FAILED, 0, 0, "Backup could not be completed");
         }
 
-        preparedOperations.remove(operation.request.worldId(), operation);
-
         CreateOperation next = null;
         WorldLane lane = operation.lane;
         if (lane != null) {
@@ -821,7 +829,6 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
                 OperationId operationId,
                 boolean coalescible,
                 CapturedBackup capture,
-                WorldOperationGate.Permit permit,
                 boolean previousInventoryPresent,
                 ProgressListener listener) {
             this.request = request;
@@ -830,7 +837,7 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
             this.operationId = operationId;
             this.coalescible = coalescible;
             this.capture = new AtomicReference<>(capture);
-            this.permit = new AtomicReference<>(permit);
+            this.permit = new AtomicReference<>();
             this.previousInventoryPresent = previousInventoryPresent;
             this.listeners.add(listener);
             this.result = new OperationFuture(this);

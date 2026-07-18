@@ -22,7 +22,6 @@ public final class PreparedBackup implements AutoCloseable {
     PreparedBackup(
             CreateBackupRequest request,
             CapturedBackup capturedBackup,
-            WorldOperationGate.Permit permit,
             boolean previousInventoryPresent,
             OperationId operationId,
             Runnable releaseObserver) {
@@ -31,9 +30,7 @@ public final class PreparedBackup implements AutoCloseable {
         this.backupId = captured.capture().manifest().backupId();
         this.operationId = Objects.requireNonNull(operationId, "operationId");
         this.previousInventoryPresent = previousInventoryPresent;
-        this.ownership = new AtomicReference<>(new Resources(
-                captured,
-                Objects.requireNonNull(permit, "permit")));
+        this.ownership = new AtomicReference<>(new Resources(captured));
         this.releaseObserver = new AtomicReference<>(Objects.requireNonNull(
                 releaseObserver,
                 "releaseObserver"));
@@ -83,21 +80,14 @@ public final class PreparedBackup implements AutoCloseable {
         }
     }
 
-    record Resources(
-            CapturedBackup capturedBackup,
-            WorldOperationGate.Permit permit) implements AutoCloseable {
+    record Resources(CapturedBackup capturedBackup) implements AutoCloseable {
         Resources {
             Objects.requireNonNull(capturedBackup, "capturedBackup");
-            Objects.requireNonNull(permit, "permit");
         }
 
         @Override
         public void close() throws IOException {
-            try {
-                capturedBackup.close();
-            } finally {
-                permit.close();
-            }
+            capturedBackup.close();
         }
     }
 }
