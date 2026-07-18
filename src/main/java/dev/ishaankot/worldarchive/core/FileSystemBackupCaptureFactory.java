@@ -97,15 +97,19 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
         Path staging = lease.captureRoot();
         try {
             TreeSnapshot before = TreeSnapshot.scan(source);
+            Set<String> contentProofRequired = new HashSet<>();
             createDirectories(staging, before.directories());
             List<WorldInventory.Entry> inventoryEntries = copyFiles(
                     staging,
                     before,
+                    contentProofRequired,
                     progressListener);
             TreeSnapshot after = TreeSnapshot.scan(source);
-            if (!before.equals(after)) {
-                throw new IOException("World tree changed while its private capture was being created");
-            }
+            before.requireStableMatch(after, contentProofRequired);
+            proveTimestampDriftDidNotChangeContent(
+                    before,
+                    inventoryEntries,
+                    contentProofRequired);
             WorldInventory inventory = WorldInventory.create(inventoryEntries);
             long changedFiles = previousInventory
                     .map(inventory::changedFilesSince)
@@ -306,6 +310,7 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
     private List<WorldInventory.Entry> copyFiles(
             Path staging,
             TreeSnapshot snapshot,
+            Set<String> contentProofRequired,
             CaptureProgressListener progressListener)
             throws IOException, InterruptedException {
         List<WorldInventory.Entry> inventory = new ArrayList<>(snapshot.files().size());
@@ -314,13 +319,15 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
         for (SourceFile file : snapshot.files()) {
             requireNotInterrupted();
             observer.beforeFileCopy(Path.of(file.portablePath()));
-            file.requireUnchanged();
+            file.markTimestampDrift(contentProofRequired);
             Path target = PortableWorldPath.resolveInside(staging, file.portablePath());
             CopyResult copied = copyFile(file.path(), target);
             observer.afterFileCopy(Path.of(file.portablePath()));
-            file.requireUnchanged();
+            file.markTimestampDrift(contentProofRequired);
             if (copied.size() != file.fingerprint().size()) {
-                throw new IOException("World file changed size while it was being captured");
+                throw new IOException(
+                        "World file changed size while it was being captured: "
+                                + file.portablePath());
             }
             inventory.add(new WorldInventory.Entry(
                     file.portablePath(),
@@ -330,6 +337,37 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
             safeProgress(progressListener, completed, snapshot.byteCount());
         }
         return inventory;
+    }
+
+    private static void proveTimestampDriftDidNotChangeContent(
+            TreeSnapshot snapshot,
+            List<WorldInventory.Entry> inventory,
+            Set<String> contentProofRequired)
+            throws IOException {
+        if (contentProofRequired.isEmpty()) {
+            return;
+        }
+        Map<String, WorldInventory.Entry> capturedByPath = new HashMap<>();
+        for (WorldInventory.Entry entry : inventory) {
+            capturedByPath.put(entry.path(), entry);
+        }
+        for (SourceFile file : snapshot.files()) {
+            boolean requiresProof = contentProofRequired.contains(file.portablePath());
+            requiresProof |= file.hasTimestampDrift();
+            if (!requiresProof) {
+                continue;
+            }
+            CopyResult current = hashFile(file.path());
+            file.requireStableAttributes();
+            WorldInventory.Entry captured = capturedByPath.get(file.portablePath());
+            if (captured == null
+                    || current.size() != captured.size()
+                    || !current.sha256().equals(captured.sha256())) {
+                throw new IOException(
+                        "World file contents changed while its private capture was being created: "
+                                + file.portablePath());
+            }
+        }
     }
 
     private static void createDirectories(Path staging, List<SourceDirectory> directories)
@@ -344,30 +382,40 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
     }
 
     private static CopyResult copyFile(Path source, Path target) throws IOException {
-        MessageDigest digest = sha256();
-        byte[] buffer = new byte[COPY_BUFFER_BYTES];
-        long size = 0;
         try (InputStream input = Files.newInputStream(source, LinkOption.NOFOLLOW_LINKS);
                 OutputStream output = Files.newOutputStream(
                         target,
                         StandardOpenOption.CREATE_NEW,
                         StandardOpenOption.WRITE)) {
-            int read;
-            while ((read = input.read(buffer)) >= 0) {
-                requireNotInterrupted();
-                if (read == 0) {
-                    continue;
-                }
-                output.write(buffer, 0, read);
-                digest.update(buffer, 0, read);
-                try {
-                    size = Math.addExact(size, read);
-                } catch (ArithmeticException exception) {
-                    throw new IOException("World file size overflowed capture accounting", exception);
-                }
-                if (size > WorldInventory.MAXIMUM_BYTES) {
-                    throw new IOException("World file exceeds the capture size limit");
-                }
+            return copyAndHash(input, output);
+        }
+    }
+
+    private static CopyResult hashFile(Path source) throws IOException {
+        try (InputStream input = Files.newInputStream(source, LinkOption.NOFOLLOW_LINKS)) {
+            return copyAndHash(input, OutputStream.nullOutputStream());
+        }
+    }
+
+    private static CopyResult copyAndHash(InputStream input, OutputStream output) throws IOException {
+        MessageDigest digest = sha256();
+        byte[] buffer = new byte[COPY_BUFFER_BYTES];
+        long size = 0;
+        int read;
+        while ((read = input.read(buffer)) >= 0) {
+            requireNotInterrupted();
+            if (read == 0) {
+                continue;
+            }
+            output.write(buffer, 0, read);
+            digest.update(buffer, 0, read);
+            try {
+                size = Math.addExact(size, read);
+            } catch (ArithmeticException exception) {
+                throw new IOException("World file size overflowed capture accounting", exception);
+            }
+            if (size > WorldInventory.MAXIMUM_BYTES) {
+                throw new IOException("World file exceeds the capture size limit");
             }
         }
         return new CopyResult(size, HexFormat.of().formatHex(digest.digest()));
@@ -757,6 +805,29 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
             }
             return (int) portablePath.chars().filter(character -> character == '/').count() + 1;
         }
+
+        private void requireStableMatch(
+                TreeSnapshot current,
+                Set<String> contentProofRequired)
+                throws IOException {
+            if (byteCount != current.byteCount
+                    || !directories.equals(current.directories)
+                    || files.size() != current.files.size()) {
+                throw new IOException(
+                        "World tree changed while its private capture was being created");
+            }
+            for (int index = 0; index < files.size(); index++) {
+                SourceFile expected = files.get(index);
+                SourceFile observed = current.files.get(index);
+                if (!expected.hasSameStableFile(observed)) {
+                    throw new IOException(
+                            "World tree changed while its private capture was being created");
+                }
+                if (expected.fingerprint().hasTimestampDrift(observed.fingerprint())) {
+                    contentProofRequired.add(expected.portablePath());
+                }
+            }
+        }
     }
 
     private static final class ScanVisitor extends SimpleFileVisitor<Path> {
@@ -900,15 +971,39 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
             Objects.requireNonNull(fingerprint, "fingerprint");
         }
 
-        private void requireUnchanged() throws IOException {
+        private void markTimestampDrift(Set<String> contentProofRequired) throws IOException {
+            if (hasTimestampDrift()) {
+                contentProofRequired.add(portablePath);
+            }
+        }
+
+        private boolean hasTimestampDrift() throws IOException {
             BasicFileAttributes current = Files.readAttributes(
                     path,
                     BasicFileAttributes.class,
                     LinkOption.NOFOLLOW_LINKS);
             requireSafeFile(path, current);
-            if (!fingerprint.equals(FileFingerprint.create(current))) {
-                throw new IOException("World file changed while its private capture was being created");
+            FileFingerprint currentFingerprint = FileFingerprint.create(current);
+            if (!fingerprint.hasSameStableAttributes(currentFingerprint)) {
+                throw changedFileException();
             }
+            return fingerprint.hasTimestampDrift(currentFingerprint);
+        }
+
+        private void requireStableAttributes() throws IOException {
+            hasTimestampDrift();
+        }
+
+        private boolean hasSameStableFile(SourceFile other) {
+            return path.equals(other.path)
+                    && portablePath.equals(other.portablePath)
+                    && fingerprint.hasSameStableAttributes(other.fingerprint);
+        }
+
+        private IOException changedFileException() {
+            return new IOException(
+                    "World file changed while its private capture was being created: "
+                            + portablePath);
         }
     }
 
@@ -931,6 +1026,16 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
                     attributes.size(),
                     attributes.lastModifiedTime(),
                     attributes.creationTime());
+        }
+
+        private boolean hasSameStableAttributes(FileFingerprint other) {
+            return Objects.equals(fileKey, other.fileKey)
+                    && size == other.size
+                    && creationTime.equals(other.creationTime);
+        }
+
+        private boolean hasTimestampDrift(FileFingerprint other) {
+            return !lastModifiedTime.equals(other.lastModifiedTime);
         }
     }
 

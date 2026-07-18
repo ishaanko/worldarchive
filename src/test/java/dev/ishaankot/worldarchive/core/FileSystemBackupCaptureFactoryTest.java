@@ -354,6 +354,98 @@ final class FileSystemBackupCaptureFactoryTest {
         }
     }
 
+    @Test
+    void acceptsFileTimestampDriftBeforeCopyWhenContentMatches() throws Exception {
+        Path world = Files.createDirectory(temporaryDirectory.resolve("world-file-time-before"));
+        byte[] contents = "stable contents".getBytes(StandardCharsets.UTF_8);
+        Path level = world.resolve("level.dat");
+        Files.write(level, contents);
+        FileTime changedTime = FileTime.from(Instant.parse("2026-07-17T12:02:00Z"));
+        SourceCaptureObserver timestampDrift = new SourceCaptureObserver() {
+            @Override
+            public void beforeFileCopy(Path relativePath) throws IOException {
+                Files.setLastModifiedTime(world.resolve(relativePath), changedTime);
+            }
+        };
+        FileSystemBackupCaptureFactory factory = new FileSystemBackupCaptureFactory(
+                temporaryDirectory.resolve("captures-file-time-before"), timestampDrift);
+
+        try (CapturedBackup captured = factory.capture(
+                request(world, BackupTrigger.MANUAL),
+                BackupId.create(),
+                CREATED_AT,
+                Optional.empty(),
+                CaptureProgressListener.NO_OP)) {
+            assertEquals(1, captured.inventory().fileCount());
+            assertArrayEquals(
+                    contents,
+                    Files.readAllBytes(captured.capture().worldDirectory().resolve("level.dat")));
+        }
+    }
+
+    @Test
+    void acceptsEarlierFileTimestampDriftDetectedByFinalScan() throws Exception {
+        Path world = Files.createDirectory(temporaryDirectory.resolve("world-file-time-final"));
+        byte[] firstContents = "first contents".getBytes(StandardCharsets.UTF_8);
+        Path first = world.resolve("a.dat");
+        Files.write(first, firstContents);
+        Files.writeString(world.resolve("b.dat"), "second contents", StandardCharsets.UTF_8);
+        FileTime changedTime = FileTime.from(Instant.parse("2026-07-17T12:03:00Z"));
+        SourceCaptureObserver timestampDrift = new SourceCaptureObserver() {
+            @Override
+            public void afterFileCopy(Path relativePath) throws IOException {
+                if (relativePath.equals(Path.of("b.dat"))) {
+                    Files.setLastModifiedTime(first, changedTime);
+                }
+            }
+        };
+        FileSystemBackupCaptureFactory factory = new FileSystemBackupCaptureFactory(
+                temporaryDirectory.resolve("captures-file-time-final"), timestampDrift);
+
+        try (CapturedBackup captured = factory.capture(
+                request(world, BackupTrigger.MANUAL),
+                BackupId.create(),
+                CREATED_AT,
+                Optional.empty(),
+                CaptureProgressListener.NO_OP)) {
+            assertEquals(2, captured.inventory().fileCount());
+            assertArrayEquals(
+                    firstContents,
+                    Files.readAllBytes(captured.capture().worldDirectory().resolve("a.dat")));
+        }
+    }
+
+    @Test
+    void rejectsSameSizeMutationDespiteFileTimestampDrift() throws Exception {
+        Path world = Files.createDirectory(temporaryDirectory.resolve("world-file-content-final"));
+        Path first = world.resolve("a.dat");
+        Files.writeString(first, "before", StandardCharsets.UTF_8);
+        Files.writeString(world.resolve("b.dat"), "second", StandardCharsets.UTF_8);
+        Path captures = temporaryDirectory.resolve("captures-file-content-final");
+        FileTime changedTime = FileTime.from(Instant.parse("2026-07-17T12:04:00Z"));
+        SourceCaptureObserver mutator = new SourceCaptureObserver() {
+            @Override
+            public void afterFileCopy(Path relativePath) throws IOException {
+                if (relativePath.equals(Path.of("b.dat"))) {
+                    Files.writeString(first, "after!", StandardCharsets.UTF_8);
+                    Files.setLastModifiedTime(first, changedTime);
+                }
+            }
+        };
+        FileSystemBackupCaptureFactory factory = new FileSystemBackupCaptureFactory(captures, mutator);
+
+        assertThrows(IOException.class, () -> factory.capture(
+                request(world, BackupTrigger.MANUAL),
+                BackupId.create(),
+                CREATED_AT,
+                Optional.empty(),
+                CaptureProgressListener.NO_OP));
+
+        try (var entries = Files.list(captures)) {
+            assertEquals(List.of(), entries.toList());
+        }
+    }
+
     private static CreateBackupRequest request(Path world, BackupTrigger trigger) {
         return new CreateBackupRequest(
                 WorldId.create(),
