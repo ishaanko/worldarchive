@@ -67,6 +67,7 @@ tasks.withType(JavaCompile).configureEach {
 
 tasks.withType(Test).configureEach {
     useJUnitPlatform()
+    systemProperty 'java.io.tmpdir', file(System.getProperty('java.io.tmpdir')).canonicalPath
 }
 
 java {

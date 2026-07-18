@@ -170,7 +170,7 @@ final class ExactArchiveCopy implements AutoCloseable {
     }
 
     private static Path createPrivateDirectory() throws IOException {
-        Path value = Files.createTempDirectory("worldarchive-zip-");
+        Path value = Files.createTempDirectory("worldarchive-zip-").toRealPath();
         try {
             Files.setPosixFilePermissions(value, PRIVATE_DIRECTORY_PERMISSIONS);
         } catch (UnsupportedOperationException exception) {

@@ -109,6 +109,9 @@ final class GitRepositoryPathGuard {
     }
 
     private static boolean isWindowsReparsePoint(Path path) throws IOException {
+        if (!"\\".equals(path.getFileSystem().getSeparator())) {
+            return false;
+        }
         try {
             Map<String, Object> attributes = Files.readAttributes(
                     path,

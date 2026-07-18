@@ -131,6 +131,9 @@ final class ManagedPathGuard {
     }
 
     private static boolean isWindowsReparsePoint(Path path, String message) throws IOException {
+        if (!"\\".equals(path.getFileSystem().getSeparator())) {
+            return false;
+        }
         try {
             Map<String, Object> attributes = Files.readAttributes(
                     path,

@@ -285,7 +285,7 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
         report(progressListener, operationId, manifest, OperationPhase.READING, "Capturing current world files");
         try (GitSourceCapture sourceCapture = GitSourceCapture.create(capture.worldDirectory(), manifest)) {
             Path workTree = sourceCapture.root();
-            Path temporary = Files.createTempDirectory("worldarchive-git-index-");
+            Path temporary = Files.createTempDirectory("worldarchive-git-index-").toRealPath();
             Path index = temporary.resolve("index");
             Map<String, String> environment = indexEnvironment(index, false);
             try {
@@ -524,7 +524,7 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
             GitSnapshot snapshot,
             VerifiedSnapshot verified,
             Path staging) throws IOException, InterruptedException, GitStorageException {
-        Path temporary = Files.createTempDirectory("worldarchive-git-restore-");
+        Path temporary = Files.createTempDirectory("worldarchive-git-restore-").toRealPath();
         Path checkout = temporary.resolve("worktree");
         Path index = temporary.resolve("index");
         Map<String, String> environment = indexEnvironment(index, false);

@@ -48,7 +48,7 @@ final class GitSourceCapture implements AutoCloseable {
         Objects.requireNonNull(source, "source");
         Objects.requireNonNull(manifest, "manifest");
         Objects.requireNonNull(hook, "hook");
-        Path privateRoot = Files.createTempDirectory("worldarchive-git-capture-");
+        Path privateRoot = Files.createTempDirectory("worldarchive-git-capture-").toRealPath();
         try {
             CaptureVisitor visitor = new CaptureVisitor(source, privateRoot, hook);
             GitSourceScanner.requireSafeTree(source);
