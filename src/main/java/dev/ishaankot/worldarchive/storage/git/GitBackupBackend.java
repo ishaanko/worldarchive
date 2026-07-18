@@ -232,7 +232,7 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
         try {
             GitToolHealth health = new GitToolProbe(settings, runner).probe();
             if (!health.available()) {
-                return DestinationResult.skipped(DestinationType.GIT, health.summary());
+                return DestinationResult.failed(DestinationType.GIT, health.summary());
             }
             rejectRepositoryWorldOverlap(capture.worldDirectory());
             return withRepositoryLock(() -> createAndSynchronizeLocked(
