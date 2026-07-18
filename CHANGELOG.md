@@ -1,82 +1,54 @@
 # Changelog
 
-All notable changes to WorldArchive will be documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## [Unreleased]
+## 0.1.0 (unreleased)
 
 ### Added
 
-- Clean-room Apache-2.0 Fabric 26.2 client-mod foundation for Java 25, with
-  required Fabric API and Mod Menu integration.
-- Versioned configuration, per-world identities, atomic catalog persistence,
-  destination health checks, editable/native folder selection, and per-world
-  controls.
-- Immutable save-gated world capture, change inventories, serialized lifecycle
-  coordination, independent destination results, cancellation, and no-catch-up
-  scheduled-backup logic, wired to integrated-server manual, final-exit, and
-  scheduled triggers with bounded client shutdown.
-- Shared bare Git storage with parentless per-backup refs, Git LFS handling,
-  optional remote synchronization, pending-sync recovery, verification, and
-  independent snapshot deletion.
-- Atomic ZIP archives with embedded manifests and inventories, SHA-256
-  sidecars, crash recovery, corruption detection, verification, and exact
-  extraction.
-- Copy-only restore with destination fallback, unique target naming, fresh
-  world identity and source provenance, plus confirmed partial deletion and
-  persisted verify/sync results.
-- Native Select World **Backups** integration and a browser with rich backup
-  rows, create, restore, delete, sync, verify, open-folder, and settings actions.
-- Complete client-side `/backup` command tree with clickable help, pagination,
-  ID suggestions, progress, destination health, confirmations, and redacted
-  outcome summaries.
-- Java 25 unit and Git/LFS/ZIP integration coverage, Checkstyle, formatting,
-  license and clean-room checks, Gradle wrapper, and GitHub Actions builds on
-  Windows and Linux.
-- Exact packaged Fabric API metadata, repository-wide implementation provenance
-  scanning, and focused legacy/unsupported manifest compatibility coverage.
+- Manual backups from the backup browser and `/backup create`.
+- Automatic backups when a world closes.
+- Optional scheduled backups. Unchanged worlds are skipped.
+- Git snapshots stored in a shared bare repository.
+- Git LFS support for large Minecraft files.
+- Optional Git remotes with retryable sync.
+- ZIP backups with SHA-256 integrity metadata.
+- Independent Git and ZIP destinations. A backup can succeed in one destination
+  when the other fails.
+- Backup verification for Git and ZIP copies.
+- Copy-only restore. Restored backups are created as new worlds.
+- Per-world backup settings and stable world IDs.
+- Configurable destination paths with folder selection.
+- Backup labels and changed-file counts.
+- Backup creation, restore, deletion, sync, and verification from the in-game
+  browser.
+- Client-side `/backup` commands.
+- Windows, Linux, and macOS builds in GitHub Actions.
 
 ### Fixed
 
-- Accepted deferred Windows directory timestamps during core, Git, and ZIP
-  capture while retaining membership and filesystem-identity checks, and
-  accepted file timestamp-only drift only after the live bytes hash-match the
-  private capture.
-- Deferred final-exit capture until the matching integrated server has stopped,
-  after observing its final save, so late region and entity writes cannot race
-  the private capture.
-- Fully saved and disconnected an active world before restore navigation, and
-  corrected the Select World **Backups** action size and position.
-- Blocked backup operations under unsafe persisted storage paths, refreshed the
-  visible warning state after safe settings changes, and registered newly
-  discovered or restored world paths without a restart.
-- Kept destructive destination deletion and its catalog repair cancellation-safe,
-  reconciled exact already-absent artifacts, and preserved retryable state when
-  a configured remote snapshot cannot be proven absent.
-- Reconciled ambiguous atomic restore publication only when the published copy
-  retains the exact private-staging identity, and drained interrupted Git/LFS
-  materialization before cleaning its staging directory.
-- Recovered abandoned private captures conservatively and closed prepared-capture,
-  configuration-transaction, and live-startup ownership races.
-- Restored remote-only Git snapshots through the public recovery path, binding
-  the fetched manifest to the catalog before installing its canonical local ref.
-- Reported post-startup Git/Git LFS disappearance as an enabled-destination
-  failure so a durable ZIP copy remains a visible partial success.
+- Wait for the integrated server to stop before taking an exit backup.
+- Save and disconnect the active world before starting a restore.
+- Accept valid directory timestamp behavior on Windows and macOS.
+- Check file contents when only a file timestamp changes during capture.
+- Restore Git snapshots that exist only on the configured remote.
+- Report missing Git or Git LFS as a Git destination failure after startup.
+- Keep ZIP backups successful when the Git destination fails.
+- Recover interrupted captures without deleting unrelated files.
+- Preserve retry state when a remote snapshot cannot be confirmed as deleted.
+- Block backup operations when configured storage paths are unsafe.
+- Refresh storage warnings after settings are corrected.
+- Register restored and newly discovered worlds without restarting Minecraft.
+- Correct the size and position of the **Backups** button on the world list.
 
 ### Security
 
-- Added atomic publication and rollback, manifest-bound content verification,
-  traversal/link/reparse/path-collision defenses, destination-overlap checks,
-  process and filesystem locking, credential-free remote validation, and
-  sensitive-output redaction.
-- Bound each world UUID to one normalized source folder and prevent destination
-  path changes from racing active backup publication or orphaning cataloged
-  artifacts.
-- Destructive deletion requires a short-lived one-use confirmation, and stale
-  Git lock files are never removed automatically.
-- Bound restore cleanup to exact directory identities across Windows filesystems
-  without file keys, interrupted Git publication, and adversarial path replacement.
-
-[Unreleased]: https://github.com/ishaankot/worldarchive
+- Reject path traversal, symbolic links, Windows reparse points, and special
+  files during backup and restore.
+- Reject destination paths that overlap a world directory.
+- Detect path collisions before publishing a backup or restored world.
+- Verify backup contents against their manifests.
+- Publish backups and restored worlds atomically.
+- Serialize backup operations with process and filesystem locks.
+- Reject remote URLs containing credentials.
+- Redact credentials and other sensitive values from process errors.
+- Require confirmation before deleting backup data.
+- Leave stale Git lock files in place for manual review.
