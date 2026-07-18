@@ -23,9 +23,11 @@ public record GitDestinationConfig(
 
     public static final List<String> DEFAULT_LFS_PATTERNS = List.of(
             "*.mca",
+            "*.mcr",
             "*.dat",
             "*.dat_old",
-            "*.nbt");
+            "*.nbt",
+            "*.zip");
 
     private static final Pattern REMOTE_NAME = Pattern.compile("[A-Za-z0-9._-]{1,64}");
 
