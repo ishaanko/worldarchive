@@ -1,6 +1,7 @@
 package dev.ishaankot.worldarchive.core;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import dev.ishaankot.worldarchive.config.WorldArchiveConfig;
 import dev.ishaankot.worldarchive.config.WorldConfig;
@@ -49,6 +50,33 @@ final class ConfiguredBackupDestinationSelectorTest {
         assertEquals(
                 List.of(),
                 selector.select(request(worldId, world, BackupTrigger.MANUAL)));
+    }
+
+    @Test
+    void rejectsAConfiguredWorldIdentityFromAnotherFolder() {
+        WorldArchiveConfig defaults = WorldArchiveConfig.defaults();
+        WorldId worldId = WorldId.create();
+        Path configuredPath = temporaryDirectory.resolve("original-world");
+        WorldArchiveConfig config = new WorldArchiveConfig(
+                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
+                defaults.triggers(),
+                defaults.git(),
+                defaults.zip(),
+                List.of(new WorldConfig(worldId, true, configuredPath)));
+        ConfiguredBackupDestinationSelector selector = new ConfiguredBackupDestinationSelector(
+                () -> config,
+                List.of(backend(DestinationType.GIT), backend(DestinationType.ZIP)));
+
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> selector.select(request(
+                        worldId,
+                        temporaryDirectory.resolve("copied-world"),
+                        BackupTrigger.MANUAL)));
+
+        assertEquals(
+                "World identity is configured for a different source folder",
+                failure.getMessage());
     }
 
     private static List<DestinationType> types(List<BackupBackend> backends) {

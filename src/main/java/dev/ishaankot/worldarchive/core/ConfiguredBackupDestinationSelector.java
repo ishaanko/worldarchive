@@ -2,6 +2,7 @@ package dev.ishaankot.worldarchive.core;
 
 import dev.ishaankot.worldarchive.config.WorldArchiveConfig;
 import dev.ishaankot.worldarchive.config.TriggerConfig;
+import dev.ishaankot.worldarchive.config.WorldConfig;
 import dev.ishaankot.worldarchive.model.BackupTrigger;
 import dev.ishaankot.worldarchive.model.DestinationType;
 import java.util.ArrayList;
@@ -9,6 +10,7 @@ import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.function.Supplier;
 
 /** Applies current global, per-world, destination, and trigger gates to registered backends. */
@@ -36,12 +38,16 @@ public final class ConfiguredBackupDestinationSelector implements BackupDestinat
     public List<BackupBackend> select(CreateBackupRequest request) {
         Objects.requireNonNull(request, "request");
         WorldArchiveConfig config = Objects.requireNonNull(configuration.get(), "configuration result");
-        if (!globallyEnabled(config.triggers(), request.trigger())
-                || config.worlds().stream()
+        Optional<WorldConfig> configuredWorld = config.worlds().stream()
                         .filter(world -> world.worldId().equals(request.worldId()))
-                        .findFirst()
-                        .map(world -> !world.enabled())
-                        .orElse(false)) {
+                        .findFirst();
+        if (configuredWorld.isPresent()
+                && !configuredWorld.orElseThrow().path().equals(request.worldDirectory())) {
+            throw new IllegalArgumentException(
+                    "World identity is configured for a different source folder");
+        }
+        if (!globallyEnabled(config.triggers(), request.trigger())
+                || configuredWorld.map(world -> !world.enabled()).orElse(false)) {
             return List.of();
         }
         List<BackupBackend> selected = new ArrayList<>(DestinationType.values().length);
