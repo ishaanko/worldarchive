@@ -302,13 +302,20 @@ final class GitSourceCapture implements AutoCloseable {
             return new DirectoryFingerprint(
                     path,
                     attributes.fileKey(),
-                    attributes.creationTime());
+                    identityCreationTime(attributes));
         }
 
         private boolean matches(BasicFileAttributes attributes) {
             return Objects.equals(fileKey, attributes.fileKey())
-                    && creationTime.equals(attributes.creationTime());
+                    && creationTime.equals(identityCreationTime(attributes));
         }
+    }
+
+    private static FileTime identityCreationTime(BasicFileAttributes attributes) {
+        // macOS may move birth time backwards when an older modification time is applied.
+        return System.getProperty("os.name").startsWith("Mac")
+                ? FileTime.fromMillis(0)
+                : attributes.creationTime();
     }
 
     private record FileFingerprint(

@@ -1027,7 +1027,7 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
                     attributes.fileKey(),
                     attributes.size(),
                     attributes.lastModifiedTime(),
-                    attributes.creationTime());
+                    identityCreationTime(attributes));
         }
 
         private boolean hasSameStableAttributes(FileFingerprint other) {
@@ -1052,8 +1052,15 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
         private static DirectoryFingerprint create(BasicFileAttributes attributes) {
             return new DirectoryFingerprint(
                     attributes.fileKey(),
-                    attributes.creationTime());
+                    identityCreationTime(attributes));
         }
+    }
+
+    private static FileTime identityCreationTime(BasicFileAttributes attributes) {
+        // macOS may move birth time backwards when an older modification time is applied.
+        return System.getProperty("os.name").startsWith("Mac")
+                ? FileTime.fromMillis(0)
+                : attributes.creationTime();
     }
 
     private record CopyResult(long size, String sha256) {

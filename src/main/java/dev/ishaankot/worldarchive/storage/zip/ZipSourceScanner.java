@@ -103,7 +103,7 @@ final class ZipSourceScanner {
                 || isWindowsReparsePoint(source.path())
                 || current.size() != source.size()
                 || !current.lastModifiedTime().equals(source.lastModifiedTime())
-                || !current.creationTime().equals(source.creationTime())
+                || !identityCreationTime(current).equals(source.creationTime())
                 || !Objects.equals(current.fileKey(), source.fileKey())) {
             throw new ZipBackupException("A world file changed while the ZIP backup was being created");
         }
@@ -230,7 +230,7 @@ final class ZipSourceScanner {
         static DirectoryFingerprint from(BasicFileAttributes attributes) {
             return new DirectoryFingerprint(
                     attributes.fileKey(),
-                    attributes.creationTime());
+                    identityCreationTime(attributes));
         }
     }
 
@@ -259,7 +259,7 @@ final class ZipSourceScanner {
                     true,
                     0,
                     attributes.lastModifiedTime(),
-                    attributes.creationTime(),
+                    identityCreationTime(attributes),
                     attributes.fileKey());
         }
 
@@ -270,7 +270,7 @@ final class ZipSourceScanner {
                     false,
                     attributes.size(),
                     attributes.lastModifiedTime(),
-                    attributes.creationTime(),
+                    identityCreationTime(attributes),
                     attributes.fileKey());
         }
 
@@ -285,5 +285,12 @@ final class ZipSourceScanner {
             return directory
                     || size == other.size && lastModifiedTime.equals(other.lastModifiedTime);
         }
+    }
+
+    private static FileTime identityCreationTime(BasicFileAttributes attributes) {
+        // macOS may move birth time backwards when an older modification time is applied.
+        return System.getProperty("os.name").startsWith("Mac")
+                ? FileTime.fromMillis(0)
+                : attributes.creationTime();
     }
 }
