@@ -12,8 +12,15 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
 
     steps:
       - name: Check out repository
@@ -31,5 +38,15 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Check and build
+      - name: Verify system Git and Git LFS
+        run: |
+          git --version
+          git lfs version
+
+      - name: Check and build (Linux)
+        if: runner.os == 'Linux'
         run: ./gradlew --no-daemon check build
+
+      - name: Check and build (Windows)
+        if: runner.os == 'Windows'
+        run: .\gradlew.bat --no-daemon check build
