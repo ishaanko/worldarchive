@@ -20,6 +20,7 @@ import java.time.Instant;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -33,6 +34,144 @@ final class FileSystemBackupCaptureFactoryTest {
 
     @TempDir
     Path temporaryDirectory;
+
+    @Test
+    void removesOnlyUnlockedOwnedCrashLeftoversAndKeepsMarkersOutsidePayload() throws Exception {
+        Path captures = Files.createDirectory(temporaryDirectory.resolve("captures-recovery"));
+        UUID staleId = UUID.fromString("10000000-0000-0000-0000-000000000001");
+        Path staleCapture = Files.createDirectory(captureRoot(captures, staleId));
+        Files.writeString(staleCapture.resolve("level.dat"), "stale", StandardCharsets.UTF_8);
+        Path staleMarker = writeOwnershipMarker(captures, staleId, staleId);
+
+        FileSystemBackupCaptureFactory factory = new FileSystemBackupCaptureFactory(captures);
+
+        assertFalse(Files.exists(staleCapture));
+        assertFalse(Files.exists(staleMarker));
+
+        UUID nextId = UUID.fromString("10000000-0000-0000-0000-000000000002");
+        Path nextCapture = Files.createDirectory(captureRoot(captures, nextId));
+        Files.writeString(nextCapture.resolve("level.dat"), "next-stale", StandardCharsets.UTF_8);
+        Path nextMarker = writeOwnershipMarker(captures, nextId, nextId);
+
+        Path world = Files.createDirectory(temporaryDirectory.resolve("world-recovery"));
+        Files.writeString(world.resolve("level.dat"), "current", StandardCharsets.UTF_8);
+        CapturedBackup captured = factory.capture(
+                request(world, BackupTrigger.MANUAL),
+                BackupId.create(),
+                CREATED_AT,
+                Optional.empty(),
+                CaptureProgressListener.NO_OP);
+        assertFalse(Files.exists(nextCapture));
+        assertFalse(Files.exists(nextMarker));
+        Path activeCapture = captured.capture().worldDirectory();
+        Path activeMarker = markerForCapture(activeCapture);
+        try {
+            assertTrue(Files.isRegularFile(activeMarker));
+            try (var payload = Files.list(activeCapture)) {
+                assertEquals(List.of(activeCapture.resolve("level.dat")), payload.toList());
+            }
+        } finally {
+            captured.close();
+        }
+        assertFalse(Files.exists(activeCapture));
+        assertFalse(Files.exists(activeMarker));
+    }
+
+    @Test
+    void preservesAnActiveCaptureAcrossStartupAndNextCaptureCleanup() throws Exception {
+        Path captures = temporaryDirectory.resolve("captures-active");
+        Path firstWorld = Files.createDirectory(temporaryDirectory.resolve("world-active-first"));
+        Files.writeString(firstWorld.resolve("level.dat"), "first", StandardCharsets.UTF_8);
+        FileSystemBackupCaptureFactory firstFactory = new FileSystemBackupCaptureFactory(captures);
+        CapturedBackup first = firstFactory.capture(
+                request(firstWorld, BackupTrigger.MANUAL),
+                BackupId.create(),
+                CREATED_AT,
+                Optional.empty(),
+                CaptureProgressListener.NO_OP);
+        Path firstCapture = first.capture().worldDirectory();
+        Path firstMarker = markerForCapture(firstCapture);
+
+        FileSystemBackupCaptureFactory secondFactory = new FileSystemBackupCaptureFactory(captures);
+        assertTrue(Files.isDirectory(firstCapture));
+        assertTrue(Files.isRegularFile(firstMarker));
+
+        Path secondWorld = Files.createDirectory(temporaryDirectory.resolve("world-active-second"));
+        Files.writeString(secondWorld.resolve("level.dat"), "second", StandardCharsets.UTF_8);
+        CapturedBackup second = secondFactory.capture(
+                request(secondWorld, BackupTrigger.MANUAL),
+                BackupId.create(),
+                CREATED_AT,
+                Optional.empty(),
+                CaptureProgressListener.NO_OP);
+        try {
+            assertTrue(Files.isDirectory(firstCapture));
+            assertEquals("first", Files.readString(firstCapture.resolve("level.dat")));
+        } finally {
+            second.close();
+            first.close();
+        }
+        assertFalse(Files.exists(firstCapture));
+        assertFalse(Files.exists(firstMarker));
+    }
+
+    @Test
+    void preservesUnmarkedMismatchedNoncanonicalAndUnsafeCandidates() throws Exception {
+        Path captures = Files.createDirectory(temporaryDirectory.resolve("captures-conservative"));
+
+        UUID unmarkedId = UUID.fromString("20000000-0000-0000-0000-000000000001");
+        Path unmarked = Files.createDirectory(captureRoot(captures, unmarkedId));
+        Files.writeString(unmarked.resolve("keep.txt"), "unmarked", StandardCharsets.UTF_8);
+
+        UUID mismatchedId = UUID.fromString("20000000-0000-0000-0000-000000000002");
+        Path mismatched = Files.createDirectory(captureRoot(captures, mismatchedId));
+        UUID differentId = UUID.fromString("20000000-0000-0000-0000-000000000003");
+        Path mismatchedMarker = writeOwnershipMarker(captures, mismatchedId, differentId);
+
+        UUID unsafeTreeId = UUID.fromString("20000000-0000-0000-0000-000000000004");
+        Path unsafeTree = Files.writeString(
+                captureRoot(captures, unsafeTreeId),
+                "not-a-directory",
+                StandardCharsets.UTF_8);
+        Path unsafeTreeMarker = writeOwnershipMarker(captures, unsafeTreeId, unsafeTreeId);
+
+        UUID unsafeMarkerId = UUID.fromString("20000000-0000-0000-0000-000000000005");
+        Path unsafeMarkerCapture = Files.createDirectory(captureRoot(captures, unsafeMarkerId));
+        Path unsafeMarker = Files.createDirectory(markerForCapture(unsafeMarkerCapture));
+
+        UUID noncanonicalId = UUID.fromString("abcdef00-0000-0000-0000-000000000006");
+        Path noncanonical = Files.createDirectory(
+                captures.resolve(".capture-" + noncanonicalId.toString().toUpperCase(java.util.Locale.ROOT)));
+        Path noncanonicalMarker = markerForCapture(noncanonical);
+        Files.writeString(
+                noncanonicalMarker,
+                "worldarchive-private-capture-v1:" + noncanonicalId + '\n',
+                StandardCharsets.UTF_8);
+
+        FileSystemBackupCaptureFactory factory = new FileSystemBackupCaptureFactory(captures);
+
+        assertTrue(Files.isDirectory(unmarked));
+        assertTrue(Files.isDirectory(mismatched));
+        assertTrue(Files.isRegularFile(mismatchedMarker));
+        assertTrue(Files.isRegularFile(unsafeTree));
+        assertTrue(Files.isRegularFile(unsafeTreeMarker));
+        assertTrue(Files.isDirectory(unsafeMarkerCapture));
+        assertTrue(Files.isDirectory(unsafeMarker));
+        assertTrue(Files.isDirectory(noncanonical));
+        assertTrue(Files.isRegularFile(noncanonicalMarker));
+
+        Path world = Files.createDirectory(temporaryDirectory.resolve("world-conservative"));
+        Files.writeString(world.resolve("level.dat"), "new", StandardCharsets.UTF_8);
+        try (CapturedBackup ignored = factory.capture(
+                request(world, BackupTrigger.MANUAL),
+                BackupId.create(),
+                CREATED_AT,
+                Optional.empty(),
+                CaptureProgressListener.NO_OP)) {
+            assertTrue(Files.isDirectory(unmarked));
+            assertTrue(Files.isRegularFile(unsafeTree));
+        }
+    }
 
     @Test
     void createsOneImmutablePortableCaptureWithExactChangeAccounting() throws Exception {
@@ -185,6 +324,24 @@ final class FileSystemBackupCaptureFactoryTest {
                 world,
                 "Test World",
                 trigger);
+    }
+
+    private static Path captureRoot(Path captures, UUID captureId) {
+        return captures.resolve(".capture-" + captureId);
+    }
+
+    private static Path markerForCapture(Path captureRoot) {
+        return captureRoot.resolveSibling(captureRoot.getFileName() + ".worldarchive-owner");
+    }
+
+    private static Path writeOwnershipMarker(Path captures, UUID fileId, UUID contentsId)
+            throws IOException {
+        Path marker = markerForCapture(captureRoot(captures, fileId));
+        Files.writeString(
+                marker,
+                "worldarchive-private-capture-v1:" + contentsId + '\n',
+                StandardCharsets.UTF_8);
+        return marker;
     }
 
     private static WorldInventory.Entry entry(String path, byte[] contents) throws Exception {
