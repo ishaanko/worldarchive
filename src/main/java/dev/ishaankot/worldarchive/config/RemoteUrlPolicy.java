@@ -21,7 +21,7 @@ final class RemoteUrlPolicy {
                     + "(?<path>[\\p{L}\\p{N}._~@%+\\-/]{1,1024})");
 
     private static final Pattern LOCAL_REMOTE = Pattern.compile(
-            "(?:[A-Za-z]:[\\\\/]|\\\\\\\\|/)[\\p{L}\\p{N} ._()@+\\-\\\\/:]{1,2046}");
+            "(?:[A-Za-z]:[\\\\/]|\\\\\\\\|/)[\\p{L}\\p{N} ._()@+~\\-\\\\/:]{1,2046}");
 
     private RemoteUrlPolicy() {
     }

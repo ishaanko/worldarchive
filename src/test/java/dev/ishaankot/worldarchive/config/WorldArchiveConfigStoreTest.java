@@ -59,8 +59,9 @@ final class WorldArchiveConfigStoreTest {
                 new ZipDestinationConfig(true, Optional.of(zipDestination)));
 
         store.save(expected, java.util.List.of());
-        assertEquals(expected, store.load(java.util.List.of()));
-        assertEquals(expected, store.load(java.util.List.of()));
+        WorldArchiveConfig canonicalExpected = expected.validateDestinations(java.util.List.of());
+        assertEquals(canonicalExpected, store.load(java.util.List.of()));
+        assertEquals(canonicalExpected, store.load(java.util.List.of()));
         String serialized = Files.readString(file, StandardCharsets.UTF_8);
         assertTrue(serialized.contains("git-世界"));
         assertFalse(serialized.toLowerCase().contains("password"));
@@ -214,7 +215,9 @@ final class WorldArchiveConfigStoreTest {
 
         store.save(expected, java.util.List.of(world));
 
-        assertEquals(expected, store.load(java.util.List.of(world)));
+        assertEquals(
+                expected.validateDestinations(java.util.List.of(world)),
+                store.load(java.util.List.of(world)));
     }
 
     @Test

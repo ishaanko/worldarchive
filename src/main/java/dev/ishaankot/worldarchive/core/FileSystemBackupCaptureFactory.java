@@ -576,13 +576,14 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
                     posix.setPermissions(Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)
                             ? EnumSet.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_EXECUTE)
                             : EnumSet.of(PosixFilePermission.OWNER_READ));
-                }
-                DosFileAttributeView dos = Files.getFileAttributeView(
-                        path,
-                        DosFileAttributeView.class,
-                        LinkOption.NOFOLLOW_LINKS);
-                if (dos != null) {
-                    dos.setReadOnly(true);
+                } else {
+                    DosFileAttributeView dos = Files.getFileAttributeView(
+                            path,
+                            DosFileAttributeView.class,
+                            LinkOption.NOFOLLOW_LINKS);
+                    if (dos != null) {
+                        dos.setReadOnly(true);
+                    }
                 }
             }
         }
@@ -600,13 +601,14 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
                             PosixFilePermission.OWNER_WRITE,
                             PosixFilePermission.OWNER_EXECUTE)
                     : EnumSet.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE));
-        }
-        DosFileAttributeView dos = Files.getFileAttributeView(
-                path,
-                DosFileAttributeView.class,
-                LinkOption.NOFOLLOW_LINKS);
-        if (dos != null) {
-            dos.setReadOnly(false);
+        } else {
+            DosFileAttributeView dos = Files.getFileAttributeView(
+                    path,
+                    DosFileAttributeView.class,
+                    LinkOption.NOFOLLOW_LINKS);
+            if (dos != null) {
+                dos.setReadOnly(false);
+            }
         }
     }
 

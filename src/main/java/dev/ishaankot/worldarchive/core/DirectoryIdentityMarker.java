@@ -3,6 +3,7 @@ package dev.ishaankot.worldarchive.core;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.attribute.UserDefinedFileAttributeView;
@@ -10,7 +11,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 
-/** Random filesystem metadata used when a directory has no stable platform file key. */
+/** Random filesystem metadata that supplements platform directory identity when supported. */
 public final class DirectoryIdentityMarker {
     private static final String ATTRIBUTE = "worldarchive.restore-identity";
 
@@ -64,9 +65,14 @@ public final class DirectoryIdentityMarker {
         return Optional.of(StandardCharsets.UTF_8.decode(encoded).toString());
     }
 
-    private static UserDefinedFileAttributeView view(Path directory) {
-        return java.nio.file.Files.getFileAttributeView(
-                Objects.requireNonNull(directory, "directory"),
+    private static UserDefinedFileAttributeView view(Path directory) throws IOException {
+        Path required = Objects.requireNonNull(directory, "directory");
+        if (!Files.getFileStore(required)
+                .supportsFileAttributeView(UserDefinedFileAttributeView.class)) {
+            return null;
+        }
+        return Files.getFileAttributeView(
+                required,
                 UserDefinedFileAttributeView.class,
                 LinkOption.NOFOLLOW_LINKS);
     }

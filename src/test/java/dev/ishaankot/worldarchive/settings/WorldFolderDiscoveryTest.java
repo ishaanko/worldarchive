@@ -36,7 +36,7 @@ class WorldFolderDiscoveryTest {
             }
         });
 
-        assertEquals(List.of(world.toAbsolutePath().normalize()), discovered);
+        assertEquals(List.of(world.toRealPath()), discovered);
         assertTrue(Files.isRegularFile(world.resolve(".worldarchive/world.json")));
         assertFalse(Files.exists(unrelated.resolve(".worldarchive")));
         assertFalse(Files.exists(fake.resolve(".worldarchive")));

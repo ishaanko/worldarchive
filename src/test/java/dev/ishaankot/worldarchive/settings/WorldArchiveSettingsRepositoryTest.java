@@ -65,7 +65,9 @@ class WorldArchiveSettingsRepositoryTest {
         WorldArchiveSettingsRepository reloaded = new WorldArchiveSettingsRepository(
                 new WorldArchiveConfigStore(configFile),
                 List::of);
-        WorldArchiveConfig expected = SettingsDefaults.fromConfigFile(configFile).resolve(paused);
+        WorldArchiveConfig expected = SettingsDefaults.fromConfigFile(configFile)
+                .resolve(paused)
+                .validateDestinations(List.of());
         assertEquals(expected, reloaded.load());
     }
 
@@ -80,10 +82,10 @@ class WorldArchiveSettingsRepositoryTest {
         WorldArchiveConfig loaded = repository.load();
 
         assertEquals(
-                gameDirectory.resolve("worldarchive/worldarchive.git"),
+                gameDirectory.toRealPath().resolve("worldarchive/worldarchive.git"),
                 loaded.git().repository().orElseThrow());
         assertEquals(
-                gameDirectory.resolve("worldarchive/archives"),
+                gameDirectory.toRealPath().resolve("worldarchive/archives"),
                 loaded.zip().destination().orElseThrow());
         assertTrue(Files.isRegularFile(configFile));
         assertEquals(loaded, new WorldArchiveConfigStore(configFile).load(List.of()));
@@ -117,7 +119,8 @@ class WorldArchiveSettingsRepositoryTest {
                 new WorldArchiveConfigStore(configFile),
                 knownWorlds::get,
                 defaults);
-        WorldArchiveConfig safe = defaults.resolve(WorldArchiveConfig.defaults());
+        WorldArchiveConfig safe = defaults.resolve(WorldArchiveConfig.defaults())
+                .validateDestinations(List.of());
         repository.save(safe);
         Path runtimeWorld = Files.createDirectory(temporaryDirectory.resolve("runtime-world"));
         knownWorlds.set(List.of(runtimeWorld));
@@ -151,7 +154,7 @@ class WorldArchiveSettingsRepositoryTest {
                 new WorldArchiveConfigStore(configFile),
                 () -> known).load();
         assertTrue(known.contains(world.toAbsolutePath().normalize()));
-        assertTrue(durable.worlds().contains(new WorldConfig(worldId, true, world)));
+        assertTrue(durable.worlds().contains(new WorldConfig(worldId, true, world.toRealPath())));
     }
 
     @Test

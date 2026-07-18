@@ -512,7 +512,9 @@ class BackupRecoveryServiceTest {
         assertEquals("payload-ZIP", Files.readString(
                 result.restoredWorldDirectory().resolve("payload.txt")));
         try (var children = Files.list(worlds)) {
-            assertEquals(List.of(result.restoredWorldDirectory()), children.toList());
+            List<Path> published = children.toList();
+            assertEquals(1, published.size());
+            assertTrue(Files.isSameFile(result.restoredWorldDirectory(), published.getFirst()));
         }
     }
 

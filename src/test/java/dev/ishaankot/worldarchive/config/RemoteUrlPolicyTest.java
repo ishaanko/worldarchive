@@ -21,6 +21,8 @@ final class RemoteUrlPolicyTest {
                 RemoteUrlPolicy.validate("git@example.invalid:team/backups.git"));
         String local = temporaryDirectory.resolve("remote.git").toString();
         assertEquals(local, RemoteUrlPolicy.validate(local));
+        String shortName = temporaryDirectory.resolve("RUNNER~1/remote.git").toString();
+        assertEquals(shortName, RemoteUrlPolicy.validate(shortName));
     }
 
     @Test

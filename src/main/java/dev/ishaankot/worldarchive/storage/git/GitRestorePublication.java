@@ -227,11 +227,9 @@ final class GitRestorePublication implements AutoCloseable {
             if (requireFileKey && fileKey == null) {
                 throw new GitStorageException(message);
             }
-            Optional<String> marker = fileKey != null
-                    ? Optional.empty()
-                    : createMarker
-                            ? DirectoryIdentityMarker.create(path)
-                            : DirectoryIdentityMarker.read(path);
+            Optional<String> marker = createMarker
+                    ? DirectoryIdentityMarker.create(path)
+                    : DirectoryIdentityMarker.read(path);
             if (fileKey == null && marker.isEmpty()) {
                 throw new GitStorageException(message);
             }
@@ -255,12 +253,13 @@ final class GitRestorePublication implements AutoCloseable {
             Optional<String> currentMarker = marker.isPresent()
                     ? DirectoryIdentityMarker.read(path)
                     : Optional.empty();
-            boolean matches = fileKey != null
+            boolean sameIdentity = fileKey != null
                     ? Objects.equals(fileKey, attributes.fileKey())
                     : marker.isPresent()
                             ? marker.equals(currentMarker)
                             : Objects.equals(creationTime, attributes.creationTime());
-            if (!matches) {
+            boolean sameMarker = marker.isEmpty() || marker.equals(currentMarker);
+            if (!sameIdentity || !sameMarker) {
                 throw new GitStorageException(message);
             }
         }

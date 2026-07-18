@@ -788,9 +788,7 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
             deleteTree(root.path(), staging);
             throw new IOException("Private restore staging is unsafe");
         }
-        Optional<String> identityMarker = attributes.fileKey() == null
-                ? DirectoryIdentityMarker.create(staging)
-                : Optional.empty();
+        Optional<String> identityMarker = DirectoryIdentityMarker.create(staging);
         if (attributes.fileKey() == null && identityMarker.isEmpty()) {
             deleteTree(root.path(), staging);
             throw new IOException("Private restore staging has no stable identity");

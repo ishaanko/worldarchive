@@ -227,7 +227,12 @@ class SettingsDraftTest {
     }
 
     private WorldArchiveConfig resolvedDefaults() {
-        return new SettingsDefaults(temporaryDirectory.resolve("worldarchive"))
-                .resolve(WorldArchiveConfig.defaults());
+        try {
+            return new SettingsDefaults(temporaryDirectory.resolve("worldarchive"))
+                    .resolve(WorldArchiveConfig.defaults())
+                    .validateDestinations(List.of());
+        } catch (IOException exception) {
+            throw new AssertionError(exception);
+        }
     }
 }

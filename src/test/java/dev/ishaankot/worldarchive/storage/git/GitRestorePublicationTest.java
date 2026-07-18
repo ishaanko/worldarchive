@@ -128,6 +128,32 @@ class GitRestorePublicationTest {
                         "identity unavailable"));
     }
 
+    @Test
+    void fileKeyUsesSupplementalDirectoryMarkerWhenAvailable() throws Exception {
+        Path directory = Files.createDirectory(temporaryDirectory.resolve("keyed-identity"));
+        FileTime creationTime = FileTime.fromMillis(1_234L);
+        Object reusedFileKey = "reused-file-key";
+        GitRestorePublication.DirectoryIdentity identity =
+                GitRestorePublication.DirectoryIdentity.capture(
+                        directory,
+                        directoryAttributes(reusedFileKey, creationTime),
+                        false,
+                        true,
+                        "identity unavailable");
+        Assumptions.assumeTrue(identity.marker().isPresent());
+
+        assertDoesNotThrow(() -> identity.requireMatches(
+                directory,
+                directoryAttributes(reusedFileKey, creationTime),
+                "identity changed"));
+        Files.delete(directory);
+        Files.createDirectory(directory);
+        assertThrows(GitStorageException.class, () -> identity.requireMatches(
+                directory,
+                directoryAttributes(reusedFileKey, creationTime),
+                "identity changed"));
+    }
+
     private boolean hasPrivateRestoreDirectory() throws IOException {
         try (Stream<Path> children = Files.list(temporaryDirectory)) {
             return children.anyMatch(path -> path.getFileName().toString()

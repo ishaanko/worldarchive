@@ -218,6 +218,7 @@ class ZipBackupStoreTest {
     void sourceSymlinkIsRejectedWhereSupported() throws Exception {
         Path world = Files.createDirectories(temporaryDirectory.resolve("world"));
         Path target = Files.writeString(world.resolve("target.txt"), "target");
+        BackupManifest manifest = manifestFor(world, CREATED_AT);
         Path link = world.resolve("link.txt");
         boolean linkCreated;
         try {
@@ -227,7 +228,6 @@ class ZipBackupStoreTest {
             linkCreated = false;
         }
         Assumptions.assumeTrue(linkCreated, "Symbolic links are unavailable in this environment");
-        BackupManifest manifest = manifestFor(world, CREATED_AT);
 
         assertThrows(ZipBackupException.class, () -> new ZipBackupStore(
                 temporaryDirectory.resolve("archives")).create(new BackupCapture(world, manifest)));
