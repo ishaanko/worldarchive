@@ -1,7 +1,6 @@
 package dev.ishaankot.worldarchive.storage.git;
 
 import dev.ishaankot.worldarchive.core.AtomicFiles;
-import dev.ishaankot.worldarchive.core.BackupBackend;
 import dev.ishaankot.worldarchive.core.BackupCapture;
 import dev.ishaankot.worldarchive.core.BackupOperation;
 import dev.ishaankot.worldarchive.core.OperationId;
@@ -52,8 +51,8 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
-/** Native Git/Git LFS storage using a shared external bare repository. */
-public final class GitBackupBackend implements BackupBackend, AutoCloseable {
+/** Native Git/Git LFS storage using one external bare repository. */
+public final class GitBackupBackend implements GitSnapshotStore {
     static final String MANIFEST_PATH = ".worldarchive-manifest.json";
 
     private static final int LFS_POINTER_OUTPUT_BYTES = 4 * 1_024;
@@ -68,6 +67,8 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
 
     private static final Pattern SNAPSHOT_REF = Pattern.compile(
             "refs/heads/worldarchive/([0-9a-f-]{36})/([0-9a-f-]{36})");
+
+    private static final String SHARED_HISTORY_PREFIX = "refs/heads/worldarchive-history/";
 
     private final GitBackendSettings settings;
 
@@ -230,6 +231,7 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
         OperationId operationId = OperationId.create();
         report(progressListener, operationId, capture.manifest(), OperationPhase.PREPARING, "Checking Git tools");
         try {
+            requireConfiguredWorld(capture.manifest().worldId());
             GitToolHealth health = new GitToolProbe(settings, runner).probe();
             if (!health.available()) {
                 return DestinationResult.failed(DestinationType.GIT, health.summary());
@@ -289,10 +291,14 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
             Path index = temporary.resolve("index");
             Map<String, String> environment = indexEnvironment(index, false);
             try {
-                Optional<String> newestCommit = newestCommit(manifest.worldId());
-                if (newestCommit.isPresent()) {
+                String historyRef = historyRef(manifest.worldId());
+                Optional<String> previousHistory = resolveRef(historyRef);
+                Optional<String> parentCommit = previousHistory.isPresent()
+                        ? previousHistory
+                        : newestCommit(manifest.worldId());
+                if (parentCommit.isPresent()) {
                     runChecked(gitCommand(
-                            List.of("--git-dir=" + settings.repository(), "read-tree", newestCommit.get()),
+                            List.of("--git-dir=" + settings.repository(), "read-tree", parentCommit.get()),
                             workTree,
                             environment,
                             new byte[0]));
@@ -331,8 +337,14 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
                 commitEnvironment.put("GIT_COMMITTER_EMAIL", "worldarchive@localhost");
                 commitEnvironment.put("GIT_AUTHOR_DATE", manifest.createdAt().toString());
                 commitEnvironment.put("GIT_COMMITTER_DATE", manifest.createdAt().toString());
+                List<String> commitArguments = new ArrayList<>(List.of(
+                        "--git-dir=" + settings.repository(), "commit-tree", tree));
+                parentCommit.ifPresent(parent -> {
+                    commitArguments.add("-p");
+                    commitArguments.add(parent);
+                });
                 String commit = objectId(runChecked(gitCommand(
-                        List.of("--git-dir=" + settings.repository(), "commit-tree", tree),
+                        commitArguments,
                         workTree,
                         commitEnvironment,
                         GitCommand.utf8Input(commitMessage(snapshotManifest)))).standardOutput());
@@ -350,7 +362,11 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
                         commit,
                         manifest.createdAt());
                 verifySnapshotCommit(snapshot);
-                updateRefWithRollback(refName, commit, Optional.empty());
+                publishSnapshotAndHistory(
+                        refName,
+                        historyRef,
+                        commit,
+                        previousHistory);
                 return snapshot;
             } finally {
                 deleteTemporaryDirectoryUnlessLocked(temporary);
@@ -381,6 +397,9 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
 
     private List<GitSnapshot> listSnapshotsBlocking(Optional<WorldId> worldId)
             throws IOException, InterruptedException, GitStorageException {
+        if (worldId.isPresent()) {
+            requireConfiguredWorld(worldId.orElseThrow());
+        }
         if (!Files.isDirectory(settings.repository())) {
             return List.of();
         }
@@ -427,6 +446,7 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
 
     private GitVerification verifySnapshotBlocking(WorldId worldId, BackupId backupId)
             throws IOException, InterruptedException, GitStorageException {
+        requireConfiguredWorld(worldId);
         requireBareRepository();
         GitSnapshot snapshot = resolveSnapshot(worldId, backupId);
         try {
@@ -450,6 +470,7 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
             BackupId backupId,
             BackupManifest expectedManifest)
             throws IOException, InterruptedException, GitStorageException {
+        requireConfiguredWorld(worldId);
         ensureRepository();
         ResolvedSnapshot resolved = resolveVerifiedSnapshotForRestore(
                 worldId, backupId, Optional.of(expectedManifest));
@@ -480,6 +501,7 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
             Optional<BackupManifest> expectedManifest,
             Path emptyStaging)
             throws IOException, InterruptedException, GitStorageException {
+        requireConfiguredWorld(worldId);
         ensureRepository();
         ResolvedSnapshot resolved = resolveVerifiedSnapshotForRestore(
                 worldId, backupId, expectedManifest);
@@ -698,6 +720,7 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
 
     private boolean deleteSnapshotBlocking(WorldId worldId, BackupId backupId)
             throws IOException, InterruptedException, GitStorageException {
+        requireConfiguredWorld(worldId);
         requireBareRepository();
         String refName = GitSnapshot.refName(worldId, backupId);
         Optional<String> current = resolveRef(refName);
@@ -787,6 +810,7 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
 
     private DestinationResult syncSnapshotBlocking(WorldId worldId, BackupId backupId)
             throws IOException, InterruptedException, GitStorageException {
+        requireConfiguredWorld(worldId);
         requireBareRepository();
         GitSnapshot snapshot = resolveSnapshot(worldId, backupId);
         verifySnapshotCommit(snapshot);
@@ -828,14 +852,22 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
                 settings.repository(),
                 Map.of(),
                 new byte[0]));
+        String historyRef = historyRef(snapshot.worldId());
+        boolean snapshotIsHistoryTip = resolveRef(historyRef)
+                .filter(snapshot.commitId()::equals)
+                .isPresent();
+        List<String> pushArguments = new ArrayList<>(List.of(
+                "--git-dir=" + settings.repository(),
+                "push",
+                "--atomic",
+                "--porcelain",
+                settings.remoteName()));
+        if (snapshotIsHistoryTip) {
+            pushArguments.add(historyRef + ":" + historyRef);
+        }
+        pushArguments.add(snapshot.refName() + ":" + snapshot.refName());
         runChecked(gitCommand(
-                List.of(
-                        "--git-dir=" + settings.repository(),
-                        "push",
-                        "--atomic",
-                        "--porcelain",
-                        settings.remoteName(),
-                        snapshot.refName() + ":" + snapshot.refName()),
+                pushArguments,
                 settings.repository(),
                 Map.of(),
                 new byte[0]));
@@ -856,6 +888,17 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
         }
         GitRepositoryPathGuard.requireDirectory(settings.repository());
         requireBareRepository();
+        if (settings.isolatedWorldId().isPresent()) {
+            runChecked(gitCommand(
+                    List.of(
+                            "--git-dir=" + settings.repository(),
+                            "symbolic-ref",
+                            "HEAD",
+                            "refs/heads/main"),
+                    settings.repository(),
+                    Map.of(),
+                    new byte[0]));
+        }
         configureRepository();
     }
 
@@ -950,6 +993,21 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
         configure("remote." + settings.remoteName() + ".url", remoteUrl);
     }
 
+    private void requireConfiguredWorld(WorldId worldId) throws GitStorageException {
+        Optional<WorldId> isolated = settings.isolatedWorldId();
+        if (isolated.isPresent() && !isolated.orElseThrow().equals(worldId)) {
+            throw new GitStorageException(
+                    "The isolated Git repository belongs to a different world");
+        }
+    }
+
+    private String historyRef(WorldId worldId) throws GitStorageException {
+        requireConfiguredWorld(worldId);
+        return settings.isolatedWorldId().isPresent()
+                ? "refs/heads/main"
+                : SHARED_HISTORY_PREFIX + worldId;
+    }
+
     private Optional<String> newestCommit(WorldId worldId)
             throws IOException, InterruptedException, GitStorageException {
         GitCommandResult result = runChecked(gitCommand(
@@ -965,6 +1023,47 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
                 new byte[0]));
         String value = result.standardOutput().trim();
         return value.isEmpty() ? Optional.empty() : Optional.of(objectId(value));
+    }
+
+    private void publishSnapshotAndHistory(
+            String snapshotRef,
+            String historyRef,
+            String commit,
+            Optional<String> previousHistory)
+            throws IOException, InterruptedException, GitStorageException {
+        List<String> transaction = new ArrayList<>();
+        transaction.add("start");
+        transaction.add("create " + snapshotRef + " " + commit);
+        if (previousHistory.isPresent()) {
+            transaction.add("update " + historyRef + " " + commit + " "
+                    + previousHistory.orElseThrow());
+        } else {
+            transaction.add("create " + historyRef + " " + commit);
+        }
+        transaction.add("prepare");
+        transaction.add("commit");
+        try {
+            runChecked(gitCommand(
+                    List.of("--git-dir=" + settings.repository(), "update-ref", "--stdin"),
+                    settings.repository(),
+                    Map.of(),
+                    GitCommand.utf8Input(String.join("\n", transaction) + "\n")));
+        } catch (IOException | GitStorageException exception) {
+            Optional<String> publishedSnapshot = resolveRef(snapshotRef);
+            Optional<String> publishedHistory = resolveRef(historyRef);
+            if (publishedSnapshot.equals(Optional.of(commit))
+                    && publishedHistory.equals(Optional.of(commit))) {
+                return;
+            }
+            boolean unchangedSnapshot = publishedSnapshot.isEmpty();
+            boolean unchangedHistory = publishedHistory.equals(previousHistory);
+            if (!unchangedSnapshot || !unchangedHistory) {
+                throw new GitStorageException(
+                        "Git snapshot publication has an ambiguous repository state",
+                        exception);
+            }
+            throw exception;
+        }
     }
 
     private boolean refExists(String refName) throws IOException, InterruptedException, GitStorageException {
@@ -1162,14 +1261,14 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
                 settings.repository(),
                 Map.of(),
                 new byte[0]));
-        verifyParentless(commit);
+        GitSnapshotManifest snapshotManifest = readSnapshotManifest(commit);
+        verifyAncestry(snapshot, commit, snapshotManifest);
         List<GitTreeEntry> treeEntries = readTreeEntries(commit);
         runChecked(gitCommand(
                 List.of("--git-dir=" + settings.repository(), "fsck", "--strict", "--no-dangling", commit),
                 settings.repository(),
                 Map.of(),
                 new byte[0]));
-        GitSnapshotManifest snapshotManifest = readSnapshotManifest(commit);
         requireSnapshotIdentity(snapshot, snapshotManifest, commit);
         List<GitLfsPointer> pointers = findAndVerifySnapshotFiles(
                 treeEntries,
@@ -1177,21 +1276,42 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
         return new VerifiedSnapshot(snapshotManifest, pointers);
     }
 
-    private void verifyParentless(String commit)
+    private void verifyAncestry(
+            GitSnapshot snapshot,
+            String commit,
+            GitSnapshotManifest snapshotManifest)
             throws IOException, InterruptedException, GitStorageException {
         GitCommandResult result = runChecked(gitCommand(
                 List.of("--git-dir=" + settings.repository(), "cat-file", "-p", commit),
                 settings.repository(),
                 Map.of(),
                 new byte[0]));
+        List<String> parents = new ArrayList<>();
         for (String line : result.standardOutput().lines().toList()) {
             if (line.startsWith("parent ")) {
-                throw new GitStorageException("WorldArchive snapshot commit unexpectedly has a parent");
+                parents.add(objectId(line.substring("parent ".length())));
             }
             if (line.isEmpty()) {
                 break;
             }
         }
+        if (parents.size() > 1) {
+            throw new GitStorageException("WorldArchive snapshot commit has multiple parents");
+        }
+        if (parents.isEmpty()) {
+            return;
+        }
+        GitSnapshotManifest parentManifest = readSnapshotManifest(parents.getFirst());
+        if (!parentManifest.manifest().worldId().equals(snapshot.worldId())) {
+            throw new GitStorageException("WorldArchive snapshot parent belongs to another world");
+        }
+        if (parentManifest.manifest().backupId().equals(snapshot.backupId())) {
+            throw new GitStorageException("WorldArchive snapshot parent repeats its backup identity");
+        }
+        if (parentManifest.manifest().createdAt().isAfter(snapshotManifest.manifest().createdAt())) {
+            throw new GitStorageException("WorldArchive snapshot parent is newer than its child");
+        }
+        requireCommitMessage(parents.getFirst(), parentManifest);
     }
 
     private void verifyTreeModes(String treeish)
@@ -1238,6 +1358,13 @@ public final class GitBackupBackend implements BackupBackend, AutoCloseable {
                 || manifest.createdAt().getEpochSecond() != snapshot.committedAt().getEpochSecond()) {
             throw new GitStorageException("Git snapshot manifest identity does not match its selected ref");
         }
+        requireCommitMessage(commit, snapshotManifest);
+    }
+
+    private void requireCommitMessage(
+            String commit,
+            GitSnapshotManifest snapshotManifest)
+            throws IOException, InterruptedException, GitStorageException {
         GitCommandResult message = runChecked(gitCommand(
                 List.of(
                         "--git-dir=" + settings.repository(),

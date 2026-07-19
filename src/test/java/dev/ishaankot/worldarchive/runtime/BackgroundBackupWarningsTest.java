@@ -47,6 +47,53 @@ final class BackgroundBackupWarningsTest {
         assertTrue(BackgroundBackupWarnings.worldExit(skipped, null).isEmpty());
     }
 
+    @Test
+    void worldExitNoticeConfirmsSaveAndReportsBackupOutcome() {
+        BackupResult success = result(List.of(
+                DestinationResult.success(DestinationType.ZIP, "archive")));
+        BackupResult partial = result(List.of(
+                DestinationResult.success(DestinationType.ZIP, "archive"),
+                DestinationResult.failed(DestinationType.GIT, "sync failed")));
+        BackupResult failed = result(List.of(
+                DestinationResult.failed(DestinationType.GIT, "write failed")));
+        BackupResult skipped = result(List.of());
+
+        assertNotice(
+                "World saved; backup is running",
+                BackgroundBackupWarnings.NoticeSeverity.SUCCESS,
+                BackgroundBackupWarnings.worldExitStartedNotice());
+        assertNotice(
+                "World saved and backup completed",
+                BackgroundBackupWarnings.NoticeSeverity.SUCCESS,
+                BackgroundBackupWarnings.worldExitNotice(success, null));
+        assertNotice(
+                "World saved; backup completed with warnings",
+                BackgroundBackupWarnings.NoticeSeverity.WARNING,
+                BackgroundBackupWarnings.worldExitNotice(partial, null));
+        assertNotice(
+                "World saved; backup failed",
+                BackgroundBackupWarnings.NoticeSeverity.ERROR,
+                BackgroundBackupWarnings.worldExitNotice(failed, null));
+        assertNotice(
+                "World saved; backup skipped",
+                BackgroundBackupWarnings.NoticeSeverity.WARNING,
+                BackgroundBackupWarnings.worldExitNotice(skipped, null));
+        assertNotice(
+                "World save or backup did not complete",
+                BackgroundBackupWarnings.NoticeSeverity.ERROR,
+                BackgroundBackupWarnings.worldExitNotice(
+                        null,
+                        new IllegalStateException("save failed")));
+    }
+
+    private static void assertNotice(
+            String message,
+            BackgroundBackupWarnings.NoticeSeverity severity,
+            BackgroundBackupWarnings.ExitNotice actual) {
+        assertEquals(message, actual.message());
+        assertEquals(severity, actual.severity());
+    }
+
     private static BackupResult result(List<DestinationResult> destinations) {
         return BackupResult.aggregate(
                 BackupId.create(),

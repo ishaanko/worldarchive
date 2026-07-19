@@ -982,7 +982,7 @@ class GitBackupBackendIntegrationTest {
     }
 
     @Test
-    void ambiguousLocalRefPublicationIsRolledBackBeforeFailureReturns() throws Exception {
+    void atomicallyPublishedRefsAreAcceptedAfterAnAmbiguousCommandTimeout() throws Exception {
         Path world = temporaryDirectory.resolve("ambiguous-publication-world");
         Files.createDirectories(world);
         Files.writeString(world.resolve("level.dat"), "must not remain published");
@@ -993,13 +993,10 @@ class GitBackupBackendIntegrationTest {
         AtomicInteger refUpdates = new AtomicInteger();
         GitCommandRunner ambiguousRunner = command -> {
             if (command.arguments().contains("update-ref")
-                    && command.arguments().contains(snapshotRef)) {
-                int update = refUpdates.incrementAndGet();
-                if (update == 1) {
+                    && new String(command.standardInput(), StandardCharsets.UTF_8)
+                            .contains(snapshotRef)) {
+                if (refUpdates.incrementAndGet() == 1) {
                     systemRunner.run(command);
-                    throw new GitCommandTimeoutException(Duration.ofMillis(1));
-                }
-                if (update == 2) {
                     throw new GitCommandTimeoutException(Duration.ofMillis(1));
                 }
             }
@@ -1011,8 +1008,13 @@ class GitBackupBackendIntegrationTest {
                     capture(world, worldId, backupId, Instant.now()),
                     ProgressListener.NO_OP));
 
-            assertEquals(DestinationStatus.FAILED, result.status());
-            assertTrue(await(backend.listSnapshots(Optional.of(worldId))).isEmpty());
+            assertEquals(DestinationStatus.SUCCESS, result.status());
+            assertEquals(
+                    List.of(backupId),
+                    await(backend.listSnapshots(Optional.of(worldId))).stream()
+                            .map(GitSnapshot::backupId)
+                            .toList());
+            assertEquals(1, refUpdates.get());
         } finally {
             executor.shutdownNow();
         }

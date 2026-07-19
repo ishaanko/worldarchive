@@ -15,6 +15,7 @@ import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.Checkbox;
 import net.minecraft.client.gui.components.EditBox;
+import net.minecraft.client.gui.components.MultiLineTextWidget;
 import net.minecraft.client.gui.components.StringWidget;
 import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.screens.Screen;
@@ -51,11 +52,13 @@ public final class WorldArchiveSettingsScreen extends Screen {
 
     private SettingsLayout layout = SettingsLayout.forHeight(240);
 
-    private Page page = Page.GENERAL;
+    private Page page = Page.GIT;
 
     private int worldPage;
 
     private int gitSection;
+
+    private int zipSection;
 
     private boolean settingsLoaded;
 
@@ -85,7 +88,7 @@ public final class WorldArchiveSettingsScreen extends Screen {
 
     private Button zipBrowseButton;
 
-    private StringWidget statusWidget;
+    private MultiLineTextWidget statusWidget;
 
     public WorldArchiveSettingsScreen(Screen parent, NativeFolderChooser folderChooser) {
         super(Component.translatable("screen.worldarchive.settings.title"));
@@ -120,14 +123,16 @@ public final class WorldArchiveSettingsScreen extends Screen {
     @Override
     protected void init() {
         layout = SettingsLayout.forHeight(Math.max(height, 120));
-        gitSection = Math.min(gitSection, layout.gitSectionCount() - 1);
+        int contentWidth = Math.min(430, Math.max(180, width - 20));
+        boolean pagedDestinations = usesPagedDestinationLayout(contentWidth);
+        gitSection = Math.min(gitSection, pagedDestinations ? 2 : 0);
+        zipSection = Math.min(zipSection, pagedDestinations ? 1 : 0);
         validatedFields.clear();
         saveButton = null;
         gitBrowseButton = null;
         zipBrowseButton = null;
         statusWidget = null;
 
-        int contentWidth = Math.min(430, Math.max(180, width - 20));
         int contentX = (width - contentWidth) / 2;
         addRenderableOnly(new StringWidget(
                 contentX,
@@ -138,7 +143,6 @@ public final class WorldArchiveSettingsScreen extends Screen {
                 font));
         addTabs(contentX, contentWidth);
         switch (page) {
-            case GENERAL -> addGeneralPage(contentX, contentWidth);
             case GIT -> addGitPage(contentX, contentWidth);
             case ZIP -> addZipPage(contentX, contentWidth);
             case WORLDS -> addWorldsPage(contentX, contentWidth);
@@ -190,51 +194,21 @@ public final class WorldArchiveSettingsScreen extends Screen {
         }
     }
 
-    private void addGeneralPage(int x, int contentWidth) {
-        addSectionLabel("screen.worldarchive.settings.triggers", x, 53, contentWidth);
-        addTriggerRow(
-                x,
-                72,
-                contentWidth,
-                draft.manualEnabled(),
-                draft.worldExitEnabled(),
-                draft.scheduledEnabled(),
-                draft::setManualEnabled,
-                draft::setWorldExitEnabled,
-                draft::setScheduledEnabled);
-        EditBox interval = addTextRow(
-                "screen.worldarchive.settings.schedule_interval",
-                draft.scheduleInterval(),
-                SettingsField.SCHEDULE_INTERVAL,
-                x,
-                96,
-                contentWidth,
-                5,
-                draft::setScheduleInterval);
-        interval.setHint(Component.translatable("screen.worldarchive.settings.minutes_hint"));
-        if (!layout.compact()) {
-            addRenderableOnly(new StringWidget(
-                    x,
-                    123,
-                    contentWidth,
-                    36,
-                    Component.translatable("screen.worldarchive.settings.trigger_help")
-                            .withStyle(ChatFormatting.GRAY),
-                    font).setMaxWidth(contentWidth));
+    private void addGitPage(int x, int contentWidth) {
+        if (!usesPagedDestinationLayout(contentWidth)) {
+            addFullGitPage(x, contentWidth, 54);
+            return;
+        }
+        switch (gitSection) {
+            case 0 -> addCompactGitLocationPage(x, contentWidth, 77);
+            case 1 -> addCompactGitRemotePage(x, contentWidth, 77);
+            case 2 -> addCompactGitTimingPage(x, contentWidth, 77);
+            default -> throw new IllegalStateException("Unknown Git settings section: " + gitSection);
         }
     }
 
-    private void addGitPage(int x, int contentWidth) {
-        int firstRow = layout.gitFirstRow(gitSection);
-        if (!layout.compact()) {
-            addFullGitPage(x, contentWidth, firstRow);
-            return;
-        }
-        if (gitSection == 0) {
-            addCompactGitLocationPage(x, contentWidth, firstRow);
-        } else {
-            addCompactGitRemotePage(x, contentWidth, firstRow);
-        }
+    private boolean usesPagedDestinationLayout(int contentWidth) {
+        return layout.compact() || contentWidth < 300;
     }
 
     private void addFullGitPage(int x, int contentWidth, int firstRow) {
@@ -308,18 +282,27 @@ public final class WorldArchiveSettingsScreen extends Screen {
 
     private void addCompactGitRemotePage(int x, int contentWidth, int firstRow) {
         addGitSectionButton(x, 54, "screen.worldarchive.settings.back", 0);
-        addTriggerRow(
-                x + 68,
+        addGitSectionButton(
+                x + contentWidth - 64,
                 54,
-                contentWidth - 68,
+                "screen.worldarchive.settings.timing",
+                2);
+        addGitRemoteUrlRow(x, firstRow, contentWidth);
+        addGitPatternsRow(x, firstRow + 22, contentWidth);
+    }
+
+    private void addCompactGitTimingPage(int x, int contentWidth, int firstRow) {
+        addGitSectionButton(x, 54, "screen.worldarchive.settings.back", 1);
+        addTriggerRow(
+                x,
+                firstRow,
+                contentWidth,
                 draft.gitManualEnabled(),
                 draft.gitWorldExitEnabled(),
                 draft.gitScheduledEnabled(),
                 draft::setGitManualEnabled,
                 draft::setGitWorldExitEnabled,
                 draft::setGitScheduledEnabled);
-        addGitRemoteUrlRow(x, firstRow, contentWidth);
-        addGitPatternsRow(x, firstRow + 22, contentWidth);
     }
 
     private void addGitSectionButton(int x, int y, String key, int section) {
@@ -392,6 +375,18 @@ public final class WorldArchiveSettingsScreen extends Screen {
     }
 
     private void addZipPage(int x, int contentWidth) {
+        if (!usesPagedDestinationLayout(contentWidth)) {
+            addFullZipPage(x, contentWidth);
+            return;
+        }
+        if (zipSection == 0) {
+            addCompactZipLocationPage(x, contentWidth);
+        } else {
+            addCompactZipTimingPage(x, contentWidth);
+        }
+    }
+
+    private void addFullZipPage(int x, int contentWidth) {
         addCheckbox(
                 "screen.worldarchive.settings.zip_enabled",
                 draft.zipEnabled(),
@@ -434,28 +429,92 @@ public final class WorldArchiveSettingsScreen extends Screen {
                 draft::setZipWorldExitEnabled,
                 draft::setZipScheduledEnabled);
         if (!layout.compact()) {
-            addRenderableOnly(new StringWidget(
+            addWrappedText(
                     x,
                     129,
                     contentWidth,
-                    36,
                     Component.translatable("screen.worldarchive.settings.synced_folder_help")
-                            .withStyle(ChatFormatting.GRAY),
-                    font).setMaxWidth(contentWidth));
+                            .withStyle(ChatFormatting.WHITE),
+                    3);
         }
+    }
+
+    private void addCompactZipLocationPage(int x, int contentWidth) {
+        addCheckbox(
+                "screen.worldarchive.settings.zip_enabled",
+                draft.zipEnabled(),
+                x,
+                54,
+                contentWidth - 68,
+                enabled -> {
+                    draft.setZipEnabled(enabled);
+                    requestHealthProbe();
+                });
+        addZipSectionButton(
+                x + contentWidth - 64,
+                54,
+                "screen.worldarchive.settings.timing",
+                1);
+        EditBox destination = addTextRow(
+                "screen.worldarchive.settings.archive_folder",
+                draft.zipDestination(),
+                SettingsField.ZIP_DESTINATION,
+                x,
+                77,
+                contentWidth - 68,
+                2048,
+                value -> {
+                    zipFolderSelection.noteManualEdit();
+                    draft.setZipDestination(value);
+                    requestHealthProbe();
+                });
+        destination.setHint(Component.translatable("screen.worldarchive.settings.path_hint"));
+        zipBrowseButton = Button.builder(
+                        Component.translatable("screen.worldarchive.settings.browse"),
+                        ignored -> chooseZipFolder())
+                .bounds(x + contentWidth - 64, 77, 64, 20)
+                .build();
+        zipBrowseButton.active = !controlsLocked();
+        addRenderableWidget(zipBrowseButton);
+    }
+
+    private void addCompactZipTimingPage(int x, int contentWidth) {
+        addZipSectionButton(x, 54, "screen.worldarchive.settings.back", 0);
+        addTriggerRow(
+                x,
+                77,
+                contentWidth,
+                draft.zipManualEnabled(),
+                draft.zipWorldExitEnabled(),
+                draft.zipScheduledEnabled(),
+                draft::setZipManualEnabled,
+                draft::setZipWorldExitEnabled,
+                draft::setZipScheduledEnabled);
+    }
+
+    private void addZipSectionButton(int x, int y, String key, int section) {
+        Button button = Button.builder(
+                        Component.translatable(key),
+                        ignored -> {
+                            zipSection = section;
+                            rebuildWidgets();
+                        })
+                .bounds(x, y, 64, 20)
+                .build();
+        button.active = !controlsLocked();
+        addRenderableWidget(button);
     }
 
     private void addWorldsPage(int x, int contentWidth) {
         List<WorldConfig> worlds = draft.base().worlds();
         if (worlds.isEmpty()) {
-            addRenderableOnly(new StringWidget(
+            addWrappedText(
                     x,
                     72,
                     contentWidth,
-                    36,
                     Component.translatable("screen.worldarchive.settings.no_worlds")
-                            .withStyle(ChatFormatting.GRAY),
-                    font).setMaxWidth(contentWidth));
+                            .withStyle(ChatFormatting.WHITE),
+                    3);
             return;
         }
         int pageSize = layout.worldPageSize();
@@ -513,13 +572,10 @@ public final class WorldArchiveSettingsScreen extends Screen {
     }
 
     private void addFooter(int x, int contentWidth) {
-        statusWidget = new StringWidget(
-                x,
-                layout.statusY(),
-                contentWidth,
-                18,
-                statusComponent(),
-                font).setMaxWidth(contentWidth);
+        statusWidget = new MultiLineTextWidget(x, layout.statusY(), statusComponent(), font)
+                .setMaxWidth(contentWidth)
+                .setMaxRows(2);
+        updateStatusWidget();
         addRenderableOnly(statusWidget);
 
         int buttonWidth = Math.min(96, (contentWidth - 8) / 3);
@@ -548,14 +604,15 @@ public final class WorldArchiveSettingsScreen extends Screen {
         addRenderableWidget(saveButton);
     }
 
-    private void addSectionLabel(String key, int x, int y, int contentWidth) {
-        addRenderableOnly(new StringWidget(
-                x,
-                y,
-                contentWidth,
-                18,
-                Component.translatable(key).withStyle(ChatFormatting.BOLD),
-                font));
+    private void addWrappedText(
+            int x,
+            int y,
+            int width,
+            Component message,
+            int maximumRows) {
+        addRenderableOnly(new MultiLineTextWidget(x, y, message, font)
+                .setMaxWidth(width)
+                .setMaxRows(maximumRows));
     }
 
     private Checkbox addCheckbox(
@@ -615,7 +672,9 @@ public final class WorldArchiveSettingsScreen extends Screen {
             Consumer<Boolean> manualResponder,
             Consumer<Boolean> worldExitResponder,
             Consumer<Boolean> scheduledResponder) {
-        int itemWidth = width / 3;
+        boolean stacked = width < 300;
+        int itemWidth = width / (stacked ? 2 : 4);
+        int secondRowY = stacked ? y + 22 : y;
         addCheckbox(
                 "screen.worldarchive.settings.manual",
                 manual,
@@ -628,15 +687,37 @@ public final class WorldArchiveSettingsScreen extends Screen {
                 worldExit,
                 x + itemWidth,
                 y,
-                itemWidth,
+                stacked ? width - itemWidth : itemWidth,
                 worldExitResponder);
-        addCheckbox(
+        Checkbox scheduledCheckbox = addCheckbox(
                 "screen.worldarchive.settings.scheduled",
                 scheduled,
-                x + itemWidth * 2,
-                y,
-                width - itemWidth * 2,
+                stacked ? x : x + itemWidth * 2,
+                secondRowY,
+                itemWidth,
                 scheduledResponder);
+        scheduledCheckbox.setTooltip(Tooltip.create(Component.translatable(
+                "screen.worldarchive.settings.schedule_interval_tooltip")));
+        Component intervalLabel = Component.translatable("screen.worldarchive.settings.schedule_interval");
+        EditBox interval = new EditBox(
+                font,
+                stacked ? x + itemWidth : x + itemWidth * 3,
+                secondRowY,
+                stacked ? width - itemWidth : width - itemWidth * 3,
+                20,
+                intervalLabel);
+        interval.setMaxLength(5);
+        interval.setValue(draft.scheduleInterval());
+        interval.setHint(Component.translatable("screen.worldarchive.settings.minutes_hint"));
+        interval.setTooltip(Tooltip.create(Component.translatable(
+                "screen.worldarchive.settings.schedule_interval_tooltip")));
+        interval.setResponder(updated -> {
+            draft.setScheduleInterval(updated);
+            refreshValidation();
+        });
+        interval.active = !controlsLocked();
+        validatedFields.put(SettingsField.SCHEDULE_INTERVAL, interval);
+        addRenderableWidget(interval);
     }
 
     private EditBox addTextRow(
@@ -863,7 +944,7 @@ public final class WorldArchiveSettingsScreen extends Screen {
             entry.getValue().setTextColor(invalid ? ERROR_TEXT_COLOR : FIELD_TEXT_COLOR);
             validation.issue(entry.getKey()).ifPresentOrElse(
                     issue -> entry.getValue().setTooltip(Tooltip.create(Component.literal(issue))),
-                    () -> entry.getValue().setTooltip(null));
+                    () -> entry.getValue().setTooltip(defaultFieldTooltip(entry.getKey())));
         }
         refreshControls();
     }
@@ -879,8 +960,48 @@ public final class WorldArchiveSettingsScreen extends Screen {
             zipBrowseButton.active = !controlsLocked();
         }
         if (statusWidget != null) {
-            statusWidget.setMessage(statusComponent());
+            updateStatusWidget();
         }
+    }
+
+    private Tooltip defaultFieldTooltip(SettingsField field) {
+        if (field == SettingsField.SCHEDULE_INTERVAL) {
+            return Tooltip.create(Component.translatable(
+                    "screen.worldarchive.settings.schedule_interval_tooltip"));
+        }
+        return null;
+    }
+
+    private void updateStatusWidget() {
+        Component visible = statusComponent();
+        statusWidget.setMessage(visible);
+        Component detail = statusDetailComponent(visible);
+        statusWidget.setTooltip(detail.getString().equals(visible.getString())
+                ? null
+                : Tooltip.create(detail));
+    }
+
+    private Component statusDetailComponent(Component visible) {
+        if (loadingSettings
+                || screenState.saving()
+                || validating
+                || healthChecking
+                || !transientStatus.getString().isBlank()
+                || pageIssue() != null) {
+            return visible;
+        }
+        return switch (page) {
+            case GIT -> healthComponent(
+                    healthSnapshot.gitSummary(),
+                    healthSnapshot.gitTool(),
+                    healthSnapshot.lfsTool(),
+                    healthSnapshot.repository(),
+                    healthSnapshot.remote());
+            case ZIP -> healthComponent(
+                    healthSnapshot.zipSummary(),
+                    healthSnapshot.zipDirectory());
+            case WORLDS -> visible;
+        };
     }
 
     private boolean controlsLocked() {
@@ -900,19 +1021,19 @@ public final class WorldArchiveSettingsScreen extends Screen {
     private Component statusComponent() {
         if (loadingSettings) {
             return Component.translatable("screen.worldarchive.settings.loading")
-                    .withStyle(ChatFormatting.GRAY);
+                    .withStyle(ChatFormatting.WHITE);
         }
         if (screenState.saving()) {
             return Component.translatable("screen.worldarchive.settings.saving")
-                    .withStyle(ChatFormatting.GRAY);
+                    .withStyle(ChatFormatting.WHITE);
         }
         if (validating) {
             return Component.translatable("screen.worldarchive.settings.validating")
-                    .withStyle(ChatFormatting.GRAY);
+                    .withStyle(ChatFormatting.WHITE);
         }
         if (healthChecking) {
             return Component.translatable("screen.worldarchive.settings.health_checking")
-                    .withStyle(ChatFormatting.GRAY);
+                    .withStyle(ChatFormatting.WHITE);
         }
         if (!transientStatus.getString().isBlank()) {
             return transientStatus.copy().withStyle(ChatFormatting.YELLOW);
@@ -922,34 +1043,35 @@ public final class WorldArchiveSettingsScreen extends Screen {
             return Component.literal(issue).withStyle(ChatFormatting.RED);
         }
         return switch (page) {
-            case GENERAL -> Component.literal(ClientSettingsAccess.status())
-                    .withStyle(ChatFormatting.GRAY);
             case GIT -> healthComponent(
-                    healthSnapshot.gitSummary(),
+                    healthSnapshot.gitDisplaySummary(),
                     healthSnapshot.gitTool(),
                     healthSnapshot.lfsTool(),
                     healthSnapshot.repository(),
                     healthSnapshot.remote());
             case ZIP -> healthComponent(
-                    healthSnapshot.zipSummary(),
+                    healthSnapshot.zipDisplaySummary(),
                     healthSnapshot.zipDirectory());
             case WORLDS -> Component.translatable(
                             "screen.worldarchive.settings.world_count",
                             draft.base().worlds().size())
-                    .withStyle(ChatFormatting.GRAY);
+                    .withStyle(ChatFormatting.WHITE);
         };
     }
 
     private String pageIssue() {
         List<SettingsField> pageFields = switch (page) {
-            case GENERAL -> List.of(SettingsField.DESTINATIONS, SettingsField.SCHEDULE_INTERVAL);
             case GIT -> List.of(
                     SettingsField.GIT_REPOSITORY,
                     SettingsField.GIT_REMOTE_NAME,
                     SettingsField.GIT_REMOTE_URL,
                     SettingsField.GIT_LFS_PATTERNS,
+                    SettingsField.SCHEDULE_INTERVAL,
                     SettingsField.DESTINATIONS);
-            case ZIP -> List.of(SettingsField.ZIP_DESTINATION, SettingsField.DESTINATIONS);
+            case ZIP -> List.of(
+                    SettingsField.ZIP_DESTINATION,
+                    SettingsField.SCHEDULE_INTERVAL,
+                    SettingsField.DESTINATIONS);
             case WORLDS -> List.of(SettingsField.DESTINATIONS);
         };
         for (SettingsField field : pageFields) {
@@ -989,7 +1111,7 @@ public final class WorldArchiveSettingsScreen extends Screen {
         }
         if (status == SettingsHealthStatus.DISABLED
                 || status == SettingsHealthStatus.UNCONFIGURED) {
-            return ChatFormatting.GRAY;
+            return ChatFormatting.WHITE;
         }
         return current;
     }
@@ -1048,7 +1170,6 @@ public final class WorldArchiveSettingsScreen extends Screen {
     }
 
     private enum Page {
-        GENERAL("screen.worldarchive.settings.tab.general"),
         GIT("screen.worldarchive.settings.tab.git"),
         ZIP("screen.worldarchive.settings.tab.zip"),
         WORLDS("screen.worldarchive.settings.tab.worlds");

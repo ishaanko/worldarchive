@@ -75,4 +75,23 @@ class SettingsHealthSnapshotTest {
         assertEquals(SettingsHealthStatus.UNCONFIGURED, snapshot.remote().status());
         assertEquals(SettingsHealthStatus.DISABLED, snapshot.zipDirectory().status());
     }
+
+    @Test
+    void displaySummariesStayConciseWhileFullDiagnosticsRemainAvailable() {
+        SettingsHealthSnapshot snapshot = new SettingsHealthSnapshot(
+                new SettingsHealthItem(SettingsHealthStatus.HEALTHY, "git version 2.55.0.windows.3"),
+                new SettingsHealthItem(SettingsHealthStatus.TOOL_MISSING, "Git LFS is not installed"),
+                new SettingsHealthItem(SettingsHealthStatus.HEALTHY, "repository is ready"),
+                new SettingsHealthItem(SettingsHealthStatus.UNCONFIGURED, "not configured"),
+                new SettingsHealthItem(SettingsHealthStatus.HEALTHY, "archive folder is ready"));
+
+        assertEquals(
+                "Git ready | LFS missing | repository ready | remote not configured",
+                snapshot.gitDisplaySummary());
+        assertEquals("ZIP folder ready", snapshot.zipDisplaySummary());
+        assertEquals(
+                "Git git version 2.55.0.windows.3 | LFS Git LFS is not installed"
+                        + " | repository repository is ready | remote not configured",
+                snapshot.gitSummary());
+    }
 }

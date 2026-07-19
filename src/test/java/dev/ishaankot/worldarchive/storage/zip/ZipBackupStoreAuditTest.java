@@ -198,7 +198,7 @@ class ZipBackupStoreAuditTest {
         Fixture fixture = fixture("stale-partial");
         Path directory = Files.createDirectories(
                 fixture.root().resolve(fixture.manifest().worldId().toString()));
-        String filename = managedFilename(fixture.manifest());
+        String filename = ZipBackupStore.archiveFilename(fixture.manifest());
         Files.writeString(directory.resolve(filename + ".partial"), "incomplete archive");
         Files.writeString(
                 directory.resolve(filename + ".sha256.partial"), "incomplete checksum");

@@ -112,6 +112,9 @@ public final class WorldArchiveConfigStore {
             } else if (schemaVersion == 2) {
                 parsed = migrateVersionTwo(root);
                 migrated = true;
+            } else if (schemaVersion == 3) {
+                parsed = migrateVersionThree(root);
+                migrated = true;
             } else {
                 parsed = parseCurrent(root);
                 migrated = false;
@@ -150,11 +153,13 @@ public final class WorldArchiveConfigStore {
         TriggerConfig triggers = parseGlobalTriggers(requiredObject(root, "triggers"));
         JsonObject destinations = requiredObject(root, "destinations");
         JsonObject gitObject = requiredObject(destinations, "git");
-        GitDestinationConfig git = new GitDestinationConfig(
+        GitDestinationConfig git = migratedGit(
                 requiredBoolean(gitObject, "enabled"),
                 optionalPath(gitObject, "repository"),
                 requiredString(gitObject, "remoteName"),
-                optionalString(gitObject, "remoteUrl"));
+                optionalString(gitObject, "remoteUrl"),
+                DestinationTriggerConfig.defaults(),
+                GitDestinationConfig.DEFAULT_LFS_PATTERNS);
         JsonObject zipObject = requiredObject(destinations, "zip");
         ZipDestinationConfig zip = new ZipDestinationConfig(
                 requiredBoolean(zipObject, "enabled"),
@@ -166,7 +171,7 @@ public final class WorldArchiveConfigStore {
         TriggerConfig triggers = parseGlobalTriggers(requiredObject(root, "triggers"));
         JsonObject destinations = requiredObject(root, "destinations");
         JsonObject gitObject = requiredObject(destinations, "git");
-        GitDestinationConfig git = new GitDestinationConfig(
+        GitDestinationConfig git = migratedGit(
                 requiredBoolean(gitObject, "enabled"),
                 optionalPath(gitObject, "repository"),
                 requiredString(gitObject, "remoteName"),
@@ -186,6 +191,26 @@ public final class WorldArchiveConfigStore {
                 parseWorlds(requiredArray(root, "worlds")));
     }
 
+    private WorldArchiveConfig migrateVersionThree(JsonObject root) throws IOException {
+        TriggerConfig triggers = parseGlobalTriggers(requiredObject(root, "triggers"));
+        JsonObject destinations = requiredObject(root, "destinations");
+        JsonObject gitObject = requiredObject(destinations, "git");
+        GitDestinationConfig git = migratedGit(
+                requiredBoolean(gitObject, "enabled"),
+                optionalPath(gitObject, "repository"),
+                requiredString(gitObject, "remoteName"),
+                optionalString(gitObject, "remoteUrl"),
+                parseDestinationTriggers(requiredObject(gitObject, "triggers")),
+                requiredStringArray(gitObject, "lfsPatterns"));
+        ZipDestinationConfig zip = parseCurrentZip(requiredObject(destinations, "zip"));
+        return new WorldArchiveConfig(
+                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
+                triggers,
+                git,
+                zip,
+                parseWorlds(requiredArray(root, "worlds")));
+    }
+
     /** Migrates the unversioned prototype layout that preceded schema version 1. */
     private WorldArchiveConfig migrateLegacy(JsonObject root) throws IOException {
         TriggerConfig triggers = new TriggerConfig(
@@ -194,11 +219,13 @@ public final class WorldArchiveConfigStore {
                 optionalBoolean(root, "scheduleEnabled").orElse(false),
                 optionalInteger(root, "scheduleMinutes")
                         .orElse(TriggerConfig.DEFAULT_SCHEDULE_INTERVAL_MINUTES));
-        GitDestinationConfig git = new GitDestinationConfig(
+        GitDestinationConfig git = migratedGit(
                 optionalBoolean(root, "gitEnabled").orElse(true),
                 optionalPath(root, "gitRepository"),
                 optionalString(root, "gitRemoteName").orElse(GitDestinationConfig.DEFAULT_REMOTE_NAME),
-                optionalString(root, "gitRemoteUrl"));
+                optionalString(root, "gitRemoteUrl"),
+                DestinationTriggerConfig.defaults(),
+                GitDestinationConfig.DEFAULT_LFS_PATTERNS);
         ZipDestinationConfig zip = new ZipDestinationConfig(
                 optionalBoolean(root, "zipEnabled").orElse(true),
                 optionalPath(root, "zipDestination"));
@@ -214,14 +241,41 @@ public final class WorldArchiveConfigStore {
     }
 
     private GitDestinationConfig parseCurrentGit(JsonObject object) throws IOException {
+        Optional<String> remoteUrlTemplate = optionalString(object, "remoteUrlTemplate");
+        if (remoteUrlTemplate.isPresent()
+                && !GitDestinationConfig.isPerWorldRemoteTemplate(remoteUrlTemplate.orElseThrow())) {
+            throw new ConfigurationException(
+                    "Git remoteUrlTemplate must include exactly one {worldId} placeholder");
+        }
         return new GitDestinationConfig(
                 requiredBoolean(object, "enabled"),
-                optionalPath(object, "repository"),
+                optionalPath(object, "repositoryRoot"),
                 requiredString(object, "remoteName"),
-                optionalString(object, "remoteUrl"),
+                remoteUrlTemplate,
                 parseDestinationTriggers(requiredObject(object, "triggers")),
                 requiredStringArray(object, "lfsPatterns"),
-                parseHealth(requiredObject(object, "health"), DestinationType.GIT));
+                parseHealth(requiredObject(object, "health"), DestinationType.GIT),
+                optionalPath(object, "legacySharedRepository"),
+                optionalString(object, "legacyRemoteUrl"));
+    }
+
+    private static GitDestinationConfig migratedGit(
+            boolean enabled,
+            Optional<Path> legacyRepository,
+            String remoteName,
+            Optional<String> legacyRemoteUrl,
+            DestinationTriggerConfig triggers,
+            List<String> lfsPatterns) {
+        return new GitDestinationConfig(
+                enabled,
+                Optional.empty(),
+                remoteName,
+                Optional.empty(),
+                triggers,
+                lfsPatterns,
+                DestinationHealth.notChecked(DestinationType.GIT),
+                legacyRepository,
+                legacyRemoteUrl);
     }
 
     private ZipDestinationConfig parseCurrentZip(JsonObject object) throws IOException {
@@ -262,9 +316,12 @@ public final class WorldArchiveConfigStore {
         JsonObject destinations = new JsonObject();
         JsonObject git = new JsonObject();
         git.addProperty("enabled", config.git().enabled());
-        config.git().repository().ifPresent(path -> git.addProperty("repository", path.toString()));
+        config.git().repository().ifPresent(path -> git.addProperty("repositoryRoot", path.toString()));
         git.addProperty("remoteName", config.git().remoteName());
-        config.git().remoteUrl().ifPresent(url -> git.addProperty("remoteUrl", url));
+        config.git().remoteUrl().ifPresent(url -> git.addProperty("remoteUrlTemplate", url));
+        config.git().legacyRepository()
+                .ifPresent(path -> git.addProperty("legacySharedRepository", path.toString()));
+        config.git().legacyRemoteUrl().ifPresent(url -> git.addProperty("legacyRemoteUrl", url));
         git.add("triggers", encodeDestinationTriggers(config.git().triggers()));
         JsonArray lfsPatterns = new JsonArray();
         config.git().lfsPatterns().forEach(lfsPatterns::add);

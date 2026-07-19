@@ -125,8 +125,32 @@ public record SettingsHealthSnapshot(
                 + " | remote " + remote.message();
     }
 
+    /** Short, stable wording for the constrained in-game settings footer. */
+    public String gitDisplaySummary() {
+        return "Git " + displayStatus(gitTool)
+                + " | LFS " + displayStatus(lfsTool)
+                + " | repository " + displayStatus(repository)
+                + " | remote " + displayStatus(remote);
+    }
+
     public String zipSummary() {
         return "ZIP " + zipDirectory.message();
+    }
+
+    /** Short, stable wording for the constrained in-game settings footer. */
+    public String zipDisplaySummary() {
+        return "ZIP folder " + displayStatus(zipDirectory);
+    }
+
+    private static String displayStatus(SettingsHealthItem item) {
+        return switch (item.status()) {
+            case HEALTHY -> "ready";
+            case DISABLED -> "disabled";
+            case UNCHECKED -> "checking";
+            case UNCONFIGURED -> "not configured";
+            case TOOL_MISSING -> "missing";
+            case UNAVAILABLE -> "unavailable";
+        };
     }
 
     private static SettingsHealthStatus mostSevere(SettingsHealthItem... items) {

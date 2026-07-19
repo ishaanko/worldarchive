@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.1.1 (2026-07-18)
+
+### Changed
+
+- Store new Git backups in a separate bare repository and linear history for
+  each world.
+- Sync each world to its own existing remote repository with a `{worldId}` URL
+  template.
+- Replace the redundant General settings tab with direct Git and ZIP timing
+  controls.
+- Give ZIP archives readable timestamp, world, and label names while retaining
+  their exact backup identity.
+
+### Fixed
+
+- Keep legacy shared Git repositories and remotes available after the safe
+  schema 3 to schema 4 migration without moving or deleting them.
+- Show wrapped, higher-contrast settings and backup-browser text.
+- Preserve a visible selection border without washing out backup-row text.
+- Confirm Save & Quit backup results with an in-game toast.
+- Report delete, sync, and verify outcomes with operation-specific wording.
+- Rename **Restore & Select** to **Restore**.
+- Remove stale injected **Backups** buttons after rapid world selection and
+  Escape navigation.
+- Offer guidance and a Retry action when live world files change during a
+  private capture.
+
 ## 0.1.0 (2026-07-18)
 
 ### Added

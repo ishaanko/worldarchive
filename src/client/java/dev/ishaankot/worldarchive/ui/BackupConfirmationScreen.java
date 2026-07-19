@@ -49,9 +49,10 @@ final class BackupConfirmationScreen extends Screen {
 
         int buttonWidth = Math.min(150, Math.max(80, (contentWidth - 6) / 2));
         int buttonY = Math.min(height - 28, Math.max(height / 2 + 30, prompt.getBottom() + 16));
-        Component confirmText = state.destructive()
-                ? Component.literal("Delete").withStyle(ChatFormatting.RED)
-                : Component.literal("Continue");
+        Component confirmText = switch (state.kind()) {
+            case DELETE -> Component.literal("Delete").withStyle(ChatFormatting.RED);
+            case RESTORE -> Component.literal("Restore");
+        };
         addRenderableWidget(Button.builder(confirmText, ignored -> confirm())
                 .bounds(width / 2 - buttonWidth - 3, buttonY, buttonWidth, 20)
                 .build());

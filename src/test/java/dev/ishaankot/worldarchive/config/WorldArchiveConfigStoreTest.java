@@ -46,6 +46,7 @@ final class WorldArchiveConfigStoreTest {
     void roundTripsUtf8ConfigurationAtomically() throws IOException {
         Path gitRepository = Files.createDirectory(temporaryDirectory.resolve("git-世界"));
         Path zipDestination = Files.createDirectory(temporaryDirectory.resolve("zip-é"));
+        Path legacyGitRepository = Files.createDirectory(temporaryDirectory.resolve("legacy-git"));
         Path file = temporaryDirectory.resolve("worldarchive.json");
         WorldArchiveConfigStore store = new WorldArchiveConfigStore(file);
         WorldArchiveConfig expected = new WorldArchiveConfig(
@@ -55,7 +56,13 @@ final class WorldArchiveConfigStoreTest {
                         true,
                         Optional.of(gitRepository),
                         "backup-origin",
-                        Optional.of("ssh://example.invalid/backups.git")),
+                        Optional.of("ssh://example.invalid/backups-{worldId}.git"),
+                        DestinationTriggerConfig.defaults(),
+                        GitDestinationConfig.DEFAULT_LFS_PATTERNS,
+                        dev.ishaankot.worldarchive.model.DestinationHealth.notChecked(
+                                dev.ishaankot.worldarchive.model.DestinationType.GIT),
+                        Optional.of(legacyGitRepository),
+                        Optional.of("ssh://example.invalid/legacy-backups.git")),
                 new ZipDestinationConfig(true, Optional.of(zipDestination)));
 
         store.save(expected, java.util.List.of());
@@ -64,7 +71,40 @@ final class WorldArchiveConfigStoreTest {
         assertEquals(canonicalExpected, store.load(java.util.List.of()));
         String serialized = Files.readString(file, StandardCharsets.UTF_8);
         assertTrue(serialized.contains("git-世界"));
+        assertTrue(serialized.contains("\"repositoryRoot\""));
+        assertTrue(serialized.contains("\"remoteUrlTemplate\""));
+        assertTrue(serialized.contains("\"legacySharedRepository\""));
+        assertTrue(serialized.contains("\"legacyRemoteUrl\""));
+        assertFalse(serialized.contains("\"repository\":"));
+        assertFalse(serialized.contains("\"remoteUrl\":"));
         assertFalse(serialized.toLowerCase().contains("password"));
+    }
+
+    @Test
+    void schemaFourRejectsPlainRemoteUrlTemplate() throws IOException {
+        Path file = temporaryDirectory.resolve("plain-current-remote.json");
+        WorldArchiveConfigStore store = new WorldArchiveConfigStore(file);
+        WorldArchiveConfig defaults = WorldArchiveConfig.defaults();
+        WorldArchiveConfig templated = new WorldArchiveConfig(
+                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
+                defaults.triggers(),
+                new GitDestinationConfig(
+                        true,
+                        Optional.empty(),
+                        "origin",
+                        Optional.of("https://example.invalid/world-{worldId}.git")),
+                defaults.zip(),
+                defaults.worlds());
+        store.save(templated, java.util.List.of());
+        String invalid = Files.readString(file, StandardCharsets.UTF_8)
+                .replace("world-{worldId}.git", "shared.git");
+        Files.writeString(file, invalid, StandardCharsets.UTF_8);
+
+        ConfigurationException exception = assertThrows(
+                ConfigurationException.class,
+                () -> store.load(java.util.List.of()));
+
+        assertTrue(exception.getMessage().contains("{worldId}"));
     }
 
     @Test
@@ -112,7 +152,78 @@ final class WorldArchiveConfigStoreTest {
         assertEquals(60, migrated.triggers().scheduleIntervalMinutes());
         assertFalse(migrated.git().enabled());
         assertEquals(zipDestination.toRealPath(), migrated.zip().destination().orElseThrow());
-        assertTrue(Files.readString(file, StandardCharsets.UTF_8).contains("\"schemaVersion\": 3"));
+        assertTrue(Files.readString(file, StandardCharsets.UTF_8).contains("\"schemaVersion\": 4"));
+    }
+
+    @Test
+    void migratesSchemaThreeGitStorageWithoutMovingOrDeletingIt() throws IOException {
+        Path legacyGit = Files.createDirectory(temporaryDirectory.resolve("legacy-shared.git"));
+        Path zip = Files.createDirectory(temporaryDirectory.resolve("schema-three-zips"));
+        Path file = temporaryDirectory.resolve("schema-three.json");
+        Files.writeString(file, """
+                {
+                  "schemaVersion": 3,
+                  "triggers": {
+                    "manualEnabled": true,
+                    "worldExitEnabled": true,
+                    "scheduledEnabled": false,
+                    "scheduleIntervalMinutes": 30
+                  },
+                  "destinations": {
+                    "git": {
+                      "enabled": true,
+                      "repository": "%s",
+                      "remoteName": "origin",
+                      "remoteUrl": "https://example.invalid/legacy.git",
+                      "triggers": {
+                        "manualEnabled": true,
+                        "worldExitEnabled": true,
+                        "scheduledEnabled": false
+                      },
+                      "lfsPatterns": ["*.mca"],
+                      "health": {
+                        "status": "HEALTHY",
+                        "message": "legacy repository was ready",
+                        "checkedAt": "2026-07-17T12:00:00Z"
+                      }
+                    },
+                    "zip": {
+                      "enabled": true,
+                      "destination": "%s",
+                      "triggers": {
+                        "manualEnabled": true,
+                        "worldExitEnabled": true,
+                        "scheduledEnabled": false
+                      },
+                      "health": {
+                        "status": "HEALTHY",
+                        "message": "ZIP folder is ready",
+                        "checkedAt": "2026-07-17T12:00:00Z"
+                      }
+                    }
+                  },
+                  "worlds": []
+                }
+                """.formatted(jsonPath(legacyGit), jsonPath(zip)), StandardCharsets.UTF_8);
+
+        WorldArchiveConfig migrated = new WorldArchiveConfigStore(file).load(java.util.List.of());
+
+        assertEquals(WorldArchiveConfig.CURRENT_SCHEMA_VERSION, migrated.schemaVersion());
+        assertTrue(migrated.git().repository().isEmpty());
+        assertTrue(migrated.git().remoteUrl().isEmpty());
+        assertEquals(legacyGit.toRealPath(), migrated.git().legacyRepository().orElseThrow());
+        assertEquals(
+                "https://example.invalid/legacy.git",
+                migrated.git().legacyRemoteUrl().orElseThrow());
+        assertEquals(
+                dev.ishaankot.worldarchive.model.DestinationHealth.notChecked(
+                        dev.ishaankot.worldarchive.model.DestinationType.GIT),
+                migrated.git().health());
+        assertTrue(Files.isDirectory(legacyGit));
+        String persisted = Files.readString(file, StandardCharsets.UTF_8);
+        assertTrue(persisted.contains("\"schemaVersion\": 4"));
+        assertTrue(persisted.contains("\"legacySharedRepository\""));
+        assertFalse(persisted.contains("\"repository\":"));
     }
 
     @Test

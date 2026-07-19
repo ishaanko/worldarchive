@@ -9,9 +9,9 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
-/** Resolves operational, shared destination defaults beside the WorldArchive configuration. */
+/** Resolves operational destination defaults beside the WorldArchive configuration. */
 public final class SettingsDefaults {
-    private static final String GIT_REPOSITORY_NAME = "worldarchive.git";
+    private static final String GIT_REPOSITORY_DIRECTORY_NAME = "git";
 
     private static final String ZIP_DIRECTORY_NAME = "archives";
 
@@ -37,7 +37,9 @@ public final class SettingsDefaults {
                         git.remoteUrl(),
                         git.triggers(),
                         git.lfsPatterns(),
-                        git.health()),
+                        git.health(),
+                        git.legacyRepository(),
+                        git.legacyRemoteUrl()),
                 new ZipDestinationConfig(
                         zip.enabled(),
                         zip.destination().or(() -> Optional.of(zipDirectory())),
@@ -69,7 +71,7 @@ public final class SettingsDefaults {
     }
 
     public Path gitRepository() {
-        return storageRoot.resolve(GIT_REPOSITORY_NAME);
+        return storageRoot.resolve(GIT_REPOSITORY_DIRECTORY_NAME);
     }
 
     public Path zipDirectory() {

@@ -107,7 +107,7 @@ final class BackupRestoreScreen extends Screen {
         addRenderableOnly(validationWidget);
         int buttonWidth = Math.max(50, (contentWidth - 6) / 3);
         int buttonY = top + 108;
-        selectButton = Button.builder(Component.literal("Restore & Select"), ignored -> choose(RestoreChoice.SELECT))
+        selectButton = Button.builder(Component.literal("Restore"), ignored -> choose(RestoreChoice.SELECT))
                 .bounds(contentX, buttonY, buttonWidth, 20)
                 .build();
         addRenderableWidget(selectButton);
@@ -134,7 +134,7 @@ final class BackupRestoreScreen extends Screen {
         if (validationWidget != null) {
             validationWidget.setMessage(issue
                     .<Component>map(value -> Component.literal(value).withStyle(ChatFormatting.RED))
-                    .orElseGet(() -> Component.literal("Choose what to do after restoration")
+                    .orElseGet(() -> Component.literal("Restore returns to the world list")
                             .withStyle(ChatFormatting.GRAY)));
         }
     }

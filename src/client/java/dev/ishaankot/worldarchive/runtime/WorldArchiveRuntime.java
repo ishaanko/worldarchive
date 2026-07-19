@@ -41,8 +41,8 @@ import dev.ishaankot.worldarchive.settings.ClientSettingsAccess;
 import dev.ishaankot.worldarchive.settings.SettingsDefaults;
 import dev.ishaankot.worldarchive.settings.WorldFolderDiscovery;
 import dev.ishaankot.worldarchive.storage.git.GitBackendSettings;
-import dev.ishaankot.worldarchive.storage.git.GitBackupBackend;
 import dev.ishaankot.worldarchive.storage.git.SystemGitCommandRunner;
+import dev.ishaankot.worldarchive.storage.git.WorldGitSnapshotStore;
 import dev.ishaankot.worldarchive.storage.zip.ZipBackupBackend;
 import dev.ishaankot.worldarchive.storage.zip.ZipBackupStore;
 import dev.ishaankot.worldarchive.ui.BackupBrowserScreen;
@@ -83,6 +83,7 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.components.toasts.SystemToast;
 import net.minecraft.client.gui.screens.PauseScreen;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.TitleScreen;
@@ -505,7 +506,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         return CompletableFuture.completedFuture(new BackupBrowserCapabilities(
                 busyAcrossStates(world.worldId()),
                 storageIssue.isEmpty() && sourceAvailable && createAvailable,
-                config.git().enabled() && config.git().remoteUrl().isPresent(),
+                config.git().enabled() && state.gitBackend().remoteConfigured(world.worldId()),
                 storageIssue.isEmpty() && folderAvailable,
                 storageIssue.or(() -> worldSettingsWarning()
                         .or(() -> backgroundWarning.get().or(state.selector()::warning)))));
@@ -696,8 +697,9 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         RuntimeStoragePaths storagePaths = RuntimeStoragePaths.from(config, storageRoot);
         Path gitRepository = storagePaths.gitRepository();
         Path zipDirectory = storagePaths.zipDirectory();
-        GitBackupBackend gitBackend = new GitBackupBackend(
+        WorldGitSnapshotStore gitBackend = new WorldGitSnapshotStore(
                 GitBackendSettings.from(config.git(), gitRepository),
+                GitBackendSettings.legacyFrom(config.git()),
                 new SystemGitCommandRunner(),
                 workerExecutor);
         ZipBackupStore zipStore = new ZipBackupStore(zipDirectory);
@@ -939,7 +941,10 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
                     new IllegalStateException("The server stopped before the pending save completed"));
             case EXIT_MISSING_SAVE -> stopped.value().orElseThrow().fail(
                     new IllegalStateException("The server stopped before its final save completed"));
-            case EXIT_READY -> captureAndDispatch(stopped.value().orElseThrow());
+            case EXIT_READY -> {
+                enqueueWorldExitNotice(BackgroundBackupWarnings.worldExitStartedNotice());
+                captureAndDispatch(stopped.value().orElseThrow());
+            }
             default -> throw new IllegalStateException("Unknown live-save stop outcome");
         }
         if (shutdownAfterServer) {
@@ -1349,12 +1354,12 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
             return state.storagePaths().zipDirectory().resolve(world.worldId().toString());
         }
         if (selected.isPresent() && selected.orElseThrow().git().durable()) {
-            return state.storagePaths().gitRepository();
+            return state.gitBackend().repositoryFor(world.worldId());
         }
         if (state.config().zip().enabled()) {
             return state.storagePaths().zipDirectory();
         }
-        return state.storagePaths().gitRepository();
+        return state.gitBackend().repositoryFor(world.worldId());
     }
 
     private Optional<String> validatedRestoredStorageName(RestoreBackupResult result) {
@@ -1523,21 +1528,19 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
             LOGGER.warn("World-exit backup completed without a result");
         }
         Optional<String> warning = BackgroundBackupWarnings.worldExit(result, throwable);
+        BackgroundBackupWarnings.ExitNotice notice =
+                BackgroundBackupWarnings.worldExitNotice(result, throwable);
         try {
             if (warning.isPresent()) {
                 noticeStore.retain(warning.orElseThrow());
+            } else {
+                noticeStore.clear();
             }
         } catch (IOException exception) {
             logFailure("World-exit backup notice could not be stored", exception);
         }
-        if (warning.isPresent() && !closed.get()) {
-            backgroundWarning.set(warning);
-            minecraft.execute(() -> {
-                if (!closed.get()) {
-                    showClientWarning(warning.orElseThrow());
-                }
-            });
-        }
+        backgroundWarning.set(warning);
+        enqueueWorldExitNotice(notice);
     }
 
     private void showRetainedBackgroundWarning() {
@@ -1562,6 +1565,30 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
                 Component.literal("WorldArchive: " + message)
                         .withStyle(ChatFormatting.YELLOW),
                 false);
+    }
+
+    private void showWorldExitNotice(BackgroundBackupWarnings.ExitNotice notice) {
+        ChatFormatting color = switch (notice.severity()) {
+            case SUCCESS -> ChatFormatting.GREEN;
+            case WARNING -> ChatFormatting.YELLOW;
+            case ERROR -> ChatFormatting.RED;
+        };
+        SystemToast.addOrUpdate(
+                minecraft.gui.toastManager(),
+                SystemToast.SystemToastId.WORLD_BACKUP,
+                Component.literal("WorldArchive").withStyle(ChatFormatting.BOLD),
+                Component.literal(notice.message()).withStyle(color));
+    }
+
+    private void enqueueWorldExitNotice(BackgroundBackupWarnings.ExitNotice notice) {
+        if (closed.get()) {
+            return;
+        }
+        minecraft.execute(() -> {
+            if (!closed.get()) {
+                showWorldExitNotice(notice);
+            }
+        });
     }
 
     private RuntimeState requireCurrentState() {
@@ -2007,7 +2034,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
     private record RuntimeState(
             WorldArchiveConfig config,
             RuntimeStoragePaths storagePaths,
-            GitBackupBackend gitBackend,
+            WorldGitSnapshotStore gitBackend,
             RuntimeDestinationSelector selector,
             SerializedBackupCoordinator coordinator) {
         private RuntimeState {

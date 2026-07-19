@@ -66,11 +66,18 @@ public final class ZipBackupStore {
             new ConcurrentHashMap<>();
 
     private static final DateTimeFormatter FILE_TIMESTAMP = DateTimeFormatter
-            .ofPattern("uuuuMMdd'T'HHmmssSSS'Z'")
+            .ofPattern("uuuu-MM-dd_HH-mm-ss'Z'")
             .withZone(ZoneOffset.UTC);
 
+    private static final int MAXIMUM_FILENAME_SEGMENT_LENGTH = 64;
+
+    private static final String BACKUP_ID_PATTERN =
+            "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+
     private static final Pattern ARCHIVE_NAME = Pattern.compile(
-            "[0-9]{8}T[0-9]{9}Z_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\\.zip");
+            "(?:[0-9]{8}T[0-9]{9}Z_"
+                    + "|[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}Z - [^\\r\\n/\\\\]+ - )"
+                    + "(" + BACKUP_ID_PATTERN + ")\\.zip");
 
     private static final Pattern CHECKSUM_LINE = Pattern.compile(
             "([0-9a-f]{64})  ([^\\r\\n]+)(?:\\r?\\n)?");
@@ -947,8 +954,37 @@ public final class ZipBackupStore {
         }
     }
 
-    private static String archiveFilename(BackupManifest manifest) {
-        return FILE_TIMESTAMP.format(manifest.createdAt()) + "_" + manifest.backupId() + ".zip";
+    static String archiveFilename(BackupManifest manifest) {
+        String description = manifest.label().orElseGet(() -> switch (manifest.trigger()) {
+            case MANUAL -> "Manual";
+            case WORLD_EXIT -> "World Exit";
+            case SCHEDULED -> "Scheduled";
+        });
+        return FILE_TIMESTAMP.format(manifest.createdAt())
+                + " - " + filenameSegment(manifest.worldName(), "World")
+                + " - " + filenameSegment(description, "Backup")
+                + " - " + manifest.backupId() + ".zip";
+    }
+
+    private static String filenameSegment(String value, String fallback) {
+        String sanitized = value
+                .replaceAll("[<>:\"/\\\\|?*\\p{Cntrl}]", " ")
+                .replaceAll("\\s+", " ")
+                .strip()
+                .replaceAll("[. ]+$", "");
+        if (sanitized.isBlank()) {
+            return fallback;
+        }
+        if (sanitized.length() > MAXIMUM_FILENAME_SEGMENT_LENGTH) {
+            int end = MAXIMUM_FILENAME_SEGMENT_LENGTH;
+            if (Character.isHighSurrogate(sanitized.charAt(end - 1))
+                    && Character.isLowSurrogate(sanitized.charAt(end))) {
+                end--;
+            }
+            sanitized = sanitized.substring(0, end)
+                    .replaceAll("[. ]+$", "");
+        }
+        return sanitized.isBlank() ? fallback : sanitized;
     }
 
     private ManagedArchive managedArchive(Path archivePath) throws IOException {

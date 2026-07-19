@@ -26,7 +26,7 @@ import dev.ishaankot.worldarchive.model.SyncStatus;
 import dev.ishaankot.worldarchive.model.VerificationStatus;
 import dev.ishaankot.worldarchive.model.WorldId;
 import dev.ishaankot.worldarchive.model.WorldIdentity;
-import dev.ishaankot.worldarchive.storage.git.GitBackupBackend;
+import dev.ishaankot.worldarchive.storage.git.GitSnapshotStore;
 import dev.ishaankot.worldarchive.storage.zip.ZipBackupStore;
 import java.io.IOException;
 import java.nio.file.CopyOption;
@@ -98,7 +98,7 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
 
     public BackupRecoveryService(
             BackupCatalog catalog,
-            Optional<GitBackupBackend> gitBackend,
+            Optional<? extends GitSnapshotStore> gitBackend,
             Optional<ZipBackupStore> zipStore,
             WorldIdentityStore identityStore,
             RestoredWorldMetadataFinalizer metadataFinalizer,
@@ -1089,7 +1089,7 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
     }
 
     private static Map<DestinationType, RecoveryDestination> destinationMap(
-            Optional<GitBackupBackend> gitBackend,
+            Optional<? extends GitSnapshotStore> gitBackend,
             Optional<ZipBackupStore> zipStore,
             Clock clock) {
         Objects.requireNonNull(gitBackend, "gitBackend");

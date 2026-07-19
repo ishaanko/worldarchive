@@ -101,7 +101,9 @@ final class ZipRecoveryDestination implements RecoveryDestination {
             throw new BackupRecoveryException("ZIP artifact identity does not match the catalog");
         }
         String filename = artifact.substring(prefix.length());
-        if (!filename.endsWith("_" + record.manifest().backupId() + ".zip")) {
+        String identitySuffix = record.manifest().backupId() + ".zip";
+        if (!filename.endsWith("_" + identitySuffix)
+                && !filename.endsWith(" - " + identitySuffix)) {
             throw new BackupRecoveryException("ZIP artifact backup ID does not match the catalog");
         }
         Path worldDirectory = store.root().resolve(record.manifest().worldId().toString()).normalize();

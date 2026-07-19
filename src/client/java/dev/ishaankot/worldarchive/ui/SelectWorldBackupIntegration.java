@@ -104,9 +104,7 @@ public final class SelectWorldBackupIntegration {
             selectionRevision++;
             selectedWorld = null;
             resolvedWorld = null;
-            if (backupsButton != null) {
-                Screens.getWidgets(screen).remove(backupsButton);
-            }
+            uninstallButton();
             worldList = findWorldList();
             backupsButton = Button.builder(Component.literal("Backups"), ignored -> openBrowser())
                     .bounds(Math.max(10, (width - 100) / 2), Math.max(5, height - 28), 100, 20)
@@ -143,7 +141,15 @@ public final class SelectWorldBackupIntegration {
             selectedWorld = null;
             resolvedWorld = null;
             worldList = null;
+            uninstallButton();
+        }
+
+        private void uninstallButton() {
+            Button installed = backupsButton;
             backupsButton = null;
+            if (installed != null) {
+                Screens.getWidgets(screen).remove(installed);
+            }
         }
 
         private void updateSelection() {

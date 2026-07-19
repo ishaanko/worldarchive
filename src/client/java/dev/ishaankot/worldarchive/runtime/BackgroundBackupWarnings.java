@@ -18,6 +18,34 @@ final class BackgroundBackupWarnings {
         return warning("World-exit", result, failure);
     }
 
+    static ExitNotice worldExitNotice(BackupResult result, Throwable failure) {
+        if (failure != null || result == null) {
+            return new ExitNotice(
+                    "World save or backup did not complete",
+                    NoticeSeverity.ERROR);
+        }
+        return switch (Objects.requireNonNull(result.status(), "status")) {
+            case SUCCESS -> new ExitNotice(
+                    "World saved and backup completed",
+                    NoticeSeverity.SUCCESS);
+            case PARTIAL_SUCCESS -> new ExitNotice(
+                    "World saved; backup completed with warnings",
+                    NoticeSeverity.WARNING);
+            case FAILED -> new ExitNotice(
+                    "World saved; backup failed",
+                    NoticeSeverity.ERROR);
+            case SKIPPED -> new ExitNotice(
+                    "World saved; backup skipped",
+                    NoticeSeverity.WARNING);
+        };
+    }
+
+    static ExitNotice worldExitStartedNotice() {
+        return new ExitNotice(
+                "World saved; backup is running",
+                NoticeSeverity.SUCCESS);
+    }
+
     private static Optional<String> warning(
             String trigger,
             BackupResult result,
@@ -32,5 +60,18 @@ final class BackgroundBackupWarnings {
             case FAILED -> Optional.of(trigger + " backup failed");
             case SKIPPED -> Optional.empty();
         };
+    }
+
+    enum NoticeSeverity {
+        SUCCESS,
+        WARNING,
+        ERROR
+    }
+
+    record ExitNotice(String message, NoticeSeverity severity) {
+        ExitNotice {
+            Objects.requireNonNull(message, "message");
+            Objects.requireNonNull(severity, "severity");
+        }
     }
 }

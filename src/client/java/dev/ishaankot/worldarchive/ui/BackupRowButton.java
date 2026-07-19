@@ -8,13 +8,17 @@ import java.time.format.FormatStyle;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.function.Consumer;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.AbstractButton;
 import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.narration.NarrationElementOutput;
+import net.minecraft.client.gui.screens.inventory.tooltip.ClientTooltipPositioner;
 import net.minecraft.client.input.InputWithModifiers;
 import net.minecraft.network.chat.Component;
+import org.joml.Vector2i;
+import org.joml.Vector2ic;
 
 /** Two-line vanilla button used for a dense but readable backup-browser row. */
 final class BackupRowButton extends AbstractButton {
@@ -25,13 +29,24 @@ final class BackupRowButton extends AbstractButton {
 
     private static final int PRIMARY_TEXT_COLOR = 0xFFFFFFFF;
 
-    private static final int SECONDARY_TEXT_COLOR = 0xFFB8B8B8;
+    private static final int SECONDARY_TEXT_COLOR = 0xFFE0E0E0;
+
+    private static final int TEXT_BACKGROUND_COLOR = 0xB0000000;
+
+    private static final int TOOLTIP_MARGIN = 4;
+
+    private static final int TOOLTIP_OFFSET = 12;
+
+    private static final ClientTooltipPositioner BOUNDED_TOOLTIP_POSITIONER =
+            BackupRowButton::boundedTooltipPosition;
 
     private final BackupRow row;
 
     private final Font font;
 
     private final Consumer<BackupRow> onSelected;
+
+    private final Tooltip detailsTooltip;
 
     private boolean selected;
 
@@ -47,8 +62,9 @@ final class BackupRowButton extends AbstractButton {
         this.row = Objects.requireNonNull(row, "row");
         this.font = Objects.requireNonNull(font, "font");
         this.onSelected = Objects.requireNonNull(onSelected, "onSelected");
+        detailsTooltip = Tooltip.create(Component.literal(tooltip(row)));
         setOverrideRenderHighlightedSprite(() -> selected);
-        setTooltip(Tooltip.create(Component.literal(tooltip(row))));
+        setTooltip(detailsTooltip);
     }
 
     void setSelected(boolean selected) {
@@ -66,6 +82,13 @@ final class BackupRowButton extends AbstractButton {
             int mouseX,
             int mouseY,
             float partialTick) {
+        extractDefaultSprite(graphics);
+        graphics.fill(
+                getX() + 2,
+                getY() + 2,
+                getRight() - 2,
+                getBottom() - 2,
+                TEXT_BACKGROUND_COLOR);
         int textWidth = Math.max(1, getWidth() - 10);
         graphics.text(
                 font,
@@ -79,6 +102,47 @@ final class BackupRowButton extends AbstractButton {
                 getX() + 5,
                 getY() + 20,
                 SECONDARY_TEXT_COLOR);
+    }
+
+    @Override
+    protected void extractTooltipForNextRenderPass(
+            GuiGraphicsExtractor graphics,
+            int mouseX,
+            int mouseY) {
+        Minecraft minecraft = Minecraft.getInstance();
+        boolean hovered = isHovered();
+        boolean keyboardFocused = isFocused() && minecraft.getLastInputType().isKeyboard();
+        if (!hovered && !keyboardFocused) {
+            return;
+        }
+        int anchorX = hovered ? mouseX : getX() + getWidth() / 2;
+        int anchorY = hovered ? mouseY : getBottom();
+        graphics.setTooltipForNextFrame(
+                font,
+                detailsTooltip.toCharSequence(minecraft),
+                BOUNDED_TOOLTIP_POSITIONER,
+                anchorX,
+                anchorY,
+                keyboardFocused);
+    }
+
+    static Vector2ic boundedTooltipPosition(
+            int screenWidth,
+            int screenHeight,
+            int anchorX,
+            int anchorY,
+            int tooltipWidth,
+            int tooltipHeight) {
+        int maximumX = Math.max(TOOLTIP_MARGIN, screenWidth - tooltipWidth - TOOLTIP_MARGIN);
+        int x = Math.clamp(anchorX + TOOLTIP_OFFSET, TOOLTIP_MARGIN, maximumX);
+        int below = anchorY + TOOLTIP_OFFSET;
+        int above = anchorY - TOOLTIP_OFFSET - tooltipHeight;
+        int preferredY = below + tooltipHeight <= screenHeight - TOOLTIP_MARGIN
+                ? below
+                : above;
+        int maximumY = Math.max(TOOLTIP_MARGIN, screenHeight - tooltipHeight - TOOLTIP_MARGIN);
+        int y = Math.clamp(preferredY, TOOLTIP_MARGIN, maximumY);
+        return new Vector2i(x, y);
     }
 
     @Override

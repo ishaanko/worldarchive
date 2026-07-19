@@ -21,7 +21,7 @@ public record SettingsLayout(
         }
         boolean compact = height < COMPACT_HEIGHT_THRESHOLD;
         int pageSize = Math.max(1, Math.min(5, (height - 116) / 22));
-        return new SettingsLayout(compact, height - 50, height - 28, pageSize, compact ? 2 : 1);
+        return new SettingsLayout(compact, height - 50, height - 28, pageSize, compact ? 3 : 1);
     }
 
     public int gitFirstRow(int section) {

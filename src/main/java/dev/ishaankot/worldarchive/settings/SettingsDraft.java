@@ -30,12 +30,6 @@ public final class SettingsDraft {
 
     private final Map<WorldId, Boolean> worldEnabled;
 
-    private boolean manualEnabled;
-
-    private boolean worldExitEnabled;
-
-    private boolean scheduledEnabled;
-
     private String scheduleInterval;
 
     private boolean gitEnabled;
@@ -70,23 +64,26 @@ public final class SettingsDraft {
 
     private SettingsDraft(WorldArchiveConfig config) {
         base = Objects.requireNonNull(config, "config");
-        manualEnabled = config.triggers().manualEnabled();
-        worldExitEnabled = config.triggers().worldExitEnabled();
-        scheduledEnabled = config.triggers().scheduledEnabled();
         scheduleInterval = Integer.toString(config.triggers().scheduleIntervalMinutes());
         gitEnabled = config.git().enabled();
         gitRepository = config.git().repository().map(Path::toString).orElse("");
         gitRemoteName = config.git().remoteName();
         gitRemoteUrl = config.git().remoteUrl().orElse("");
-        gitManualEnabled = config.git().triggers().manualEnabled();
-        gitWorldExitEnabled = config.git().triggers().worldExitEnabled();
-        gitScheduledEnabled = config.git().triggers().scheduledEnabled();
+        gitManualEnabled = config.triggers().manualEnabled()
+                && config.git().triggers().manualEnabled();
+        gitWorldExitEnabled = config.triggers().worldExitEnabled()
+                && config.git().triggers().worldExitEnabled();
+        gitScheduledEnabled = config.triggers().scheduledEnabled()
+                && config.git().triggers().scheduledEnabled();
         gitLfsPatterns = String.join(", ", config.git().lfsPatterns());
         zipEnabled = config.zip().enabled();
         zipDestination = config.zip().destination().map(Path::toString).orElse("");
-        zipManualEnabled = config.zip().triggers().manualEnabled();
-        zipWorldExitEnabled = config.zip().triggers().worldExitEnabled();
-        zipScheduledEnabled = config.zip().triggers().scheduledEnabled();
+        zipManualEnabled = config.triggers().manualEnabled()
+                && config.zip().triggers().manualEnabled();
+        zipWorldExitEnabled = config.triggers().worldExitEnabled()
+                && config.zip().triggers().worldExitEnabled();
+        zipScheduledEnabled = config.triggers().scheduledEnabled()
+                && config.zip().triggers().scheduledEnabled();
         gitHealth = config.git().health();
         zipHealth = config.zip().health();
         worldEnabled = new LinkedHashMap<>();
@@ -96,9 +93,6 @@ public final class SettingsDraft {
     private SettingsDraft(SettingsDraft source) {
         base = source.base;
         worldEnabled = new LinkedHashMap<>(source.worldEnabled);
-        manualEnabled = source.manualEnabled;
-        worldExitEnabled = source.worldExitEnabled;
-        scheduledEnabled = source.scheduledEnabled;
         scheduleInterval = source.scheduleInterval;
         gitEnabled = source.gitEnabled;
         gitRepository = source.gitRepository;
@@ -142,7 +136,9 @@ public final class SettingsDraft {
                         defaults.git().remoteUrl(),
                         defaults.git().triggers(),
                         defaults.git().lfsPatterns(),
-                        defaults.git().health()),
+                        defaults.git().health(),
+                        current.git().legacyRepository(),
+                        current.git().legacyRemoteUrl()),
                 new ZipDestinationConfig(
                         defaults.zip().enabled(),
                         current.zip().destination(),
@@ -159,7 +155,23 @@ public final class SettingsDraft {
         List<WorldConfig> worlds = current.worlds().stream()
                 .map(world -> new WorldConfig(world.worldId(), true, world.path()))
                 .toList();
-        return new SettingsDraft(defaults.defaultsKeepingWorlds(worlds));
+        WorldArchiveConfig reset = defaults.defaultsKeepingWorlds(worlds);
+        GitDestinationConfig git = reset.git();
+        return new SettingsDraft(new WorldArchiveConfig(
+                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
+                reset.triggers(),
+                new GitDestinationConfig(
+                        git.enabled(),
+                        git.repository(),
+                        git.remoteName(),
+                        git.remoteUrl(),
+                        git.triggers(),
+                        git.lfsPatterns(),
+                        git.health(),
+                        current.git().legacyRepository(),
+                        current.git().legacyRemoteUrl()),
+                reset.zip(),
+                reset.worlds()));
     }
 
     /** Builds a config only when fields, permissions, and recursive-destination rules all pass. */
@@ -171,7 +183,7 @@ public final class SettingsDraft {
         Optional<Path> repository = validatePath(
                 gitRepository,
                 gitEnabled,
-                "Git repository",
+                "Git repository root",
                 SettingsField.GIT_REPOSITORY,
                 sourceWorlds,
                 issues);
@@ -203,7 +215,11 @@ public final class SettingsDraft {
         }
         WorldArchiveConfig candidate = new WorldArchiveConfig(
                 WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
-                new TriggerConfig(manualEnabled, worldExitEnabled, scheduledEnabled, interval),
+                new TriggerConfig(
+                        gitManualEnabled || zipManualEnabled,
+                        gitWorldExitEnabled || zipWorldExitEnabled,
+                        gitScheduledEnabled || zipScheduledEnabled,
+                        interval),
                 git,
                 zip,
                 updatedWorlds());
@@ -225,6 +241,13 @@ public final class SettingsDraft {
         Optional<String> remoteUrl = gitRemoteUrl.isBlank()
                 ? Optional.empty()
                 : Optional.of(gitRemoteUrl);
+        if (remoteUrl.isPresent()
+                && !GitDestinationConfig.isPerWorldRemoteTemplate(remoteUrl.orElseThrow())) {
+            issues.put(
+                    SettingsField.GIT_REMOTE_URL,
+                    "Include {worldId} so every world uses a different remote repository");
+            return null;
+        }
         try {
             return new GitDestinationConfig(
                     gitEnabled,
@@ -236,7 +259,9 @@ public final class SettingsDraft {
                             gitWorldExitEnabled,
                             gitScheduledEnabled),
                     patterns,
-                    gitHealth);
+                    gitHealth,
+                    base.git().legacyRepository(),
+                    base.git().legacyRemoteUrl());
         } catch (IllegalArgumentException exception) {
             SettingsField field = exception.getMessage().contains("remote name")
                     ? SettingsField.GIT_REMOTE_NAME
@@ -365,30 +390,6 @@ public final class SettingsDraft {
 
     public WorldArchiveConfig base() {
         return base;
-    }
-
-    public boolean manualEnabled() {
-        return manualEnabled;
-    }
-
-    public void setManualEnabled(boolean enabled) {
-        manualEnabled = enabled;
-    }
-
-    public boolean worldExitEnabled() {
-        return worldExitEnabled;
-    }
-
-    public void setWorldExitEnabled(boolean enabled) {
-        worldExitEnabled = enabled;
-    }
-
-    public boolean scheduledEnabled() {
-        return scheduledEnabled;
-    }
-
-    public void setScheduledEnabled(boolean enabled) {
-        scheduledEnabled = enabled;
     }
 
     public String scheduleInterval() {

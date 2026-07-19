@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.ishaankot.worldarchive.config.WorldArchiveConfig;
 import dev.ishaankot.worldarchive.config.GitDestinationConfig;
+import dev.ishaankot.worldarchive.config.TriggerConfig;
 import dev.ishaankot.worldarchive.config.WorldConfig;
 import dev.ishaankot.worldarchive.config.ZipDestinationConfig;
 import dev.ishaankot.worldarchive.model.DestinationHealth;
@@ -32,9 +33,12 @@ class SettingsDraftTest {
         WorldArchiveConfig resolvedDefaults = resolvedDefaults();
         SettingsDraft draft = SettingsDraft.from(resolvedDefaults);
         assertTrue(draft.validate(List.of()).isValid());
-        assertTrue(draft.manualEnabled());
-        assertTrue(draft.worldExitEnabled());
-        assertFalse(draft.scheduledEnabled());
+        assertTrue(draft.gitManualEnabled());
+        assertTrue(draft.gitWorldExitEnabled());
+        assertFalse(draft.gitScheduledEnabled());
+        assertTrue(draft.zipManualEnabled());
+        assertTrue(draft.zipWorldExitEnabled());
+        assertFalse(draft.zipScheduledEnabled());
         assertEquals("30", draft.scheduleInterval());
 
         draft.setGitEnabled(false);
@@ -53,11 +57,23 @@ class SettingsDraftTest {
     }
 
     @Test
-    void persistsGlobalAndPerDestinationTriggerChoicesIndependently() {
-        SettingsDraft draft = SettingsDraft.from(resolvedDefaults());
-        draft.setManualEnabled(false);
-        draft.setWorldExitEnabled(false);
-        draft.setScheduledEnabled(true);
+    void foldsLegacyGlobalGatesIntoVisibleChoicesAndDerivesPersistedGlobals() {
+        WorldArchiveConfig defaults = resolvedDefaults();
+        WorldArchiveConfig legacyGates = new WorldArchiveConfig(
+                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
+                new TriggerConfig(false, true, false, 45),
+                defaults.git(),
+                defaults.zip(),
+                defaults.worlds());
+        SettingsDraft draft = SettingsDraft.from(legacyGates);
+
+        assertFalse(draft.gitManualEnabled());
+        assertTrue(draft.gitWorldExitEnabled());
+        assertFalse(draft.gitScheduledEnabled());
+        assertFalse(draft.zipManualEnabled());
+        assertTrue(draft.zipWorldExitEnabled());
+        assertFalse(draft.zipScheduledEnabled());
+
         draft.setScheduleInterval("45");
         draft.setGitManualEnabled(false);
         draft.setGitWorldExitEnabled(true);
@@ -68,8 +84,8 @@ class SettingsDraftTest {
 
         WorldArchiveConfig config = draft.validate(List.of()).config().orElseThrow();
 
-        assertFalse(config.triggers().manualEnabled());
-        assertFalse(config.triggers().worldExitEnabled());
+        assertTrue(config.triggers().manualEnabled());
+        assertTrue(config.triggers().worldExitEnabled());
         assertTrue(config.triggers().scheduledEnabled());
         assertEquals(45, config.triggers().scheduleIntervalMinutes());
         assertFalse(config.git().triggers().manualEnabled());
@@ -102,7 +118,7 @@ class SettingsDraftTest {
         draft.setGitRepository(syncedFolder.resolve("git-store").toString());
         draft.setZipDestination(syncedFolder.resolve("archives").toString());
         draft.setGitRemoteName("backup-origin");
-        draft.setGitRemoteUrl("https://example.com/user/worlds.git");
+        draft.setGitRemoteUrl("https://example.com/user/worlds-{worldId}.git");
         draft.setGitLfsPatterns("*.mca, *.dat, *.nbt");
 
         SettingsValidation validation = draft.validate(List.of(world));
@@ -122,6 +138,19 @@ class SettingsDraftTest {
         assertFalse(validation.isValid());
         assertTrue(validation.issue(SettingsField.GIT_REMOTE_URL).isPresent());
         assertTrue(validation.issue(SettingsField.SCHEDULE_INTERVAL).isPresent());
+    }
+
+    @Test
+    void rejectsPlainRemoteForNewPerWorldRepositories() {
+        SettingsDraft draft = SettingsDraft.from(resolvedDefaults());
+        draft.setGitRemoteUrl("https://example.com/user/shared.git");
+
+        SettingsValidation validation = draft.validate(List.of());
+
+        assertFalse(validation.isValid());
+        assertEquals(
+                "Include {worldId} so every world uses a different remote repository",
+                validation.issue(SettingsField.GIT_REMOTE_URL).orElseThrow());
     }
 
     @Test
@@ -184,7 +213,7 @@ class SettingsDraftTest {
                 List.of());
         SettingsDraft draft = SettingsDraft.from(checked);
 
-        draft.setGitRemoteUrl("https://example.com/worlds.git");
+        draft.setGitRemoteUrl("https://example.com/worlds-{worldId}.git");
 
         assertEquals(DestinationHealthStatus.UNCONFIGURED, draft.gitHealth().status());
         assertEquals(DestinationHealthStatus.HEALTHY, draft.zipHealth().status());
@@ -224,6 +253,47 @@ class SettingsDraftTest {
         SettingsDraft defaults = SettingsDraft.defaultsKeepingWorlds(config);
         assertTrue(defaults.validate(List.of(world)).config().orElseThrow().worlds().getFirst().enabled());
         assertEquals(worldId, defaults.base().worlds().getFirst().worldId());
+    }
+
+    @Test
+    void preservesHiddenLegacyGitStorageAcrossValidationAndDefaults() throws IOException {
+        Path legacyRepository = Files.createDirectory(temporaryDirectory.resolve("legacy-shared.git"));
+        WorldArchiveConfig resolved = resolvedDefaults();
+        GitDestinationConfig git = resolved.git();
+        WorldArchiveConfig migrated = new WorldArchiveConfig(
+                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
+                resolved.triggers(),
+                new GitDestinationConfig(
+                        git.enabled(),
+                        git.repository(),
+                        git.remoteName(),
+                        git.remoteUrl(),
+                        git.triggers(),
+                        git.lfsPatterns(),
+                        git.health(),
+                        Optional.of(legacyRepository),
+                        Optional.of("https://example.invalid/legacy.git")),
+                resolved.zip(),
+                resolved.worlds());
+
+        WorldArchiveConfig validated = SettingsDraft.from(migrated)
+                .validate(List.of())
+                .config()
+                .orElseThrow();
+        SettingsDraft reset = SettingsDraft.defaultsKeepingWorlds(
+                migrated,
+                new SettingsDefaults(temporaryDirectory.resolve("new-defaults")));
+
+        assertEquals(legacyRepository.toRealPath(), validated.git().legacyRepository().orElseThrow());
+        assertEquals(
+                migrated.git().legacyRemoteUrl(),
+                validated.git().legacyRemoteUrl());
+        assertEquals(
+                migrated.git().legacyRepository(),
+                reset.base().git().legacyRepository());
+        assertEquals(
+                migrated.git().legacyRemoteUrl(),
+                reset.base().git().legacyRemoteUrl());
     }
 
     private WorldArchiveConfig resolvedDefaults() {

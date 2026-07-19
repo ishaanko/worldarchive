@@ -7,6 +7,7 @@ import dev.ishaankot.worldarchive.model.DestinationResult;
 import dev.ishaankot.worldarchive.model.DestinationType;
 import dev.ishaankot.worldarchive.model.WorldId;
 import dev.ishaankot.worldarchive.storage.git.GitBackupBackend;
+import dev.ishaankot.worldarchive.storage.git.GitSnapshotStore;
 import dev.ishaankot.worldarchive.storage.git.GitSnapshot;
 import dev.ishaankot.worldarchive.storage.git.GitToolHealth;
 import dev.ishaankot.worldarchive.storage.git.GitVerification;
@@ -20,11 +21,11 @@ import java.util.concurrent.ExecutionException;
 
 /** Recovery adapter for the native Git and Git LFS destination. */
 final class GitRecoveryDestination implements RecoveryDestination {
-    private final GitBackupBackend backend;
+    private final GitSnapshotStore backend;
 
     private final Clock clock;
 
-    GitRecoveryDestination(GitBackupBackend backend, Clock clock) {
+    GitRecoveryDestination(GitSnapshotStore backend, Clock clock) {
         this.backend = Objects.requireNonNull(backend, "backend");
         this.clock = Objects.requireNonNull(clock, "clock");
     }

@@ -1,5 +1,6 @@
 package dev.ishaankot.worldarchive.ui;
 
+import dev.ishaankot.worldarchive.core.BackupOperation;
 import dev.ishaankot.worldarchive.core.BackupService;
 import dev.ishaankot.worldarchive.core.DeleteBackupRequest;
 import dev.ishaankot.worldarchive.core.DeletePreparation;
@@ -357,23 +358,30 @@ public final class BackupBrowserScreen extends Screen {
     }
 
     private void addStatus(int x, int contentWidth) {
-        addRenderableOnly(new StringWidget(
+        StringWidget widget = new StringWidget(
                 x,
                 Math.max(108, height - 64),
                 contentWidth,
                 14,
                 status,
-                font));
+                font);
+        widget.setTooltip(Tooltip.create(status));
+        addRenderableOnly(widget);
     }
 
     private void addWarning(int x, int contentWidth) {
-        capabilities.warning().ifPresent(message -> addRenderableOnly(new StringWidget(
-                x,
-                Math.max(94, height - 80),
-                contentWidth,
-                14,
-                Component.literal(message).withStyle(ChatFormatting.YELLOW),
-                font)));
+        capabilities.warning().ifPresent(message -> {
+            Component warning = Component.literal(message).withStyle(ChatFormatting.YELLOW);
+            StringWidget widget = new StringWidget(
+                    x,
+                    Math.max(94, height - 80),
+                    contentWidth,
+                    14,
+                    warning,
+                    font);
+            widget.setTooltip(Tooltip.create(warning));
+            addRenderableOnly(widget);
+        });
     }
 
     private void addActions(BackupBrowserPage page, int x, int contentWidth) {
@@ -450,9 +458,11 @@ public final class BackupBrowserScreen extends Screen {
                     new BackupRestoreScreen(this, parent, world, row, facade)));
             case DELETE -> selectedRow().ifPresent(this::prepareDelete);
             case SYNC -> selectedRow().ifPresent(row -> openResultOperation(
+                    BackupOperation.SYNC,
                     "Syncing backup",
                     listener -> service.syncBackup(row.backupId(), listener)));
             case VERIFY -> selectedRow().ifPresent(row -> openResultOperation(
+                    BackupOperation.VERIFY,
                     "Verifying backup",
                     listener -> service.verifyBackup(row.backupId(), listener)));
             case OPEN_FOLDER -> openFolder();
@@ -519,6 +529,7 @@ public final class BackupBrowserScreen extends Screen {
                         result.backupId(),
                         result.confirmationToken());
                 openResultOperation(
+                        BackupOperation.DELETE,
                         "Deleting backup",
                         listener -> service.deleteBackup(request, listener));
             }));
@@ -528,7 +539,18 @@ public final class BackupBrowserScreen extends Screen {
     private void openResultOperation(
             String operationTitle,
             BackupOperationScreen.OperationStarter<dev.ishaankot.worldarchive.model.BackupResult> starter) {
-        minecraft.setScreenAndShow(BackupOperationScreen.backupResult(this, operationTitle, starter));
+        openResultOperation(BackupOperation.CREATE, operationTitle, starter);
+    }
+
+    private void openResultOperation(
+            BackupOperation operation,
+            String operationTitle,
+            BackupOperationScreen.OperationStarter<dev.ishaankot.worldarchive.model.BackupResult> starter) {
+        minecraft.setScreenAndShow(BackupOperationScreen.backupResult(
+                this,
+                operationTitle,
+                operation,
+                starter));
     }
 
     private void openFolder() {

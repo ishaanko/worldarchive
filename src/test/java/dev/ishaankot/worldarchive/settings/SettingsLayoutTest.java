@@ -13,12 +13,13 @@ class SettingsLayoutTest {
         SettingsLayout layout = SettingsLayout.forHeight(180);
 
         assertTrue(layout.compact());
-        assertEquals(2, layout.gitSectionCount());
+        assertEquals(3, layout.gitSectionCount());
         assertEquals(2, layout.worldPageSize());
         assertEquals(130, layout.statusY());
         assertEquals(152, layout.buttonsY());
         assertTrue(layout.contentClearsStatus(layout.gitLastRow(0), 20));
         assertTrue(layout.contentClearsStatus(layout.gitLastRow(1), 20));
+        assertTrue(layout.contentClearsStatus(layout.gitLastRow(2), 20));
     }
 
     @Test

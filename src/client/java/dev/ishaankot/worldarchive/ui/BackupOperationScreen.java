@@ -1,5 +1,6 @@
 package dev.ishaankot.worldarchive.ui;
 
+import dev.ishaankot.worldarchive.core.BackupOperation;
 import dev.ishaankot.worldarchive.core.ProgressListener;
 import dev.ishaankot.worldarchive.core.RestoreBackupResult;
 import dev.ishaankot.worldarchive.model.BackupResult;
@@ -42,6 +43,8 @@ final class BackupOperationScreen<T> extends Screen {
 
     private boolean running = true;
 
+    private boolean retryAvailable;
+
     private boolean started;
 
     private boolean active;
@@ -63,11 +66,20 @@ final class BackupOperationScreen<T> extends Screen {
             Screen parent,
             String title,
             OperationStarter<BackupResult> starter) {
+        return backupResult(parent, title, BackupOperation.CREATE, starter);
+    }
+
+    static BackupOperationScreen<BackupResult> backupResult(
+            Screen parent,
+            String title,
+            BackupOperation operation,
+            OperationStarter<BackupResult> starter) {
+        Objects.requireNonNull(operation, "operation");
         return new BackupOperationScreen<>(
                 parent,
                 title,
                 starter,
-                BackupOperationScreen::backupPresentation);
+                result -> backupPresentation(operation, result));
     }
 
     static BackupOperationScreen<RestoreBackupResult> restore(
@@ -138,12 +150,20 @@ final class BackupOperationScreen<T> extends Screen {
             addRenderableOnly(detailWidget);
         }
 
+        int buttonY = Math.min(height - 28, height / 2 + 72);
+        int buttonWidth = retryAvailable ? 120 : 150;
+        int closeX = retryAvailable ? width / 2 + 3 : width / 2 - buttonWidth / 2;
         Component closeLabel = running ? Component.literal("Please wait…") : Component.literal("Done");
         Button closeButton = Button.builder(closeLabel, ignored -> onClose())
-                .bounds(width / 2 - 75, Math.min(height - 28, height / 2 + 72), 150, 20)
+                .bounds(closeX, buttonY, buttonWidth, 20)
                 .build();
         closeButton.active = !running;
         addRenderableWidget(closeButton);
+        if (retryAvailable) {
+            addRenderableWidget(Button.builder(Component.literal("Retry"), ignored -> retry())
+                    .bounds(width / 2 - buttonWidth - 3, buttonY, buttonWidth, 20)
+                    .build());
+        }
     }
 
     @Override
@@ -194,6 +214,7 @@ final class BackupOperationScreen<T> extends Screen {
                     return;
                 }
                 running = false;
+                retryAvailable = false;
                 presentation = completed;
                 rebuildIfInitialized();
             } catch (RuntimeException exception) {
@@ -226,11 +247,31 @@ final class BackupOperationScreen<T> extends Screen {
             return;
         }
         running = false;
+        String failure = safeFailure(throwable);
+        retryAvailable = captureChanged(failure);
+        List<String> details = retryAvailable
+                ? List.of(
+                        failure,
+                        "Fix: pause world activity, wait for saves to settle, then choose Retry.")
+                : List.of(failure);
         presentation = new Presentation(
                 "Operation failed",
-                List.of(safeFailure(throwable)),
+                details,
                 ChatFormatting.RED);
         rebuildIfInitialized();
+    }
+
+    private void retry() {
+        if (running || !retryAvailable) {
+            return;
+        }
+        running = true;
+        retryAvailable = false;
+        progress = null;
+        presentation = Presentation.running("Saving the world before retry…");
+        long token = ++lifecycle;
+        rebuildIfInitialized();
+        startOperation(token);
     }
 
     private boolean accepts(long token) {
@@ -255,17 +296,22 @@ final class BackupOperationScreen<T> extends Screen {
         return !running;
     }
 
-    private static Presentation backupPresentation(BackupResult result) {
-        BackupOutcomeSummary summary = BackupOutcomeSummary.from(result);
+    private static Presentation backupPresentation(
+            BackupOperation operation,
+            BackupResult result) {
+        BackupOutcomeSummary summary = BackupOutcomeSummary.from(operation, result);
         List<String> details = new ArrayList<>();
         for (DestinationOutcomeView destination : summary.destinations()) {
             String detail = destination.detail().map(value -> " — " + value).orElse("");
             details.add(destination.destination() + ": "
-                    + words(destination.status().name()) + detail);
+                    + summary.destinationStatus(destination) + detail);
         }
         ChatFormatting color = switch (summary.status()) {
             case SUCCESS -> ChatFormatting.GREEN;
-            case PARTIAL_SUCCESS, SKIPPED -> ChatFormatting.YELLOW;
+            case PARTIAL_SUCCESS -> ChatFormatting.YELLOW;
+            case SKIPPED -> operation == BackupOperation.DELETE
+                    ? ChatFormatting.GREEN
+                    : ChatFormatting.YELLOW;
             case FAILED -> ChatFormatting.RED;
             default -> throw new IllegalStateException("Unknown backup status: " + summary.status());
         };
@@ -302,8 +348,12 @@ final class BackupOperationScreen<T> extends Screen {
         return safe;
     }
 
-    private static String words(String value) {
-        return value.toLowerCase(Locale.ROOT).replace('_', ' ');
+    static boolean captureChanged(String failure) {
+        String normalized = failure.toLowerCase(Locale.ROOT);
+        return normalized.contains("changed")
+                && normalized.contains("world")
+                && (normalized.contains("private capture")
+                        || normalized.contains("while it was being captured"));
     }
 
     @FunctionalInterface

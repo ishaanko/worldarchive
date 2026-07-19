@@ -3,6 +3,8 @@ package dev.ishaankot.worldarchive.config;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import dev.ishaankot.worldarchive.model.DestinationHealth;
+import dev.ishaankot.worldarchive.model.DestinationType;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -43,6 +45,27 @@ final class PathSafetyTest {
                 TriggerConfig.defaults(),
                 new GitDestinationConfig(true, Optional.of(world.resolve("git")), "origin", Optional.empty()),
                 new ZipDestinationConfig(true, Optional.of(sibling)));
+
+        assertThrows(IOException.class, () -> unsafe.validateDestinations(List.of(world)));
+    }
+
+    @Test
+    void validatesHiddenLegacyGitRepositoryAgainstWorlds() throws IOException {
+        Path world = Files.createDirectory(temporaryDirectory.resolve("legacy-world"));
+        WorldArchiveConfig unsafe = new WorldArchiveConfig(
+                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
+                TriggerConfig.defaults(),
+                new GitDestinationConfig(
+                        true,
+                        Optional.of(temporaryDirectory.resolve("git-root")),
+                        "origin",
+                        Optional.empty(),
+                        DestinationTriggerConfig.defaults(),
+                        GitDestinationConfig.DEFAULT_LFS_PATTERNS,
+                        DestinationHealth.notChecked(DestinationType.GIT),
+                        Optional.of(world.resolve("legacy.git")),
+                        Optional.empty()),
+                ZipDestinationConfig.defaults());
 
         assertThrows(IOException.class, () -> unsafe.validateDestinations(List.of(world)));
     }

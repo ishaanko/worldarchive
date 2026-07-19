@@ -9,10 +9,10 @@ always restores backups as new worlds without modifying the original.
 - Manual backups from the backup browser or `/backup create`
 - Automatic backups when leaving a world
 - Optional scheduled backups
-- Incremental snapshots using Git and Git LFS
+- Incremental snapshots using an isolated Git and Git LFS repository per world
 - Standalone ZIP backups with SHA-256 integrity metadata
 - Independent Git and ZIP destinations
-- Optional Git remotes over HTTPS, SSH, file, or local paths
+- Optional per-world Git remotes over HTTPS, SSH, file, or local paths
 - Support for ZIP folders synced by OneDrive, Google Drive, or similar tools
 - Per-world and per-destination settings
 - Backup labels, verification, remote sync, and deletion
@@ -51,13 +51,20 @@ Backups can be created in three ways:
 | World exit | Enabled | Create a backup after the world finishes saving and closes. |
 | Scheduled | Disabled | Create a backup every 30 minutes and skip unchanged worlds. |
 
-Triggers and destinations can be configured globally or per world. Open
-settings through Mod Menu, the backup browser, or `/backup config`.
+Triggers can be configured independently for Git and ZIP, and individual worlds
+can be enabled or paused. Open settings through Mod Menu, the backup browser, or
+`/backup config`.
 
 Git and ZIP destinations are independent. If one fails while the other
 succeeds, the successful copy is kept and the backup is reported as a partial
 success. Failed remote Git pushes are marked **pending sync** and can be retried
 later.
+
+Git stores each world's history in its own repository. To sync to GitHub or
+another server, configure a remote URL template containing `{worldId}`, such as
+`https://github.com/example/minecraft-{worldId}.git`. Each matching remote
+repository must already exist; WorldArchive does not create server-side
+repositories or request account credentials.
 
 Restoring a backup verifies it and creates a new, uniquely named world. The
 original world is never overwritten or modified.
@@ -88,7 +95,7 @@ Paths are relative to the Minecraft instance directory, normally `.minecraft`.
 | Purpose | Default path |
 | --- | --- |
 | Configuration | `config/worldarchive.json` |
-| Git repository | `worldarchive/worldarchive.git` |
+| Per-world Git repositories | `worldarchive/git/<world-id>.git` |
 | ZIP archives | `worldarchive/archives/` |
 | Backup catalog | `worldarchive/catalog.json` |
 | Change inventories | `worldarchive/inventories/` |
@@ -97,7 +104,9 @@ Paths are relative to the Minecraft instance directory, normally `.minecraft`.
 
 Destination folders must remain outside world directories. Do not edit managed
 repositories or archive folders while WorldArchive is running, and do not use a
-Git destination from multiple computers at the same time.
+Git destination from multiple computers at the same time. Configurations from
+older releases retain their shared Git repository as read-compatible legacy
+storage; WorldArchive never moves or deletes it during migration.
 
 ## Building the mod
 

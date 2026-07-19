@@ -33,6 +33,21 @@ class ZipBackupStoreTest {
     Path temporaryDirectory;
 
     @Test
+    void archiveFilenameIsReadableAndKeepsItsManagedIdentity() throws Exception {
+        Path world = Files.createDirectories(temporaryDirectory.resolve("world"));
+        Files.writeString(world.resolve("level.dat"), "world data", StandardCharsets.UTF_8);
+        BackupManifest manifest = manifestFor(world, CREATED_AT);
+
+        ZipBackupArtifact artifact = new ZipBackupStore(temporaryDirectory.resolve("archives"))
+                .create(new BackupCapture(world, manifest));
+
+        assertEquals(
+                "2026-07-17_20-15-30Z - Test World - Snapshot 世界 - "
+                        + manifest.backupId() + ".zip",
+                artifact.archivePath().getFileName().toString());
+    }
+
+    @Test
     void roundTripPreservesBytesUnicodeAndEmptyDirectories() throws Exception {
         Path world = Files.createDirectories(temporaryDirectory.resolve("world"));
         byte[] level = new byte[ZipDigests.COPY_BUFFER_BYTES * 2 + 37];

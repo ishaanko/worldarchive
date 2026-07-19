@@ -18,7 +18,7 @@ public record WorldArchiveConfig(
         GitDestinationConfig git,
         ZipDestinationConfig zip,
         List<WorldConfig> worlds) {
-    public static final int CURRENT_SCHEMA_VERSION = 3;
+    public static final int CURRENT_SCHEMA_VERSION = 4;
 
     public WorldArchiveConfig {
         if (schemaVersion != CURRENT_SCHEMA_VERSION) {
@@ -73,6 +73,9 @@ public record WorldArchiveConfig(
             allWorldPaths.add(canonicalPath);
         }
         Optional<Path> gitRepository = canonicalizeDestination(git.repository(), allWorldPaths);
+        Optional<Path> legacyGitRepository = canonicalizeDestination(
+                git.legacyRepository(),
+                allWorldPaths);
         Optional<Path> zipDestination = canonicalizeDestination(zip.destination(), allWorldPaths);
         return new WorldArchiveConfig(
                 CURRENT_SCHEMA_VERSION,
@@ -84,7 +87,9 @@ public record WorldArchiveConfig(
                         git.remoteUrl(),
                         git.triggers(),
                         git.lfsPatterns(),
-                        git.health()),
+                        git.health(),
+                        legacyGitRepository,
+                        git.legacyRemoteUrl()),
                 new ZipDestinationConfig(zip.enabled(), zipDestination, zip.triggers(), zip.health()),
                 canonicalWorlds);
     }

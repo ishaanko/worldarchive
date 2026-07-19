@@ -8,11 +8,18 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.util.Locale;
+import java.util.Objects;
+import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /** Strictly whitelists credential-free URL, SCP, and absolute local Git remote forms. */
 final class RemoteUrlPolicy {
+    static final String WORLD_ID_PLACEHOLDER = "{worldId}";
+
+    private static final UUID VALIDATION_WORLD_ID = UUID.fromString(
+            "00000000-0000-0000-0000-000000000000");
+
     private static final int MAXIMUM_DECODE_ROUNDS = 4;
 
     private static final Pattern SCP_REMOTE = Pattern.compile(
@@ -27,6 +34,53 @@ final class RemoteUrlPolicy {
     }
 
     static String validate(String remoteUrl) {
+        Objects.requireNonNull(remoteUrl, "remoteUrl");
+        int placeholders = countWorldIdPlaceholders(remoteUrl);
+        if (placeholders > 1) {
+            throw new IllegalArgumentException(
+                    "Git remote URL template must contain exactly one {worldId} placeholder");
+        }
+        String validationUrl = placeholders == 1
+                ? remoteUrl.replace(WORLD_ID_PLACEHOLDER, VALIDATION_WORLD_ID.toString())
+                : remoteUrl;
+        validateConcrete(validationUrl);
+        return remoteUrl;
+    }
+
+    static String validatePlain(String remoteUrl) {
+        Objects.requireNonNull(remoteUrl, "remoteUrl");
+        if (countWorldIdPlaceholders(remoteUrl) != 0) {
+            throw new IllegalArgumentException("Legacy Git remote URL must not contain {worldId}");
+        }
+        validateConcrete(remoteUrl);
+        return remoteUrl;
+    }
+
+    static boolean isWorldIdTemplate(String remoteUrl) {
+        return countWorldIdPlaceholders(Objects.requireNonNull(remoteUrl, "remoteUrl")) == 1;
+    }
+
+    static String resolveWorldId(String remoteUrl, UUID worldId) {
+        String validated = validate(remoteUrl);
+        if (!isWorldIdTemplate(validated)) {
+            throw new IllegalArgumentException("Git remote URL is not a per-world template");
+        }
+        return validated.replace(
+                WORLD_ID_PLACEHOLDER,
+                Objects.requireNonNull(worldId, "worldId").toString());
+    }
+
+    private static int countWorldIdPlaceholders(String remoteUrl) {
+        int count = 0;
+        int offset = 0;
+        while ((offset = remoteUrl.indexOf(WORLD_ID_PLACEHOLDER, offset)) >= 0) {
+            count++;
+            offset += WORLD_ID_PLACEHOLDER.length();
+        }
+        return count;
+    }
+
+    private static void validateConcrete(String remoteUrl) {
         if (remoteUrl.isBlank()
                 || remoteUrl.length() > 2_048
                 || !remoteUrl.equals(remoteUrl.strip())) {
@@ -38,14 +92,14 @@ final class RemoteUrlPolicy {
         rejectSensitiveData(remoteUrl);
         if (remoteUrl.contains("://")) {
             validateUri(remoteUrl);
-            return remoteUrl;
+            return;
         }
         Matcher scp = SCP_REMOTE.matcher(remoteUrl);
         if (scp.matches()) {
             if (scp.group("path").startsWith("-")) {
                 throw new IllegalArgumentException("Git SCP remote path must not start with a dash");
             }
-            return remoteUrl;
+            return;
         }
         if (!LOCAL_REMOTE.matcher(remoteUrl).matches()) {
             throw new IllegalArgumentException("Git remote must be an approved URL, SCP form, or absolute local path");
@@ -57,7 +111,6 @@ final class RemoteUrlPolicy {
         } catch (InvalidPathException exception) {
             throw new IllegalArgumentException("Local Git remote path is malformed", exception);
         }
-        return remoteUrl;
     }
 
     private static void validateUri(String remoteUrl) {

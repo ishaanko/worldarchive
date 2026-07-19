@@ -1,9 +1,12 @@
 package dev.ishaankot.worldarchive.config;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Path;
+import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -23,6 +26,32 @@ final class RemoteUrlPolicyTest {
         assertEquals(local, RemoteUrlPolicy.validate(local));
         String shortName = temporaryDirectory.resolve("RUNNER~1/remote.git").toString();
         assertEquals(shortName, RemoteUrlPolicy.validate(shortName));
+    }
+
+    @Test
+    void acceptsAndResolvesExactlyOneWorldIdPlaceholder() {
+        String template = "https://example.invalid/team/world-{worldId}.git";
+        UUID worldId = UUID.fromString("12345678-1234-1234-1234-123456789abc");
+
+        assertEquals(template, RemoteUrlPolicy.validate(template));
+        assertTrue(RemoteUrlPolicy.isWorldIdTemplate(template));
+        assertFalse(RemoteUrlPolicy.isWorldIdTemplate(
+                "https://example.invalid/team/shared.git"));
+        assertEquals(
+                "https://example.invalid/team/world-12345678-1234-1234-1234-123456789abc.git",
+                RemoteUrlPolicy.resolveWorldId(template, worldId));
+    }
+
+    @Test
+    void keepsPlainLegacyUrlsButRejectsAmbiguousTemplates() {
+        String plain = "https://example.invalid/team/legacy.git";
+
+        assertEquals(plain, RemoteUrlPolicy.validatePlain(plain));
+        assertThrows(IllegalArgumentException.class, () -> RemoteUrlPolicy.validate(
+                "https://example.invalid/{worldId}/{worldId}.git"));
+        assertThrows(IllegalArgumentException.class, () -> RemoteUrlPolicy.validatePlain(
+                "https://example.invalid/team/{worldId}.git"));
+        assertThrows(IllegalArgumentException.class, () -> RemoteUrlPolicy.resolveWorldId(plain, UUID.randomUUID()));
     }
 
     @Test

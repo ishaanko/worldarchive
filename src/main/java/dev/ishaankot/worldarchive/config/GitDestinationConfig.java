@@ -10,7 +10,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 
-/** Configuration for the external shared bare Git repository. */
+/** Configuration for isolated per-world Git repositories and optional legacy storage. */
 public record GitDestinationConfig(
         boolean enabled,
         Optional<Path> repository,
@@ -18,7 +18,9 @@ public record GitDestinationConfig(
         Optional<String> remoteUrl,
         DestinationTriggerConfig triggers,
         List<String> lfsPatterns,
-        DestinationHealth health) {
+        DestinationHealth health,
+        Optional<Path> legacyRepository,
+        Optional<String> legacyRemoteUrl) {
     public static final String DEFAULT_REMOTE_NAME = "origin";
 
     public static final List<String> DEFAULT_LFS_PATTERNS = List.of(
@@ -48,6 +50,31 @@ public record GitDestinationConfig(
         if (health.destination() != DestinationType.GIT) {
             throw new IllegalArgumentException("Git health state must describe the Git destination");
         }
+        legacyRepository = Objects.requireNonNull(legacyRepository, "legacyRepository")
+                .map(path -> path.toAbsolutePath().normalize());
+        legacyRemoteUrl = Objects.requireNonNull(legacyRemoteUrl, "legacyRemoteUrl")
+                .map(RemoteUrlPolicy::validatePlain);
+    }
+
+    /** Compatibility constructor for callers that predate isolated-repository migration fields. */
+    public GitDestinationConfig(
+            boolean enabled,
+            Optional<Path> repository,
+            String remoteName,
+            Optional<String> remoteUrl,
+            DestinationTriggerConfig triggers,
+            List<String> lfsPatterns,
+            DestinationHealth health) {
+        this(
+                enabled,
+                repository,
+                remoteName,
+                remoteUrl,
+                triggers,
+                lfsPatterns,
+                health,
+                Optional.empty(),
+                Optional.empty());
     }
 
     /** Compatibility constructor for callers that predate persisted destination health. */
@@ -65,7 +92,9 @@ public record GitDestinationConfig(
                 remoteUrl,
                 triggers,
                 lfsPatterns,
-                DestinationHealth.notChecked(DestinationType.GIT));
+                DestinationHealth.notChecked(DestinationType.GIT),
+                Optional.empty(),
+                Optional.empty());
     }
 
     /** Compatibility constructor for callers that predate per-destination settings. */
@@ -85,7 +114,13 @@ public record GitDestinationConfig(
                 Optional.empty(),
                 DestinationTriggerConfig.defaults(),
                 DEFAULT_LFS_PATTERNS,
-                DestinationHealth.notChecked(DestinationType.GIT));
+                DestinationHealth.notChecked(DestinationType.GIT),
+                Optional.empty(),
+                Optional.empty());
+    }
+
+    public static boolean isPerWorldRemoteTemplate(String remoteUrl) {
+        return RemoteUrlPolicy.isWorldIdTemplate(remoteUrl);
     }
 
     private static List<String> validatePatterns(List<String> patterns) {

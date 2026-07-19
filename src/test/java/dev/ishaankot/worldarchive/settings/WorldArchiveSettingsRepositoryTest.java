@@ -82,7 +82,7 @@ class WorldArchiveSettingsRepositoryTest {
         WorldArchiveConfig loaded = repository.load();
 
         assertEquals(
-                gameDirectory.toRealPath().resolve("worldarchive/worldarchive.git"),
+                gameDirectory.toRealPath().resolve("worldarchive/git"),
                 loaded.git().repository().orElseThrow());
         assertEquals(
                 gameDirectory.toRealPath().resolve("worldarchive/archives"),
