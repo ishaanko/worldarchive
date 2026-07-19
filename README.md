@@ -117,7 +117,7 @@ On Linux or macOS:
 ```
 
 The build runs the test suite, Checkstyle, formatting checks, the license check,
-and the clean-room provenance scan. Generated JARs are written to `build/libs/`.
+and the provenance scan. Generated JARs are written to `build/libs/`.
 
 ## License
 

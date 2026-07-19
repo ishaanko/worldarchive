@@ -59,7 +59,7 @@ tasks.register('verifyFormatting') {
     }
 }
 
-tasks.register('cleanRoomScan') {
+tasks.register('provenanceScan') {
     group = 'verification'
     description = 'Rejects prohibited implementation provenance and tracked temporary content.'
 
@@ -85,7 +85,7 @@ tasks.register('cleanRoomScan') {
             }
             forbiddenPathFragments.each { fragment ->
                 if (normalized.contains(fragment)) {
-                    failures << "${path}: prohibited clean-room path"
+                    failures << "${path}: prohibited provenance path"
                 }
             }
             if (!isImplementationTextFile(path)) {
@@ -95,14 +95,14 @@ tasks.register('cleanRoomScan') {
             file(path).readLines('UTF-8').eachWithIndex { line, index ->
                 forbiddenTerms.each { term ->
                     if (line.toLowerCase(Locale.ROOT).contains(term.toLowerCase(Locale.ROOT))) {
-                        failures << "${path}:${index + 1}: prohibited clean-room reference"
+                        failures << "${path}:${index + 1}: prohibited provenance reference"
                     }
                 }
             }
         }
 
         if (!failures.isEmpty()) {
-            throw new GradleException("Clean-room scan failed:\n" + failures.join('\n'))
+            throw new GradleException("Provenance scan failed:\n" + failures.join('\n'))
         }
     }
 }
@@ -128,6 +128,6 @@ tasks.register('verifyLicense') {
 
 tasks.named('check') {
     dependsOn tasks.named('verifyFormatting')
-    dependsOn tasks.named('cleanRoomScan')
+    dependsOn tasks.named('provenanceScan')
     dependsOn tasks.named('verifyLicense')
 }

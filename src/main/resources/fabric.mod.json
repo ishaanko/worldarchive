@@ -3,7 +3,8 @@
     "id": "worldarchive",
     "version": "${version}",
     "name": "WorldArchive",
-    "description": "A clean-room client-side backup mod for Minecraft worlds.",
+    "description": "Dependable local backups for single-player Minecraft worlds.",
+    "icon": "assets/worldarchive/icon.png",
     "authors": [
         "Ishaan Kothari"
     ],
