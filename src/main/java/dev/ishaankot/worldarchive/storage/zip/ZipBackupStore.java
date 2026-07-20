@@ -8,37 +8,22 @@ import dev.ishaankot.worldarchive.storage.zip.ZipArchiveInspector.Inspection;
 import dev.ishaankot.worldarchive.storage.zip.ZipSourceScanner.SourceEntry;
 import dev.ishaankot.worldarchive.storage.zip.ZipSourceScanner.SourceSnapshot;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.InterruptedIOException;
-import java.io.OutputStream;
 import java.nio.ByteBuffer;
-import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.nio.channels.SeekableByteChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
-import java.nio.file.DirectoryStream;
 import java.nio.file.FileAlreadyExistsException;
-import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
-import java.nio.file.OpenOption;
 import java.nio.file.Path;
-import java.nio.file.SimpleFileVisitor;
-import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
-import java.nio.file.attribute.FileTime;
-import java.security.MessageDigest;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.Enumeration;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -48,9 +33,6 @@ import java.util.function.LongConsumer;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipFile;
-import java.util.zip.ZipOutputStream;
 
 /**
  * Crash-safe streamed ZIP storage rooted outside live worlds.
@@ -184,7 +166,7 @@ public final class ZipBackupStore {
                 return recovered.orElseThrow();
             }
             try {
-                writeArchive(
+                ZipArchiveWriter.write(
                         destination,
                         archivePartialName,
                         capture,
@@ -368,102 +350,154 @@ public final class ZipBackupStore {
 
     /** Verifies the sidecar checksum, archive structure, inventory, and every world file. */
     public ZipVerification verify(Path archivePath) {
-        LinkedHashSet<String> problems = new LinkedHashSet<>();
-        Optional<BackupManifest> manifest = Optional.empty();
-        long verifiedFiles = 0;
-        long verifiedBytes = 0;
+        ZipVerificationState verification = new ZipVerificationState();
         ManagedArchive managed;
         try {
             managed = managedArchive(archivePath);
         } catch (IOException | RuntimeException exception) {
-            problems.add("The selected ZIP archive is outside the managed destination.");
-            return verification(manifest, verifiedFiles, verifiedBytes, problems);
+            verification.problems.add(
+                    "The selected ZIP archive is outside the managed destination.");
+            return verification.finish();
         }
+        verifyManagedArchive(managed, verification);
+        return verification.finish();
+    }
 
+    private void verifyManagedArchive(
+            ManagedArchive managed,
+            ZipVerificationState verification) {
         try (ManagedDirectoryAccess directory = ManagedDirectoryAccess.open(
                 root, managed.archive().getParent())) {
-            try {
-                directory.requireRegularFile(
-                        managed.archiveName(),
-                        "Selected ZIP archive contains an unsafe path component");
-            } catch (IOException | RuntimeException exception) {
-                problems.add("The selected ZIP archive is missing or is not a regular file.");
+            requireVerificationFiles(directory, managed, verification.problems);
+            if (!verification.problems.isEmpty()) {
+                return;
             }
-            try {
-                directory.requireRegularFile(
-                        managed.checksumName(),
-                        "ZIP checksum contains an unsafe path component");
-            } catch (IOException | RuntimeException exception) {
-                problems.add("The ZIP checksum sidecar is missing or is not a regular file.");
-            }
-            if (problems.isEmpty()) {
-                String expectedChecksum;
-                FileFingerprint checksumBefore;
-                try {
-                    expectedChecksum = readChecksum(
-                            directory, managed.checksumName(), managed.archiveName());
-                    checksumBefore = fingerprint(directory.attributes(managed.checksumName()));
-                } catch (IOException | RuntimeException exception) {
-                    problems.add("The ZIP checksum sidecar is malformed.");
-                    expectedChecksum = null;
-                    checksumBefore = null;
-                }
-                if (expectedChecksum != null) {
-                    try (ExactArchiveCopy archive = ExactArchiveCopy.capture(
-                            directory, managed.archiveName())) {
-                        if (!expectedChecksum.equals(archive.sha256())) {
-                            problems.add("The ZIP archive checksum does not match its sidecar.");
-                        }
-                        try {
-                            Inspection inspection = archive.inspect();
-                            manifest = inspection.manifest();
-                            verifiedFiles = inspection.verifiedFileCount();
-                            verifiedBytes = inspection.verifiedByteCount();
-                            problems.addAll(inspection.problems());
-                            inspection.manifest().ifPresent(value -> {
-                                if (!value.worldId().equals(managed.worldId())
-                                        || !value.backupId().equals(managed.backupId())) {
-                                    problems.add("Archive identity does not match its managed path.");
-                                }
-                            });
-                        } catch (IOException | RuntimeException exception) {
-                            problems.add("The ZIP archive is unreadable or structurally corrupt.");
-                        }
-                        try {
-                            requireSameSourceAndContents(
-                                    directory,
-                                    managed.archiveName(),
-                                    archive,
-                                    "The ZIP artifact was replaced during verification.");
-                            if (!checksumBefore.equals(fingerprint(
-                                            directory.attributes(managed.checksumName())))
-                                    || !expectedChecksum.equals(readChecksum(
-                                            directory,
-                                            managed.checksumName(),
-                                            managed.archiveName()))) {
-                                problems.add("The ZIP artifact was replaced during verification.");
-                            }
-                            directory.revalidatePinnedDirectories();
-                        } catch (IOException | RuntimeException exception) {
-                            problems.add("The ZIP artifact was replaced during verification.");
-                        }
-                    } catch (IOException | RuntimeException exception) {
-                        problems.add("The ZIP archive is unreadable or structurally corrupt.");
-                    }
-                }
+            ChecksumSnapshot checksum = verificationChecksum(
+                    directory,
+                    managed,
+                    verification.problems);
+            if (checksum != null) {
+                verifyPrivateCopy(directory, managed, checksum, verification);
             }
         } catch (IOException | RuntimeException exception) {
-            problems.add("The selected ZIP archive is outside the managed destination.");
+            verification.problems.add(
+                    "The selected ZIP archive is outside the managed destination.");
         }
-        return verification(manifest, verifiedFiles, verifiedBytes, problems);
     }
+
+    private static void requireVerificationFiles(
+            ManagedDirectoryAccess directory,
+            ManagedArchive managed,
+            Set<String> problems) {
+        try {
+            directory.requireRegularFile(
+                    managed.archiveName(),
+                    "Selected ZIP archive contains an unsafe path component");
+        } catch (IOException | RuntimeException exception) {
+            problems.add(
+                    "The selected ZIP archive is missing or is not a regular file.");
+        }
+        try {
+            directory.requireRegularFile(
+                    managed.checksumName(),
+                    "ZIP checksum contains an unsafe path component");
+        } catch (IOException | RuntimeException exception) {
+            problems.add(
+                    "The ZIP checksum sidecar is missing or is not a regular file.");
+        }
+    }
+
+    private static ChecksumSnapshot verificationChecksum(
+            ManagedDirectoryAccess directory,
+            ManagedArchive managed,
+            Set<String> problems) {
+        try {
+            return new ChecksumSnapshot(
+                    readChecksum(
+                            directory,
+                            managed.checksumName(),
+                            managed.archiveName()),
+                    fingerprint(directory.attributes(managed.checksumName())));
+        } catch (IOException | RuntimeException exception) {
+            problems.add("The ZIP checksum sidecar is malformed.");
+            return null;
+        }
+    }
+
+    private static void verifyPrivateCopy(
+            ManagedDirectoryAccess directory,
+            ManagedArchive managed,
+            ChecksumSnapshot checksum,
+            ZipVerificationState verification) {
+        try (ExactArchiveCopy archive = ExactArchiveCopy.capture(
+                directory, managed.archiveName())) {
+            if (!checksum.sha256().equals(archive.sha256())) {
+                verification.problems.add(
+                        "The ZIP archive checksum does not match its sidecar.");
+            }
+            inspectPrivateCopy(archive, managed, verification);
+            verifyCopyUnchanged(directory, managed, archive, checksum, verification.problems);
+        } catch (IOException | RuntimeException exception) {
+            verification.problems.add(
+                    "The ZIP archive is unreadable or structurally corrupt.");
+        }
+    }
+
+    private static void inspectPrivateCopy(
+            ExactArchiveCopy archive,
+            ManagedArchive managed,
+            ZipVerificationState verification) {
+        try {
+            Inspection inspection = archive.inspect();
+            verification.apply(inspection);
+            inspection.manifest().ifPresent(manifest -> {
+                if (!manifest.worldId().equals(managed.worldId())
+                        || !manifest.backupId().equals(managed.backupId())) {
+                    verification.problems.add(
+                            "Archive identity does not match its managed path.");
+                }
+            });
+        } catch (IOException | RuntimeException exception) {
+            verification.problems.add(
+                    "The ZIP archive is unreadable or structurally corrupt.");
+        }
+    }
+
+    private static void verifyCopyUnchanged(
+            ManagedDirectoryAccess directory,
+            ManagedArchive managed,
+            ExactArchiveCopy archive,
+            ChecksumSnapshot checksum,
+            Set<String> problems) {
+        try {
+            requireSameSourceAndContents(
+                    directory,
+                    managed.archiveName(),
+                    archive,
+                    "The ZIP artifact was replaced during verification.");
+            boolean checksumChanged = !checksum.fingerprint().equals(fingerprint(
+                    directory.attributes(managed.checksumName())));
+            boolean checksumTextChanged = !checksum.sha256().equals(readChecksum(
+                    directory,
+                    managed.checksumName(),
+                    managed.archiveName()));
+            if (checksumChanged || checksumTextChanged) {
+                problems.add("The ZIP artifact was replaced during verification.");
+            }
+            directory.revalidatePinnedDirectories();
+        } catch (IOException | RuntimeException exception) {
+            problems.add("The ZIP artifact was replaced during verification.");
+        }
+    }
+
 
     /**
      * Materializes a verified archive into an existing, empty staging directory.
      * Existing files are never replaced and failures leave only the staging copy partially written.
      */
     public void materialize(Path archivePath, Path stagingDirectory) throws IOException {
-        StagingDirectory staging = requireEmptyStagingDirectory(stagingDirectory);
+        ZipArchiveExtractor.StagingDirectory staging =
+                ZipArchiveExtractor.openEmpty(stagingDirectory);
         ManagedArchive managed = managedArchive(archivePath);
         try (ManagedDirectoryAccess directory = ManagedDirectoryAccess.open(
                 root, managed.archive().getParent())) {
@@ -504,20 +538,21 @@ public final class ZipBackupStore {
                         .orElseThrow(() -> new ZipBackupException(
                                 "ZIP archive inventory is missing"));
                 directory.revalidatePinnedDirectories();
-                StagingDirectory current = requireEmptyStagingDirectory(staging.path());
+                ZipArchiveExtractor.StagingDirectory current =
+                        ZipArchiveExtractor.openEmpty(staging.path());
                 if (!staging.identity().equals(current.identity())) {
                     throw new ZipBackupException(
                             "ZIP restore staging directory was replaced before extraction");
                 }
                 try {
-                    extract(privateCopy.path(), staging, inventory);
+                    ZipArchiveExtractor.extract(privateCopy.path(), staging, inventory, hooks);
                     staging.requireIdentity();
                     if (!privateCopy.sha256().equals(ZipDigests.sha256(privateCopy.path()))) {
                         throw new ZipBackupException(
                                 "Private ZIP restore copy changed during extraction");
                     }
                 } catch (IOException | RuntimeException exception) {
-                    cleanupRestoreFailure(staging, exception);
+                    ZipArchiveExtractor.cleanupFailure(staging, exception);
                     throw exception;
                 }
             }
@@ -693,153 +728,6 @@ public final class ZipBackupStore {
         }
     }
 
-    private void writeArchive(
-            ManagedDirectoryAccess destination,
-            String partialName,
-            BackupCapture capture,
-            List<SourceEntry> sourceEntries,
-            LongConsumer bytesWritten) throws IOException {
-        List<ZipInventoryEntry> inventoryEntries = new ArrayList<>();
-        byte[] buffer = new byte[ZipDigests.COPY_BUFFER_BYTES];
-        long completedBytes = 0;
-        try (SeekableByteChannel channel = destination.createNew(partialName);
-                ZipOutputStream zip = new ZipOutputStream(
-                        Channels.newOutputStream(channel), StandardCharsets.UTF_8)) {
-            long timestamp = capture.manifest().createdAt().toEpochMilli();
-            writeBytes(zip, ZipArchiveFormat.MANIFEST_ENTRY,
-                    ZipMetadataCodec.encodeManifest(capture.manifest()), timestamp);
-            writeDirectory(zip, ZipArchiveFormat.WORLD_PREFIX, timestamp);
-            for (SourceEntry source : sourceEntries) {
-                requireNotInterrupted();
-                String entryName = ZipArchiveFormat.WORLD_PREFIX + source.relativePath();
-                if (source.directory()) {
-                    writeDirectory(zip, entryName + "/", timestamp);
-                    continue;
-                }
-                ZipSourceScanner.requireUnchanged(source);
-                MessageDigest digest = ZipDigests.sha256();
-                ZipEntry entry = new ZipEntry(entryName);
-                entry.setTime(timestamp);
-                zip.putNextEntry(entry);
-                long written = 0;
-                try (InputStream input = openSource(source.path())) {
-                    int read;
-                    while ((read = input.read(buffer)) >= 0) {
-                        requireNotInterrupted();
-                        if (read == 0) {
-                            continue;
-                        }
-                        zip.write(buffer, 0, read);
-                        digest.update(buffer, 0, read);
-                        written = Math.addExact(written, read);
-                        completedBytes = Math.addExact(completedBytes, read);
-                        bytesWritten.accept(completedBytes);
-                    }
-                } catch (ArithmeticException exception) {
-                    throw new ZipBackupException("World size overflowed ZIP accounting", exception);
-                } finally {
-                    zip.closeEntry();
-                }
-                if (written != source.size()) {
-                    throw new ZipBackupException("A world file changed size during ZIP creation");
-                }
-                ZipSourceScanner.requireUnchanged(source);
-                inventoryEntries.add(new ZipInventoryEntry(
-                        source.relativePath(), written, ZipDigests.hex(digest.digest())));
-            }
-            ZipInventory inventory = ZipInventory.create(inventoryEntries);
-            requireNotInterrupted();
-            if (!inventory.matches(capture.manifest())) {
-                throw new ZipBackupException(
-                        "World contents no longer match the prepared backup manifest");
-            }
-            writeBytes(zip, ZipArchiveFormat.INVENTORY_ENTRY,
-                    ZipMetadataCodec.encodeInventory(inventory), timestamp);
-            zip.finish();
-            zip.flush();
-            if (channel instanceof FileChannel fileChannel) {
-                fileChannel.force(true);
-            }
-        }
-    }
-
-    private void extract(
-            Path archive,
-            StagingDirectory staging,
-            ZipInventory inventory) throws IOException {
-        Map<String, ZipInventoryEntry> expected = new HashMap<>();
-        for (ZipInventoryEntry file : inventory.files()) {
-            expected.put(PortableZipPath.collisionKey(file.path(), false), file);
-        }
-        Set<String> seen = new HashSet<>();
-        byte[] buffer = new byte[ZipDigests.COPY_BUFFER_BYTES];
-        try (ZipFile zip = new ZipFile(archive.toFile(), StandardCharsets.UTF_8)) {
-            Enumeration<? extends ZipEntry> entries = zip.entries();
-            while (entries.hasMoreElements()) {
-                requireNotInterrupted();
-                staging.requireIdentity();
-                ZipEntry entry = entries.nextElement();
-                String name = entry.getName();
-                PortableZipPath.collisionKey(name, entry.isDirectory());
-                if (name.equals(ZipArchiveFormat.MANIFEST_ENTRY)
-                        || name.equals(ZipArchiveFormat.INVENTORY_ENTRY)
-                        || name.equals(ZipArchiveFormat.WORLD_PREFIX)) {
-                    continue;
-                }
-                if (!name.startsWith(ZipArchiveFormat.WORLD_PREFIX)) {
-                    throw new ZipBackupException("ZIP archive contains data outside the world namespace");
-                }
-                String relative = name.substring(ZipArchiveFormat.WORLD_PREFIX.length());
-                Path target = resolveInside(staging.path(), relative, entry.isDirectory());
-                if (entry.isDirectory()) {
-                    createSafeDirectories(staging.path(), target);
-                    hooks.restoreEntryExtracted(target);
-                    continue;
-                }
-                String key = PortableZipPath.collisionKey(relative, false);
-                ZipInventoryEntry expectedFile = expected.get(key);
-                if (expectedFile == null || !expectedFile.path().equals(relative) || !seen.add(key)) {
-                    throw new ZipBackupException("ZIP archive inventory changed during restoration");
-                }
-                createSafeDirectories(staging.path(), target.getParent());
-                staging.requireIdentity();
-                MessageDigest digest = ZipDigests.sha256();
-                long written = 0;
-                try (InputStream input = zip.getInputStream(entry);
-                        OutputStream output = Files.newOutputStream(
-                                target,
-                                StandardOpenOption.CREATE_NEW,
-                                StandardOpenOption.WRITE,
-                                LinkOption.NOFOLLOW_LINKS)) {
-                    int read;
-                    while ((read = input.read(buffer)) >= 0) {
-                        requireNotInterrupted();
-                        if (read == 0) {
-                            continue;
-                        }
-                        written = Math.addExact(written, read);
-                        if (written > expectedFile.size()) {
-                            throw new ZipBackupException("ZIP entry exceeds its inventoried size");
-                        }
-                        output.write(buffer, 0, read);
-                        digest.update(buffer, 0, read);
-                    }
-                } catch (ArithmeticException exception) {
-                    throw new ZipBackupException("ZIP restoration size overflow", exception);
-                }
-                if (written != expectedFile.size()
-                        || !ZipDigests.hex(digest.digest()).equals(expectedFile.sha256())) {
-                    throw new ZipBackupException("ZIP entry failed integrity checking during restoration");
-                }
-                hooks.restoreEntryExtracted(target);
-                staging.requireIdentity();
-            }
-        }
-        if (seen.size() != expected.size()) {
-            throw new ZipBackupException("ZIP archive is missing inventoried files");
-        }
-    }
-
     private void ensureDestinationOutsideWorld(Path worldDirectory) throws IOException {
         Path normalizedWorld = worldDirectory.toAbsolutePath().normalize();
         if (root.startsWith(normalizedWorld)) {
@@ -871,32 +759,6 @@ public final class ZipBackupStore {
         if (fileCount != manifest.sourceFileCount() || byteCount != manifest.sourceByteCount()) {
             throw new ZipBackupException("World contents no longer match the prepared backup manifest");
         }
-    }
-
-    private static void writeBytes(ZipOutputStream zip, String name, byte[] value, long timestamp)
-            throws IOException {
-        ZipEntry entry = new ZipEntry(name);
-        entry.setTime(timestamp);
-        zip.putNextEntry(entry);
-        try {
-            zip.write(value);
-        } finally {
-            zip.closeEntry();
-        }
-    }
-
-    private static void writeDirectory(ZipOutputStream zip, String name, long timestamp)
-            throws IOException {
-        ZipEntry entry = new ZipEntry(name);
-        entry.setTime(timestamp);
-        zip.putNextEntry(entry);
-        zip.closeEntry();
-    }
-
-    private static InputStream openSource(Path source) throws IOException {
-        Set<OpenOption> options = Set.of(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS);
-        SeekableByteChannel channel = Files.newByteChannel(source, options);
-        return Channels.newInputStream(channel);
     }
 
     private static void writeChecksum(
@@ -1067,96 +929,10 @@ public final class ZipBackupStore {
                 attributes.creationTime());
     }
 
-    private static ZipVerification verification(
-            Optional<BackupManifest> manifest,
-            long verifiedFiles,
-            long verifiedBytes,
-            Set<String> problems) {
-        List<String> immutableProblems = List.copyOf(problems);
-        return new ZipVerification(
-                immutableProblems.isEmpty(),
-                manifest,
-                verifiedFiles,
-                verifiedBytes,
-                immutableProblems);
-    }
-
-    private static StagingDirectory requireEmptyStagingDirectory(Path stagingDirectory)
-            throws IOException {
-        Path staging = Objects.requireNonNull(stagingDirectory, "stagingDirectory")
-                .toAbsolutePath()
-                .normalize();
-        ManagedPathGuard.requireDirectory(
-                staging, "ZIP restore staging path contains an unsafe component");
-        try (DirectoryStream<Path> entries = Files.newDirectoryStream(staging)) {
-            if (entries.iterator().hasNext()) {
-                throw new ZipBackupException("ZIP restore staging directory must be empty");
-            }
-        }
-        BasicFileAttributes attributes = Files.readAttributes(
-                staging, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-        return new StagingDirectory(staging, DirectoryIdentity.from(attributes));
-    }
-
-    private static void cleanupRestoreFailure(
-            StagingDirectory staging,
-            Throwable failure) {
-        try {
-            staging.requireIdentity();
-            Files.walkFileTree(staging.path(), new SimpleFileVisitor<>() {
-                @Override
-                public FileVisitResult visitFile(Path file, BasicFileAttributes attributes)
-                        throws IOException {
-                    Files.delete(file);
-                    return FileVisitResult.CONTINUE;
-                }
-
-                @Override
-                public FileVisitResult postVisitDirectory(Path directory, IOException exception)
-                        throws IOException {
-                    if (exception != null) {
-                        throw exception;
-                    }
-                    if (!directory.equals(staging.path())) {
-                        Files.delete(directory);
-                    }
-                    return FileVisitResult.CONTINUE;
-                }
-            });
-            requireEmptyStagingDirectory(staging.path());
-        } catch (IOException | RuntimeException cleanupFailure) {
-            failure.addSuppressed(cleanupFailure);
-        }
-    }
-
     private static void requireNotInterrupted() throws InterruptedIOException {
         if (Thread.currentThread().isInterrupted()) {
             throw new InterruptedIOException("ZIP operation was interrupted");
         }
-    }
-
-    private static Path resolveInside(Path staging, String relative, boolean directory)
-            throws ZipBackupException {
-        String value;
-        try {
-            value = PortableZipPath.validate(relative, directory);
-        } catch (IllegalArgumentException exception) {
-            throw new ZipBackupException("ZIP entry path cannot be restored safely", exception);
-        }
-        Path resolved = staging;
-        for (String segment : value.split("/")) {
-            resolved = resolved.resolve(segment);
-        }
-        resolved = resolved.normalize();
-        if (!resolved.startsWith(staging) || resolved.equals(staging)) {
-            throw new ZipBackupException("ZIP entry escapes its staging directory");
-        }
-        return resolved;
-    }
-
-    private static void createSafeDirectories(Path staging, Path directory) throws IOException {
-        ManagedPathGuard.createChildDirectories(
-                staging, directory, "ZIP restore encountered a link or special directory");
     }
 
     private record ManagedArchive(
@@ -1171,32 +947,6 @@ public final class ZipBackupStore {
         String checksumName() {
             return checksum.getFileName().toString();
         }
-    }
-
-    private record StagingDirectory(Path path, DirectoryIdentity identity) {
-        void requireIdentity() throws IOException {
-            ManagedPathGuard.requireDirectory(
-                    path, "ZIP restore staging directory became unsafe");
-            BasicFileAttributes attributes = Files.readAttributes(
-                    path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-            if (!identity.equals(DirectoryIdentity.from(attributes))) {
-                throw new ZipBackupException(
-                        "ZIP restore staging directory was replaced during extraction");
-            }
-        }
-    }
-
-    private record DirectoryIdentity(Object fileKey, FileTime creationTime) {
-        static DirectoryIdentity from(BasicFileAttributes attributes) {
-            return new DirectoryIdentity(attributes.fileKey(), attributes.creationTime());
-        }
-    }
-
-    private record FileFingerprint(
-            Object fileKey,
-            long size,
-            FileTime lastModifiedTime,
-            FileTime creationTime) {
     }
 
 }

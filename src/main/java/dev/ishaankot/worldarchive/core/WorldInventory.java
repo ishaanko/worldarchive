@@ -38,6 +38,19 @@ public record WorldInventory(
         requireSha256(contentSha256, "contentSha256");
         requireSha256(inventorySha256, "inventorySha256");
 
+        long actualBytes = validateEntries(files);
+        if (actualBytes != byteCount) {
+            throw new IllegalArgumentException(
+                    "World inventory byte count does not match its files");
+        }
+        if (!contentSha256.equals(contentDigest(files))
+                || !inventorySha256.equals(inventoryDigest(files))) {
+            throw new IllegalArgumentException(
+                    "World inventory digest does not match its files");
+        }
+    }
+
+    private static long validateEntries(List<Entry> files) {
         String previous = null;
         long actualBytes = 0;
         Set<String> collisionKeys = new HashSet<>();
@@ -72,13 +85,7 @@ public record WorldInventory(
         } catch (ArithmeticException exception) {
             throw new IllegalArgumentException("World inventory size overflowed", exception);
         }
-        if (actualBytes != byteCount) {
-            throw new IllegalArgumentException("World inventory byte count does not match its files");
-        }
-        if (!contentSha256.equals(contentDigest(files))
-                || !inventorySha256.equals(inventoryDigest(files))) {
-            throw new IllegalArgumentException("World inventory digest does not match its files");
-        }
+        return actualBytes;
     }
 
     public static WorldInventory create(List<Entry> entries) {

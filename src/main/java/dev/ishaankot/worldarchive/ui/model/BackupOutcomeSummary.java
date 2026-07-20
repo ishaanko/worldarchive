@@ -59,31 +59,47 @@ public record BackupOutcomeSummary(
     public String destinationStatus(DestinationOutcomeView destination) {
         Objects.requireNonNull(destination, "destination");
         return switch (operation) {
-            case DELETE -> switch (destination.status()) {
-                case SUCCESS -> "deleted";
-                case PENDING_SYNC -> "deletion pending";
-                case FAILED -> "not deleted";
-                case SKIPPED -> "not present";
-            };
-            case SYNC -> switch (destination.syncStatus()) {
-                case SYNCED -> "synced";
-                case NOT_CONFIGURED -> "not configured";
-                case NOT_SYNCED -> "not synced";
-                case PENDING -> "sync pending";
-                case FAILED -> "sync failed";
-            };
-            case VERIFY -> switch (destination.verificationStatus()) {
-                case VERIFIED -> "verified";
-                case FAILED -> "verification failed";
-                case UNAVAILABLE -> "verification unavailable";
-                case NOT_VERIFIED -> "not verified";
-            };
-            default -> switch (destination.status()) {
-                case SUCCESS -> "success";
-                case PENDING_SYNC -> "pending sync";
-                case FAILED -> "failed";
-                case SKIPPED -> "skipped";
-            };
+            case DELETE -> deletionStatus(destination.status());
+            case SYNC -> synchronizationStatus(destination.syncStatus());
+            case VERIFY -> verificationStatus(destination.verificationStatus());
+            default -> creationStatus(destination.status());
+        };
+    }
+
+    private static String deletionStatus(DestinationStatus status) {
+        return switch (status) {
+            case SUCCESS -> "deleted";
+            case PENDING_SYNC -> "deletion pending";
+            case FAILED -> "not deleted";
+            case SKIPPED -> "not present";
+        };
+    }
+
+    private static String synchronizationStatus(SyncStatus status) {
+        return switch (status) {
+            case SYNCED -> "synced";
+            case NOT_CONFIGURED -> "not configured";
+            case NOT_SYNCED -> "not synced";
+            case PENDING -> "sync pending";
+            case FAILED -> "sync failed";
+        };
+    }
+
+    private static String verificationStatus(VerificationStatus status) {
+        return switch (status) {
+            case VERIFIED -> "verified";
+            case FAILED -> "verification failed";
+            case UNAVAILABLE -> "verification unavailable";
+            case NOT_VERIFIED -> "not verified";
+        };
+    }
+
+    private static String creationStatus(DestinationStatus status) {
+        return switch (status) {
+            case SUCCESS -> "success";
+            case PENDING_SYNC -> "pending sync";
+            case FAILED -> "failed";
+            case SKIPPED -> "skipped";
         };
     }
 
@@ -162,30 +178,46 @@ public record BackupOutcomeSummary(
 
     private static String headline(BackupOperation operation, BackupStatus status) {
         return switch (operation) {
-            case DELETE -> switch (status) {
-                case SUCCESS -> "Backup deleted";
-                case PARTIAL_SUCCESS -> "Backup deleted from some destinations";
-                case FAILED -> "Backup could not be deleted";
-                case SKIPPED -> "Backup removed";
-            };
-            case SYNC -> switch (status) {
-                case SUCCESS -> "Backup synchronized";
-                case PARTIAL_SUCCESS -> "Backup synchronization pending";
-                case FAILED -> "Backup synchronization failed";
-                case SKIPPED -> "Backup synchronization skipped";
-            };
-            case VERIFY -> switch (status) {
-                case SUCCESS -> "Backup verified";
-                case PARTIAL_SUCCESS -> "Backup verification incomplete";
-                case FAILED -> "Backup verification failed";
-                case SKIPPED -> "Backup verification skipped";
-            };
-            default -> switch (status) {
-                case SUCCESS -> "Backup completed";
-                case PARTIAL_SUCCESS -> "Backup completed with destination issues";
-                case FAILED -> "Backup failed";
-                case SKIPPED -> "Backup skipped";
-            };
+            case DELETE -> deletionHeadline(status);
+            case SYNC -> synchronizationHeadline(status);
+            case VERIFY -> verificationHeadline(status);
+            default -> creationHeadline(status);
+        };
+    }
+
+    private static String deletionHeadline(BackupStatus status) {
+        return switch (status) {
+            case SUCCESS -> "Backup deleted";
+            case PARTIAL_SUCCESS -> "Backup deleted from some destinations";
+            case FAILED -> "Backup could not be deleted";
+            case SKIPPED -> "Backup removed";
+        };
+    }
+
+    private static String synchronizationHeadline(BackupStatus status) {
+        return switch (status) {
+            case SUCCESS -> "Backup synchronized";
+            case PARTIAL_SUCCESS -> "Backup synchronization pending";
+            case FAILED -> "Backup synchronization failed";
+            case SKIPPED -> "Backup synchronization skipped";
+        };
+    }
+
+    private static String verificationHeadline(BackupStatus status) {
+        return switch (status) {
+            case SUCCESS -> "Backup verified";
+            case PARTIAL_SUCCESS -> "Backup verification incomplete";
+            case FAILED -> "Backup verification failed";
+            case SKIPPED -> "Backup verification skipped";
+        };
+    }
+
+    private static String creationHeadline(BackupStatus status) {
+        return switch (status) {
+            case SUCCESS -> "Backup completed";
+            case PARTIAL_SUCCESS -> "Backup completed with destination issues";
+            case FAILED -> "Backup failed";
+            case SKIPPED -> "Backup skipped";
         };
     }
 }

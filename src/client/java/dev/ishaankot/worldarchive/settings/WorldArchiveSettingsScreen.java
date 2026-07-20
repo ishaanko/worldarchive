@@ -2,7 +2,6 @@ package dev.ishaankot.worldarchive.settings;
 
 import dev.ishaankot.worldarchive.config.WorldArchiveConfig;
 import dev.ishaankot.worldarchive.config.WorldConfig;
-import dev.ishaankot.worldarchive.model.WorldId;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.EnumMap;
@@ -11,6 +10,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.Checkbox;
@@ -31,13 +31,11 @@ public final class WorldArchiveSettingsScreen extends Screen {
 
     private final Screen parent;
 
-    private final NativeFolderChooser folderChooser;
-
     private final SettingsScreenState screenState = new SettingsScreenState();
 
-    private final FolderSelectionController gitFolderSelection = new FolderSelectionController();
+    private final SettingsFolderPicker gitFolderPicker;
 
-    private final FolderSelectionController zipFolderSelection = new FolderSelectionController();
+    private final SettingsFolderPicker zipFolderPicker;
 
     private final Map<SettingsField, EditBox> validatedFields =
             new EnumMap<>(SettingsField.class);
@@ -52,7 +50,7 @@ public final class WorldArchiveSettingsScreen extends Screen {
 
     private SettingsLayout layout = SettingsLayout.forHeight(240);
 
-    private Page page = Page.GIT;
+    private SettingsPage page = SettingsPage.GIT;
 
     private int worldPage;
 
@@ -68,19 +66,11 @@ public final class WorldArchiveSettingsScreen extends Screen {
 
     private boolean healthChecking;
 
-    private boolean choosingGitFolder;
-
-    private boolean choosingZipFolder;
-
     private boolean closing;
 
     private Component transientStatus = Component.empty();
 
     private CancellableRequest<SettingsHealthSnapshot> healthRequest;
-
-    private CancellableRequest<FolderSelectionResult> gitFolderRequest;
-
-    private CancellableRequest<FolderSelectionResult> zipFolderRequest;
 
     private Button saveButton;
 
@@ -93,7 +83,13 @@ public final class WorldArchiveSettingsScreen extends Screen {
     public WorldArchiveSettingsScreen(Screen parent, NativeFolderChooser folderChooser) {
         super(Component.translatable("screen.worldarchive.settings.title"));
         this.parent = parent;
-        this.folderChooser = Objects.requireNonNull(folderChooser, "folderChooser");
+        NativeFolderChooser chooser = Objects.requireNonNull(folderChooser, "folderChooser");
+        gitFolderPicker = new SettingsFolderPicker(
+                chooser,
+                "screen.worldarchive.settings.git_folder_title");
+        zipFolderPicker = new SettingsFolderPicker(
+                chooser,
+                "screen.worldarchive.settings.zip_folder_title");
         draft = SettingsDraft.from(ClientSettingsAccess.snapshot());
         validation = new SettingsValidation(Optional.of(draft.base()), Map.of());
         healthSnapshot = SettingsHealthSnapshot.unchecked(draft.probeRequest());
@@ -124,7 +120,7 @@ public final class WorldArchiveSettingsScreen extends Screen {
     protected void init() {
         layout = SettingsLayout.forHeight(Math.max(height, 120));
         int contentWidth = Math.min(430, Math.max(180, width - 20));
-        boolean pagedDestinations = usesPagedDestinationLayout(contentWidth);
+        boolean pagedDestinations = layout.compact() || contentWidth < 300;
         gitSection = Math.min(gitSection, pagedDestinations ? 2 : 0);
         zipSection = Math.min(zipSection, pagedDestinations ? 1 : 0);
         validatedFields.clear();
@@ -177,11 +173,12 @@ public final class WorldArchiveSettingsScreen extends Screen {
 
     private void addTabs(int x, int totalWidth) {
         int gap = 2;
-        int tabWidth = (totalWidth - gap * (Page.values().length - 1)) / Page.values().length;
-        for (int index = 0; index < Page.values().length; index++) {
-            Page candidate = Page.values()[index];
+        int tabWidth = (totalWidth - gap * (SettingsPage.values().length - 1))
+                / SettingsPage.values().length;
+        for (int index = 0; index < SettingsPage.values().length; index++) {
+            SettingsPage candidate = SettingsPage.values()[index];
             Button tab = Button.builder(
-                            Component.translatable(candidate.translationKey),
+                            Component.translatable(candidate.translationKey()),
                             button -> {
                                 page = candidate;
                                 transientStatus = Component.empty();
@@ -195,7 +192,7 @@ public final class WorldArchiveSettingsScreen extends Screen {
     }
 
     private void addGitPage(int x, int contentWidth) {
-        if (!usesPagedDestinationLayout(contentWidth)) {
+        if (!layout.compact() && contentWidth >= 300) {
             addFullGitPage(x, contentWidth, 54);
             return;
         }
@@ -205,10 +202,6 @@ public final class WorldArchiveSettingsScreen extends Screen {
             case 2 -> addCompactGitTimingPage(x, contentWidth, 77);
             default -> throw new IllegalStateException("Unknown Git settings section: " + gitSection);
         }
-    }
-
-    private boolean usesPagedDestinationLayout(int contentWidth) {
-        return layout.compact() || contentWidth < 300;
     }
 
     private void addFullGitPage(int x, int contentWidth, int firstRow) {
@@ -328,7 +321,7 @@ public final class WorldArchiveSettingsScreen extends Screen {
                 contentWidth - 68,
                 2048,
                 value -> {
-                    gitFolderSelection.noteManualEdit();
+                    gitFolderPicker.noteManualEdit();
                     draft.setGitRepository(value);
                     requestHealthProbe();
                 });
@@ -375,7 +368,7 @@ public final class WorldArchiveSettingsScreen extends Screen {
     }
 
     private void addZipPage(int x, int contentWidth) {
-        if (!usesPagedDestinationLayout(contentWidth)) {
+        if (!layout.compact() && contentWidth >= 300) {
             addFullZipPage(x, contentWidth);
             return;
         }
@@ -406,7 +399,7 @@ public final class WorldArchiveSettingsScreen extends Screen {
                 contentWidth - 68,
                 2048,
                 value -> {
-                    zipFolderSelection.noteManualEdit();
+                    zipFolderPicker.noteManualEdit();
                     draft.setZipDestination(value);
                     requestHealthProbe();
                 });
@@ -429,13 +422,14 @@ public final class WorldArchiveSettingsScreen extends Screen {
                 draft::setZipWorldExitEnabled,
                 draft::setZipScheduledEnabled);
         if (!layout.compact()) {
-            addWrappedText(
+            addRenderableOnly(SettingsWidgets.wrappedText(
+                    font,
                     x,
                     129,
                     contentWidth,
                     Component.translatable("screen.worldarchive.settings.synced_folder_help")
                             .withStyle(ChatFormatting.WHITE),
-                    3);
+                    3));
         }
     }
 
@@ -464,7 +458,7 @@ public final class WorldArchiveSettingsScreen extends Screen {
                 contentWidth - 68,
                 2048,
                 value -> {
-                    zipFolderSelection.noteManualEdit();
+                    zipFolderPicker.noteManualEdit();
                     draft.setZipDestination(value);
                     requestHealthProbe();
                 });
@@ -508,13 +502,14 @@ public final class WorldArchiveSettingsScreen extends Screen {
     private void addWorldsPage(int x, int contentWidth) {
         List<WorldConfig> worlds = draft.base().worlds();
         if (worlds.isEmpty()) {
-            addWrappedText(
+            addRenderableOnly(SettingsWidgets.wrappedText(
+                    font,
                     x,
                     72,
                     contentWidth,
                     Component.translatable("screen.worldarchive.settings.no_worlds")
                             .withStyle(ChatFormatting.WHITE),
-                    3);
+                    3));
             return;
         }
         int pageSize = layout.worldPageSize();
@@ -559,20 +554,27 @@ public final class WorldArchiveSettingsScreen extends Screen {
             String folderName = world.path().getFileName() == null
                     ? world.path().toString()
                     : world.path().getFileName().toString();
-            Checkbox checkbox = addLiteralCheckbox(
-                    folderName,
+            Checkbox checkbox = addCheckbox(
+                    Component.literal(folderName),
                     draft.worldEnabled(world.worldId()),
                     x,
                     y,
                     contentWidth,
-                    enabled -> updateWorld(world.worldId(), enabled));
+                    enabled -> {
+                        draft.setWorldEnabled(world.worldId(), enabled);
+                        refreshValidation();
+                    });
             checkbox.setTooltip(Tooltip.create(Component.literal(world.path().toString())));
             y += ROW_HEIGHT;
         }
     }
 
     private void addFooter(int x, int contentWidth) {
-        statusWidget = new MultiLineTextWidget(x, layout.statusY(), statusComponent(), font)
+        statusWidget = new MultiLineTextWidget(
+                        x,
+                        layout.statusY(),
+                        SettingsStatusPresenter.visible(statusState()),
+                        font)
                 .setMaxWidth(contentWidth)
                 .setMaxRows(2);
         updateStatusWidget();
@@ -604,17 +606,6 @@ public final class WorldArchiveSettingsScreen extends Screen {
         addRenderableWidget(saveButton);
     }
 
-    private void addWrappedText(
-            int x,
-            int y,
-            int width,
-            Component message,
-            int maximumRows) {
-        addRenderableOnly(new MultiLineTextWidget(x, y, message, font)
-                .setMaxWidth(width)
-                .setMaxRows(maximumRows));
-    }
-
     private Checkbox addCheckbox(
             String translationKey,
             boolean selected,
@@ -638,28 +629,20 @@ public final class WorldArchiveSettingsScreen extends Screen {
             int y,
             int width,
             Consumer<Boolean> responder) {
-        Checkbox checkbox = Checkbox.builder(label, font)
-                .pos(x, y)
-                .maxWidth(width)
-                .selected(selected)
-                .onValueChange((ignored, value) -> {
+        Checkbox checkbox = SettingsWidgets.checkbox(
+                font,
+                label,
+                selected,
+                x,
+                y,
+                width,
+                !controlsLocked(),
+                value -> {
                     responder.accept(value);
                     refreshValidation();
-                })
-                .build();
-        checkbox.active = !controlsLocked();
+                });
         addRenderableWidget(checkbox);
         return checkbox;
-    }
-
-    private Checkbox addLiteralCheckbox(
-            String label,
-            boolean selected,
-            int x,
-            int y,
-            int width,
-            Consumer<Boolean> responder) {
-        return addCheckbox(Component.literal(label), selected, x, y, width, responder);
     }
 
     private void addTriggerRow(
@@ -752,69 +735,31 @@ public final class WorldArchiveSettingsScreen extends Screen {
     }
 
     private void chooseGitFolder() {
-        if (controlsLocked()) {
-            return;
-        }
-        cancelFolderRequests();
-        FolderSelectionController.Request request = gitFolderSelection.begin(draft.gitRepository());
-        choosingGitFolder = true;
-        transientStatus = Component.translatable("screen.worldarchive.settings.folder_picker_opening");
-        SettingsScreenState.LifecycleToken lifecycleToken = screenState.lifecycleToken();
-        CancellableRequest<FolderSelectionResult> picker = folderChooser.chooseFolder(
-                Component.translatable("screen.worldarchive.settings.git_folder_title").getString(),
-                request.initialDirectory());
-        gitFolderRequest = picker;
-        rebuildWidgets();
-        picker.completion().whenComplete((result, throwable) -> minecraft.execute(() -> {
-            if (gitFolderRequest != picker || !screenState.acceptsActive(lifecycleToken)) {
-                return;
-            }
-            gitFolderRequest = null;
-            choosingGitFolder = false;
-            FolderSelectionResult outcome = throwable == null && result != null
-                    ? result
-                    : new FolderSelectionResult.Failed(
-                            Component.translatable(
-                                    "screen.worldarchive.settings.folder_picker_failed").getString());
-            FolderSelectionController.Application application = gitFolderSelection.apply(
-                    request,
-                    outcome,
-                    draft.gitRepository());
-            applyFolderSelection(application, draft.gitRepository(), draft::setGitRepository);
-        }));
+        chooseFolder(gitFolderPicker, draft::gitRepository, draft::setGitRepository);
     }
 
     private void chooseZipFolder() {
+        chooseFolder(zipFolderPicker, draft::zipDestination, draft::setZipDestination);
+    }
+
+    private void chooseFolder(
+            SettingsFolderPicker picker,
+            Supplier<String> currentValue,
+            Consumer<String> setter) {
         if (controlsLocked()) {
             return;
         }
         cancelFolderRequests();
-        FolderSelectionController.Request request = zipFolderSelection.begin(draft.zipDestination());
-        choosingZipFolder = true;
         transientStatus = Component.translatable("screen.worldarchive.settings.folder_picker_opening");
-        SettingsScreenState.LifecycleToken lifecycleToken = screenState.lifecycleToken();
-        CancellableRequest<FolderSelectionResult> picker = folderChooser.chooseFolder(
-                Component.translatable("screen.worldarchive.settings.zip_folder_title").getString(),
-                request.initialDirectory());
-        zipFolderRequest = picker;
+        picker.choose(
+                screenState,
+                minecraft,
+                currentValue,
+                application -> applyFolderSelection(
+                        application,
+                        currentValue.get(),
+                        setter));
         rebuildWidgets();
-        picker.completion().whenComplete((result, throwable) -> minecraft.execute(() -> {
-            if (zipFolderRequest != picker || !screenState.acceptsActive(lifecycleToken)) {
-                return;
-            }
-            zipFolderRequest = null;
-            choosingZipFolder = false;
-            FolderSelectionResult outcome = throwable == null && result != null
-                    ? result
-                    : new FolderSelectionResult.Failed(
-                            Component.translatable(
-                                    "screen.worldarchive.settings.folder_picker_failed").getString());
-            FolderSelectionController.Application application = zipFolderSelection.apply(
-                    request,
-                    outcome,
-                    draft.zipDestination());
-            applyFolderSelection(application, draft.zipDestination(), draft::setZipDestination);
-        }));
     }
 
     private void applyFolderSelection(
@@ -832,11 +777,6 @@ public final class WorldArchiveSettingsScreen extends Screen {
         }
         refreshValidation();
         rebuildIfInitialized();
-    }
-
-    private void updateWorld(WorldId worldId, boolean enabled) {
-        draft.setWorldEnabled(worldId, enabled);
-        refreshValidation();
     }
 
     private void restoreDefaults() {
@@ -944,7 +884,8 @@ public final class WorldArchiveSettingsScreen extends Screen {
             entry.getValue().setTextColor(invalid ? ERROR_TEXT_COLOR : FIELD_TEXT_COLOR);
             validation.issue(entry.getKey()).ifPresentOrElse(
                     issue -> entry.getValue().setTooltip(Tooltip.create(Component.literal(issue))),
-                    () -> entry.getValue().setTooltip(defaultFieldTooltip(entry.getKey())));
+                    () -> entry.getValue().setTooltip(
+                            SettingsStatusPresenter.defaultTooltip(entry.getKey())));
         }
         refreshControls();
     }
@@ -964,51 +905,21 @@ public final class WorldArchiveSettingsScreen extends Screen {
         }
     }
 
-    private Tooltip defaultFieldTooltip(SettingsField field) {
-        if (field == SettingsField.SCHEDULE_INTERVAL) {
-            return Tooltip.create(Component.translatable(
-                    "screen.worldarchive.settings.schedule_interval_tooltip"));
-        }
-        return null;
-    }
-
     private void updateStatusWidget() {
-        Component visible = statusComponent();
+        SettingsStatusPresenter.State state = statusState();
+        Component visible = SettingsStatusPresenter.visible(state);
         statusWidget.setMessage(visible);
-        Component detail = statusDetailComponent(visible);
+        Component detail = SettingsStatusPresenter.detail(state, visible);
         statusWidget.setTooltip(detail.getString().equals(visible.getString())
                 ? null
                 : Tooltip.create(detail));
     }
 
-    private Component statusDetailComponent(Component visible) {
-        if (loadingSettings
-                || screenState.saving()
-                || validating
-                || healthChecking
-                || !transientStatus.getString().isBlank()
-                || pageIssue() != null) {
-            return visible;
-        }
-        return switch (page) {
-            case GIT -> healthComponent(
-                    healthSnapshot.gitSummary(),
-                    healthSnapshot.gitTool(),
-                    healthSnapshot.lfsTool(),
-                    healthSnapshot.repository(),
-                    healthSnapshot.remote());
-            case ZIP -> healthComponent(
-                    healthSnapshot.zipSummary(),
-                    healthSnapshot.zipDirectory());
-            case WORLDS -> visible;
-        };
-    }
-
     private boolean controlsLocked() {
         return loadingSettings
                 || screenState.saving()
-                || choosingGitFolder
-                || choosingZipFolder;
+                || gitFolderPicker.choosing()
+                || zipFolderPicker.choosing();
     }
 
     private boolean canSave() {
@@ -1018,102 +929,17 @@ public final class WorldArchiveSettingsScreen extends Screen {
                 && !healthChecking;
     }
 
-    private Component statusComponent() {
-        if (loadingSettings) {
-            return Component.translatable("screen.worldarchive.settings.loading")
-                    .withStyle(ChatFormatting.WHITE);
-        }
-        if (screenState.saving()) {
-            return Component.translatable("screen.worldarchive.settings.saving")
-                    .withStyle(ChatFormatting.WHITE);
-        }
-        if (validating) {
-            return Component.translatable("screen.worldarchive.settings.validating")
-                    .withStyle(ChatFormatting.WHITE);
-        }
-        if (healthChecking) {
-            return Component.translatable("screen.worldarchive.settings.health_checking")
-                    .withStyle(ChatFormatting.WHITE);
-        }
-        if (!transientStatus.getString().isBlank()) {
-            return transientStatus.copy().withStyle(ChatFormatting.YELLOW);
-        }
-        String issue = pageIssue();
-        if (issue != null) {
-            return Component.literal(issue).withStyle(ChatFormatting.RED);
-        }
-        return switch (page) {
-            case GIT -> healthComponent(
-                    healthSnapshot.gitDisplaySummary(),
-                    healthSnapshot.gitTool(),
-                    healthSnapshot.lfsTool(),
-                    healthSnapshot.repository(),
-                    healthSnapshot.remote());
-            case ZIP -> healthComponent(
-                    healthSnapshot.zipDisplaySummary(),
-                    healthSnapshot.zipDirectory());
-            case WORLDS -> Component.translatable(
-                            "screen.worldarchive.settings.world_count",
-                            draft.base().worlds().size())
-                    .withStyle(ChatFormatting.WHITE);
-        };
-    }
-
-    private String pageIssue() {
-        List<SettingsField> pageFields = switch (page) {
-            case GIT -> List.of(
-                    SettingsField.GIT_REPOSITORY,
-                    SettingsField.GIT_REMOTE_NAME,
-                    SettingsField.GIT_REMOTE_URL,
-                    SettingsField.GIT_LFS_PATTERNS,
-                    SettingsField.SCHEDULE_INTERVAL,
-                    SettingsField.DESTINATIONS);
-            case ZIP -> List.of(
-                    SettingsField.ZIP_DESTINATION,
-                    SettingsField.SCHEDULE_INTERVAL,
-                    SettingsField.DESTINATIONS);
-            case WORLDS -> List.of(SettingsField.DESTINATIONS);
-        };
-        for (SettingsField field : pageFields) {
-            String issue = validation.issues().get(field);
-            if (issue != null) {
-                return issue;
-            }
-        }
-        return validation.firstIssue().orElse(null);
-    }
-
-    private static Component healthComponent(
-            String message,
-            SettingsHealthItem... items) {
-        ChatFormatting color = ChatFormatting.GREEN;
-        for (SettingsHealthItem item : items) {
-            color = moreSevere(color, item.status());
-        }
-        return Component.literal(message).withStyle(color);
-    }
-
-    private static ChatFormatting moreSevere(
-            ChatFormatting current,
-            SettingsHealthStatus status) {
-        if (status == SettingsHealthStatus.UNAVAILABLE) {
-            return ChatFormatting.RED;
-        }
-        if (current == ChatFormatting.RED) {
-            return current;
-        }
-        if (status == SettingsHealthStatus.TOOL_MISSING
-                || status == SettingsHealthStatus.UNCHECKED) {
-            return ChatFormatting.YELLOW;
-        }
-        if (current == ChatFormatting.YELLOW) {
-            return current;
-        }
-        if (status == SettingsHealthStatus.DISABLED
-                || status == SettingsHealthStatus.UNCONFIGURED) {
-            return ChatFormatting.WHITE;
-        }
-        return current;
+    private SettingsStatusPresenter.State statusState() {
+        return new SettingsStatusPresenter.State(
+                page,
+                loadingSettings,
+                screenState.saving(),
+                validating,
+                healthChecking,
+                transientStatus,
+                validation,
+                healthSnapshot,
+                draft.base().worlds().size());
     }
 
     private void cancelAsyncRequests() {
@@ -1127,18 +953,8 @@ public final class WorldArchiveSettingsScreen extends Screen {
     }
 
     private void cancelFolderRequests() {
-        if (gitFolderRequest != null) {
-            CancellableRequest<FolderSelectionResult> pending = gitFolderRequest;
-            gitFolderRequest = null;
-            pending.cancel();
-        }
-        if (zipFolderRequest != null) {
-            CancellableRequest<FolderSelectionResult> pending = zipFolderRequest;
-            zipFolderRequest = null;
-            pending.cancel();
-        }
-        choosingGitFolder = false;
-        choosingZipFolder = false;
+        gitFolderPicker.cancel();
+        zipFolderPicker.cancel();
     }
 
     private void rebuildIfInitialized() {
@@ -1166,18 +982,9 @@ public final class WorldArchiveSettingsScreen extends Screen {
 
     @Override
     public Component getNarrationMessage() {
-        return title.copy().append(". ").append(statusComponent());
+        return title.copy()
+                .append(". ")
+                .append(SettingsStatusPresenter.visible(statusState()));
     }
 
-    private enum Page {
-        GIT("screen.worldarchive.settings.tab.git"),
-        ZIP("screen.worldarchive.settings.tab.zip"),
-        WORLDS("screen.worldarchive.settings.tab.worlds");
-
-        private final String translationKey;
-
-        Page(String translationKey) {
-            this.translationKey = translationKey;
-        }
-    }
 }

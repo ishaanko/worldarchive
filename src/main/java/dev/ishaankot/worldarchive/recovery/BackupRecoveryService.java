@@ -6,7 +6,6 @@ import dev.ishaankot.worldarchive.core.BackupMaintenanceService;
 import dev.ishaankot.worldarchive.core.BackupOperation;
 import dev.ishaankot.worldarchive.core.DeleteBackupRequest;
 import dev.ishaankot.worldarchive.core.DeletePreparation;
-import dev.ishaankot.worldarchive.core.DirectoryIdentityMarker;
 import dev.ishaankot.worldarchive.core.OperationId;
 import dev.ishaankot.worldarchive.core.OperationPhase;
 import dev.ishaankot.worldarchive.core.OperationProgress;
@@ -29,37 +28,24 @@ import dev.ishaankot.worldarchive.model.WorldIdentity;
 import dev.ishaankot.worldarchive.storage.git.GitSnapshotStore;
 import dev.ishaankot.worldarchive.storage.zip.ZipBackupStore;
 import java.io.IOException;
-import java.nio.file.CopyOption;
-import java.nio.file.FileAlreadyExistsException;
-import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
-import java.nio.file.SimpleFileVisitor;
-import java.nio.file.StandardCopyOption;
-import java.nio.file.attribute.BasicFileAttributes;
-import java.nio.file.attribute.FileTime;
-import java.text.Normalizer;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumMap;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.UnaryOperator;
 
 /** Thread-safe, Minecraft-independent implementation of all non-create backup operations. */
@@ -67,13 +53,6 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
     public static final Duration DEFAULT_CONFIRMATION_LIFETIME = Duration.ofMinutes(1);
 
     private static final Duration MAXIMUM_CONFIRMATION_LIFETIME = Duration.ofMinutes(5);
-
-    private static final int MAXIMUM_DIRECTORY_NAME_CODE_POINTS = 96;
-
-    private static final Set<String> WINDOWS_DEVICE_NAMES = windowsDeviceNames();
-
-    private static final ConcurrentMap<Path, ReentrantLock> PUBLICATION_LOCKS =
-            new ConcurrentHashMap<>();
 
     private final BackupCatalog catalog;
 
@@ -233,148 +212,201 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
             report(progressListener, progress(
                     operationId, current, BackupOperation.RESTORE, OperationPhase.PREPARING,
                     0, 0, "Preparing restored world copy"));
-            RestoreRoot root;
-            try {
-                root = RestoreRoot.open(request.worldsDirectory());
-            } catch (IOException exception) {
-                reportFailure(progressListener, operationId, current, BackupOperation.RESTORE,
-                        "Worlds directory is unavailable or unsafe");
-                throw new BackupRecoveryException(
-                        "Worlds directory is unavailable or unsafe", exception);
-            }
-            List<DestinationCandidate> candidates = restorableCandidates(current);
-            List<DestinationCandidate> verified = new ArrayList<>();
+            RestoreWorkspace workspace = openRestoreWorkspace(
+                    request, progressListener, operationId, current);
+            List<DestinationCandidate> candidates = verifiedRestoreSources(
+                    current, progressListener, operationId, cancellation);
             for (DestinationCandidate candidate : candidates) {
-                cancellation.checkpoint();
-                report(progressListener, progress(
-                        operationId, current, BackupOperation.RESTORE, OperationPhase.VERIFYING,
-                        verified.size(), candidates.size(), "Verifying restore source"));
-                try {
-                    VerificationOutcome outcome = candidate.adapter().verifyForRestore(
-                            current, candidate.result());
-                    if (outcome.valid()) {
-                        verified.add(candidate);
-                    }
-                    cancellation.checkpoint();
-                } catch (InterruptedException exception) {
-                    Thread.currentThread().interrupt();
-                    throw exception;
-                } catch (Exception exception) {
-                    // Another independently stored destination may still be valid.
-                }
-            }
-            if (verified.isEmpty()) {
-                reportFailure(progressListener, operationId, current, BackupOperation.RESTORE,
-                        "No valid restore source is available");
-                throw new BackupRecoveryException("No valid destination can restore this backup");
-            }
-
-            for (DestinationCandidate candidate : verified) {
-                cancellation.checkpoint();
-                report(progressListener, progress(
-                        operationId, current, BackupOperation.RESTORE, OperationPhase.WRITING,
-                        0, 0, "Materializing a private restored copy"));
-                RestoreStaging staging = createPrivateStaging(root);
-                try {
-                    RecoveryDestination.Materialization materialization =
-                            candidate.adapter().materialize(
-                                    current, candidate.result(), staging.path());
-                    boolean interruptedAfterMaterialization = Thread.interrupted();
-                    try {
-                        staging = staging.afterMaterialization(materialization);
-                    } finally {
-                        if (interruptedAfterMaterialization) {
-                            Thread.currentThread().interrupt();
-                        }
-                    }
-                    if (materialization.postMaterializationProblem().isPresent()) {
-                        throw new BackupRecoveryException(
-                                materialization.postMaterializationProblem().orElseThrow());
-                    }
-                    cancellation.checkpoint();
-                    staging.requireUnchanged();
-                    if (Files.exists(
-                            staging.path().resolve(".worldarchive"), LinkOption.NOFOLLOW_LINKS)) {
-                        throw new InvalidMaterializationException();
-                    }
-                } catch (InterruptedException exception) {
-                    Thread.currentThread().interrupt();
-                    cleanupPrivateStaging(root, staging, exception);
-                    throw exception;
-                } catch (InvalidMaterializationException exception) {
-                    if (!cleanupPrivateStaging(root, staging, exception)) {
-                        throw new BackupRecoveryException(
-                                "Private restore staging could not be cleaned safely", exception);
-                    }
-                    continue;
-                } catch (Exception exception) {
-                    if (!cleanupPrivateStaging(root, staging, exception)) {
-                        throw new BackupRecoveryException(
-                                "Private restore staging could not be cleaned safely", exception);
-                    }
-                    continue;
-                }
-
-                WorldIdentity restoredIdentity;
-                try {
-                    cancellation.checkpoint();
-                    staging.requireUnchanged();
-                    metadataFinalizer.finalizeDisplayName(staging.path(), request.restoredWorldName());
-                    cancellation.checkpoint();
-                    staging.requireUnchanged();
-                    restoredIdentity = identityStore.createFreshRestoredCopyIdentity(
-                            staging.path(), current.manifest().backupId());
-                    cancellation.checkpoint();
-                    staging.requireUnchanged();
-                } catch (InterruptedException exception) {
-                    Thread.currentThread().interrupt();
-                    cleanupPrivateStaging(root, staging, exception);
-                    throw exception;
-                } catch (IOException | RuntimeException exception) {
-                    cleanupPrivateStaging(root, staging, exception);
-                    throw new BackupRecoveryException(
-                            "Restored world metadata could not be finalized", exception);
-                }
-
-                report(progressListener, progress(
-                        operationId, current, BackupOperation.RESTORE, OperationPhase.PUBLISHING,
-                        0, 0, "Publishing restored world copy"));
-                Path published;
-                try {
-                    published = publishUnique(
-                            root,
-                            staging,
-                            request.restoredWorldName(),
-                            directoryMove,
-                            cancellation);
-                } catch (InterruptedException exception) {
-                    Thread.currentThread().interrupt();
-                    cleanupPrivateStaging(root, staging, exception);
-                    throw exception;
-                } catch (IOException | RuntimeException exception) {
-                    cleanupPrivateStaging(root, staging, exception);
-                    throw new BackupRecoveryException(
-                            "Restored world copy could not be published", exception);
-                } catch (Exception exception) {
-                    cleanupPrivateStaging(root, staging, exception);
-                    throw new BackupRecoveryException(
-                            "Restored world copy could not be published", exception);
-                }
-                try {
-                    RestoreBackupResult result = new RestoreBackupResult(
-                            current.manifest().backupId(), restoredIdentity.worldId(), published);
-                    report(progressListener, progress(
-                            operationId, current, BackupOperation.RESTORE, OperationPhase.COMPLETE,
-                            1, 1, "Restored world copy is ready"));
-                    return result;
-                } catch (RuntimeException exception) {
-                    deleteTree(root.path(), published);
-                    throw exception;
+                Optional<RestoreBackupResult> restored = restoreFromCandidate(
+                        request,
+                        current,
+                        candidate,
+                        workspace,
+                        progressListener,
+                        operationId,
+                        cancellation);
+                if (restored.isPresent()) {
+                    return restored.orElseThrow();
                 }
             }
             reportFailure(progressListener, operationId, current, BackupOperation.RESTORE,
                     "All restore sources failed during materialization");
             throw new BackupRecoveryException("No valid destination can restore this backup");
+        }
+    }
+
+    private RestoreWorkspace openRestoreWorkspace(
+            RestoreBackupRequest request,
+            ProgressListener progressListener,
+            OperationId operationId,
+            BackupRecord record) {
+        try {
+            return RestoreWorkspace.open(request.worldsDirectory(), directoryMove);
+        } catch (IOException exception) {
+            reportFailure(progressListener, operationId, record, BackupOperation.RESTORE,
+                    "Worlds directory is unavailable or unsafe");
+            throw new BackupRecoveryException(
+                    "Worlds directory is unavailable or unsafe", exception);
+        }
+    }
+
+    private List<DestinationCandidate> verifiedRestoreSources(
+            BackupRecord record,
+            ProgressListener progressListener,
+            OperationId operationId,
+            OperationCancellation cancellation) throws InterruptedException {
+        List<DestinationCandidate> candidates = restorableCandidates(record);
+        List<DestinationCandidate> verified = new ArrayList<>();
+        for (DestinationCandidate candidate : candidates) {
+            cancellation.checkpoint();
+            report(progressListener, progress(
+                    operationId, record, BackupOperation.RESTORE, OperationPhase.VERIFYING,
+                    verified.size(), candidates.size(), "Verifying restore source"));
+            try {
+                VerificationOutcome outcome = candidate.adapter().verifyForRestore(
+                        record, candidate.result());
+                if (outcome.valid()) {
+                    verified.add(candidate);
+                }
+                cancellation.checkpoint();
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw exception;
+            } catch (Exception exception) {
+                // Another independently stored destination may still be valid.
+            }
+        }
+        if (verified.isEmpty()) {
+            reportFailure(progressListener, operationId, record, BackupOperation.RESTORE,
+                    "No valid restore source is available");
+            throw new BackupRecoveryException("No valid destination can restore this backup");
+        }
+        return verified;
+    }
+
+    private Optional<RestoreBackupResult> restoreFromCandidate(
+            RestoreBackupRequest request,
+            BackupRecord record,
+            DestinationCandidate candidate,
+            RestoreWorkspace workspace,
+            ProgressListener progressListener,
+            OperationId operationId,
+            OperationCancellation cancellation) throws Exception {
+        report(progressListener, progress(
+                operationId, record, BackupOperation.RESTORE, OperationPhase.WRITING,
+                0, 0, "Materializing a private restored copy"));
+        RestoreWorkspace.Staging staging = workspace.createStaging();
+        Optional<RestoreWorkspace.Staging> materialized = materializeCandidate(
+                record, candidate, workspace, staging, cancellation);
+        if (materialized.isEmpty()) {
+            return Optional.empty();
+        }
+        staging = materialized.orElseThrow();
+        WorldIdentity identity = finalizeRestoredIdentity(
+                request, record, workspace, staging, cancellation);
+        report(progressListener, progress(
+                operationId, record, BackupOperation.RESTORE, OperationPhase.PUBLISHING,
+                0, 0, "Publishing restored world copy"));
+        Path published = publishRestoredWorld(
+                request, workspace, staging, cancellation);
+        try {
+            RestoreBackupResult result = new RestoreBackupResult(
+                    record.manifest().backupId(), identity.worldId(), published);
+            report(progressListener, progress(
+                    operationId, record, BackupOperation.RESTORE, OperationPhase.COMPLETE,
+                    1, 1, "Restored world copy is ready"));
+            return Optional.of(result);
+        } catch (RuntimeException exception) {
+            workspace.deletePublished(published);
+            throw exception;
+        }
+    }
+
+    private static Optional<RestoreWorkspace.Staging> materializeCandidate(
+            BackupRecord record,
+            DestinationCandidate candidate,
+            RestoreWorkspace workspace,
+            RestoreWorkspace.Staging initialStaging,
+            OperationCancellation cancellation) throws InterruptedException {
+        RestoreWorkspace.Staging staging = initialStaging;
+        try {
+            RecoveryDestination.Materialization materialization = candidate.adapter().materialize(
+                    record, candidate.result(), staging.path());
+            boolean interruptedAfterMaterialization = Thread.interrupted();
+            try {
+                staging = staging.afterMaterialization(materialization);
+            } finally {
+                if (interruptedAfterMaterialization) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            if (materialization.postMaterializationProblem().isPresent()) {
+                throw new BackupRecoveryException(
+                        materialization.postMaterializationProblem().orElseThrow());
+            }
+            cancellation.checkpoint();
+            staging.requireUnchanged();
+            if (Files.exists(
+                    staging.path().resolve(".worldarchive"), LinkOption.NOFOLLOW_LINKS)) {
+                throw new IOException("Restore source contains internal metadata");
+            }
+            return Optional.of(staging);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            workspace.cleanup(staging, exception);
+            throw exception;
+        } catch (Exception exception) {
+            if (!workspace.cleanup(staging, exception)) {
+                throw new BackupRecoveryException(
+                        "Private restore staging could not be cleaned safely", exception);
+            }
+            return Optional.empty();
+        }
+    }
+
+    private WorldIdentity finalizeRestoredIdentity(
+            RestoreBackupRequest request,
+            BackupRecord record,
+            RestoreWorkspace workspace,
+            RestoreWorkspace.Staging staging,
+            OperationCancellation cancellation) throws InterruptedException {
+        try {
+            cancellation.checkpoint();
+            staging.requireUnchanged();
+            metadataFinalizer.finalizeDisplayName(staging.path(), request.restoredWorldName());
+            cancellation.checkpoint();
+            staging.requireUnchanged();
+            WorldIdentity identity = identityStore.createFreshRestoredCopyIdentity(
+                    staging.path(), record.manifest().backupId());
+            cancellation.checkpoint();
+            staging.requireUnchanged();
+            return identity;
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            workspace.cleanup(staging, exception);
+            throw exception;
+        } catch (IOException | RuntimeException exception) {
+            workspace.cleanup(staging, exception);
+            throw new BackupRecoveryException(
+                    "Restored world metadata could not be finalized", exception);
+        }
+    }
+
+    private static Path publishRestoredWorld(
+            RestoreBackupRequest request,
+            RestoreWorkspace workspace,
+            RestoreWorkspace.Staging staging,
+            OperationCancellation cancellation) throws InterruptedException {
+        try {
+            return workspace.publish(staging, request.restoredWorldName(), cancellation);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            workspace.cleanup(staging, exception);
+            throw exception;
+        } catch (Exception exception) {
+            workspace.cleanup(staging, exception);
+            throw new BackupRecoveryException(
+                    "Restored world copy could not be published", exception);
         }
     }
 
@@ -776,267 +808,6 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
                 status);
     }
 
-    private static RestoreStaging createPrivateStaging(RestoreRoot root) throws IOException {
-        root.requireUnchanged();
-        Path staging = Files.createTempDirectory(root.path(), ".worldarchive-restore-");
-        BasicFileAttributes attributes = Files.readAttributes(
-                staging, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-        if (!attributes.isDirectory()
-                || attributes.isSymbolicLink()
-                || attributes.isOther()
-                || isWindowsReparsePoint(staging)) {
-            deleteTree(root.path(), staging);
-            throw new IOException("Private restore staging is unsafe");
-        }
-        Optional<String> identityMarker = DirectoryIdentityMarker.create(staging);
-        if (attributes.fileKey() == null && identityMarker.isEmpty()) {
-            deleteTree(root.path(), staging);
-            throw new IOException("Private restore staging has no stable identity");
-        }
-        root.requireUnchanged();
-        return new RestoreStaging(
-                staging,
-                attributes.fileKey(),
-                attributes.creationTime(),
-                identityMarker);
-    }
-
-    private static Path publishUnique(
-            RestoreRoot root,
-            RestoreStaging staging,
-            String requestedName,
-            DirectoryMove directoryMove,
-            OperationCancellation cancellation) throws Exception {
-        String base = safeDirectoryName(requestedName);
-        ReentrantLock lock = PUBLICATION_LOCKS.computeIfAbsent(
-                root.path(), ignored -> new ReentrantLock(true));
-        try {
-            lock.lockInterruptibly();
-        } catch (InterruptedException exception) {
-            Thread.currentThread().interrupt();
-            throw new IOException("Restore publication was interrupted", exception);
-        }
-        try {
-            root.requireUnchanged();
-            staging.requireUnchanged();
-            for (int index = 1; index <= 10_000; index++) {
-                String filename = index == 1 ? base : appendSuffix(base, index);
-                Path target = root.path().resolve(filename).normalize();
-                if (!Objects.equals(target.getParent(), root.path())) {
-                    throw new IOException("Restore target escaped the worlds directory");
-                }
-                if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
-                    continue;
-                }
-                try {
-                    return cancellation.pointOfNoReturn(() -> {
-                        try {
-                            directoryMove.move(
-                                    staging.path(), target, StandardCopyOption.ATOMIC_MOVE);
-                        } catch (IOException moveFailure) {
-                            return reconcileAmbiguousPublication(
-                                    root, staging, target, moveFailure);
-                        }
-                        try {
-                            return requirePublishedRestore(root, staging, target);
-                        } catch (IOException | RuntimeException validationFailure) {
-                            cleanupPublishedStaging(
-                                    root, staging, target, validationFailure);
-                            throw validationFailure;
-                        }
-                    });
-                } catch (FileAlreadyExistsException exception) {
-                    continue;
-                }
-            }
-            throw new IOException("No unique restore target name is available");
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    private static Path reconcileAmbiguousPublication(
-            RestoreRoot root,
-            RestoreStaging staging,
-            Path target,
-            IOException moveFailure) throws IOException {
-        try {
-            return requirePublishedRestore(root, staging, target);
-        } catch (IOException | RuntimeException validationFailure) {
-            moveFailure.addSuppressed(validationFailure);
-            cleanupPublishedStaging(root, staging, target, moveFailure);
-            throw moveFailure;
-        }
-    }
-
-    private static void cleanupPublishedStaging(
-            RestoreRoot root,
-            RestoreStaging staging,
-            Path target,
-            Throwable failure) {
-        try {
-            staging.requireIdentityAt(target);
-            deleteTree(root.path(), target);
-        } catch (IOException | RuntimeException cleanupFailure) {
-            failure.addSuppressed(cleanupFailure);
-        }
-    }
-
-    private static Path requirePublishedRestore(
-            RestoreRoot root,
-            RestoreStaging staging,
-            Path target) throws IOException {
-        root.requireUnchanged();
-        BasicFileAttributes attributes = Files.readAttributes(
-                target,
-                BasicFileAttributes.class,
-                LinkOption.NOFOLLOW_LINKS);
-        if (!attributes.isDirectory()
-                || attributes.isSymbolicLink()
-                || attributes.isOther()
-                || isWindowsReparsePoint(target)
-                || !Objects.equals(target.toRealPath().getParent(), root.path())) {
-            throw new IOException("Published restore target is unsafe");
-        }
-        staging.requireIdentityAt(target);
-        return target;
-    }
-
-    private static String safeDirectoryName(String requestedName) {
-        String normalized = Normalizer.normalize(
-                Objects.requireNonNull(requestedName, "requestedName"), Normalizer.Form.NFKC);
-        StringBuilder safe = new StringBuilder();
-        normalized.codePoints().forEach(codePoint -> {
-            if (codePoint < 32
-                    || codePoint == 127
-                    || "<>:\"/\\|?*".indexOf(codePoint) >= 0) {
-                safe.append('_');
-            } else {
-                safe.appendCodePoint(codePoint);
-            }
-        });
-        String result = safe.toString().strip();
-        while (!result.isEmpty()
-                && (result.endsWith(".") || result.endsWith(" "))) {
-            result = result.substring(0, result.length() - 1);
-        }
-        if (result.isBlank() || result.equals(".") || result.equals("..")) {
-            result = "Restored World";
-        }
-        result = truncateCodePoints(result, MAXIMUM_DIRECTORY_NAME_CODE_POINTS);
-        while (!result.isEmpty()
-                && (result.endsWith(".") || result.endsWith(" "))) {
-            result = result.substring(0, result.length() - 1);
-        }
-        if (result.isBlank()) {
-            result = "Restored World";
-        }
-        String stem = result.split("\\.", 2)[0].toUpperCase(Locale.ROOT);
-        if (WINDOWS_DEVICE_NAMES.contains(stem)) {
-            result = "_" + result;
-        }
-        return result;
-    }
-
-    private static String appendSuffix(String base, int index) {
-        String suffix = " (" + index + ")";
-        int maximumBase = MAXIMUM_DIRECTORY_NAME_CODE_POINTS
-                - suffix.codePointCount(0, suffix.length());
-        return truncateCodePoints(base, maximumBase) + suffix;
-    }
-
-    private static String truncateCodePoints(String value, int maximum) {
-        int count = value.codePointCount(0, value.length());
-        if (count <= maximum) {
-            return value;
-        }
-        return value.substring(0, value.offsetByCodePoints(0, maximum));
-    }
-
-    private static Set<String> windowsDeviceNames() {
-        Set<String> names = new HashSet<>(Set.of("CON", "PRN", "AUX", "NUL", "CLOCK$"));
-        for (int index = 1; index <= 9; index++) {
-            names.add("COM" + index);
-            names.add("LPT" + index);
-        }
-        return Set.copyOf(names);
-    }
-
-    private static boolean cleanupPrivateStaging(
-            RestoreRoot root,
-            RestoreStaging staging,
-            Throwable failure) {
-        boolean interrupted = Thread.interrupted();
-        try {
-            root.requireUnchanged();
-            staging.requireUnchanged();
-            deleteTree(root.path(), staging.path());
-            return true;
-        } catch (IOException | RuntimeException cleanupFailure) {
-            failure.addSuppressed(cleanupFailure);
-            return false;
-        } finally {
-            if (interrupted) {
-                Thread.currentThread().interrupt();
-            }
-        }
-    }
-
-    private static void deleteTree(Path root, Path target) throws IOException {
-        Path safeRoot = root.toAbsolutePath().normalize();
-        Path safeTarget = target.toAbsolutePath().normalize();
-        if (safeTarget.equals(safeRoot) || !Objects.equals(safeTarget.getParent(), safeRoot)) {
-            throw new IOException("Refusing to remove a path outside the worlds directory");
-        }
-        if (!Files.exists(safeTarget, LinkOption.NOFOLLOW_LINKS)) {
-            return;
-        }
-        Files.walkFileTree(safeTarget, new SimpleFileVisitor<>() {
-            @Override
-            public FileVisitResult preVisitDirectory(
-                    Path directory,
-                    BasicFileAttributes attributes) throws IOException {
-                if (attributes.isSymbolicLink()
-                        || attributes.isOther()
-                        || isWindowsReparsePoint(directory)) {
-                    Files.delete(directory);
-                    return FileVisitResult.SKIP_SUBTREE;
-                }
-                return FileVisitResult.CONTINUE;
-            }
-
-            @Override
-            public FileVisitResult visitFile(Path file, BasicFileAttributes attributes)
-                    throws IOException {
-                Files.delete(file);
-                return FileVisitResult.CONTINUE;
-            }
-
-            @Override
-            public FileVisitResult postVisitDirectory(Path directory, IOException exception)
-                    throws IOException {
-                if (exception != null) {
-                    throw exception;
-                }
-                Files.delete(directory);
-                return FileVisitResult.CONTINUE;
-            }
-        });
-    }
-
-    private static boolean isWindowsReparsePoint(Path path) throws IOException {
-        try {
-            Map<String, Object> attributes = Files.readAttributes(
-                    path,
-                    "dos:attributes",
-                    LinkOption.NOFOLLOW_LINKS);
-            Object raw = attributes.get("attributes");
-            return raw instanceof Integer value && (value & 0x400) != 0;
-        } catch (UnsupportedOperationException | IllegalArgumentException exception) {
-            return false;
-        }
-    }
-
     private static OperationProgress progress(
             OperationId operationId,
             BackupRecord record,
@@ -1078,7 +849,7 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
         return submit(cancellation -> operation.get());
     }
 
-    private <T> CompletionStage<T> submit(CancellableCheckedSupplier<T> operation) {
+    private <T> CompletionStage<T> submit(CancellableTask.Operation<T> operation) {
         CancellableTask<T> task = new CancellableTask<>(operation);
         try {
             executor.execute(task);
@@ -1142,23 +913,7 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
     }
 
     @FunctionalInterface
-    private interface CancellableCheckedSupplier<T> {
-        T get(OperationCancellation cancellation) throws Exception;
-    }
-
-    private interface OperationCancellation {
-        void checkpoint() throws InterruptedException;
-
-        <T> T mandatoryCommit(CheckedSupplier<T> operation) throws Exception;
-
-        <T> T commitIfActive(CheckedSupplier<T> operation) throws Exception;
-
-        <T> T pointOfNoReturn(CheckedSupplier<T> operation) throws Exception;
-    }
-
-    @FunctionalInterface
-    interface DirectoryMove {
-        Path move(Path source, Path target, CopyOption... options) throws IOException;
+    interface DirectoryMove extends RestoreWorkspace.DirectoryMove {
     }
 
     private record DestinationCandidate(
@@ -1179,219 +934,4 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
             Instant expiresAt) {
     }
 
-    private static final class CancellableTask<T> extends CompletableFuture<T>
-            implements Runnable, OperationCancellation {
-        private final CancellableCheckedSupplier<T> operation;
-
-        private Thread runner;
-
-        private boolean cancellationRequested;
-
-        private boolean interruptRequested;
-
-        private int mandatoryCommitDepth;
-
-        private boolean pointOfNoReturn;
-
-        private CancellableTask(CancellableCheckedSupplier<T> operation) {
-            this.operation = Objects.requireNonNull(operation, "operation");
-        }
-
-        @Override
-        public void run() {
-            synchronized (this) {
-                if (isDone()) {
-                    return;
-                }
-                runner = Thread.currentThread();
-            }
-            try {
-                checkpoint();
-                complete(operation.get(this));
-            } catch (Throwable exception) {
-                if (!isCancelled()) {
-                    completeExceptionally(exception);
-                }
-            } finally {
-                synchronized (this) {
-                    runner = null;
-                }
-            }
-        }
-
-        @Override
-        public boolean cancel(boolean mayInterruptIfRunning) {
-            synchronized (this) {
-                if (pointOfNoReturn || isDone() || !super.cancel(false)) {
-                    return false;
-                }
-                cancellationRequested = true;
-                interruptRequested = mayInterruptIfRunning;
-                if (mayInterruptIfRunning
-                        && mandatoryCommitDepth == 0
-                        && runner != null) {
-                    runner.interrupt();
-                }
-            }
-            return true;
-        }
-
-        @Override
-        public void checkpoint() throws InterruptedException {
-            boolean cancelled;
-            synchronized (this) {
-                cancelled = cancellationRequested;
-            }
-            if (cancelled || Thread.currentThread().isInterrupted()) {
-                throw new InterruptedException("Backup maintenance operation was cancelled");
-            }
-        }
-
-        @Override
-        public <R> R mandatoryCommit(CheckedSupplier<R> commit) throws Exception {
-            return commit(commit, false);
-        }
-
-        @Override
-        public <R> R commitIfActive(CheckedSupplier<R> commit) throws Exception {
-            return commit(commit, true);
-        }
-
-        @Override
-        public <R> R pointOfNoReturn(CheckedSupplier<R> publication) throws Exception {
-            Objects.requireNonNull(publication, "publication");
-            synchronized (this) {
-                if (cancellationRequested || Thread.currentThread().isInterrupted()) {
-                    throw new InterruptedException("Backup maintenance operation was cancelled");
-                }
-                pointOfNoReturn = true;
-            }
-            return publication.get();
-        }
-
-        private <R> R commit(CheckedSupplier<R> commit, boolean requireActive) throws Exception {
-            Objects.requireNonNull(commit, "commit");
-            synchronized (this) {
-                if (requireActive
-                        && (cancellationRequested || Thread.currentThread().isInterrupted())) {
-                    throw new InterruptedException("Backup maintenance operation was cancelled");
-                }
-                mandatoryCommitDepth++;
-            }
-            boolean interruptedBeforeCommit = Thread.interrupted();
-            try {
-                return commit.get();
-            } finally {
-                boolean restoreInterrupt;
-                synchronized (this) {
-                    mandatoryCommitDepth--;
-                    restoreInterrupt = mandatoryCommitDepth == 0 && interruptRequested;
-                }
-                if (interruptedBeforeCommit
-                        || restoreInterrupt
-                        || Thread.currentThread().isInterrupted()) {
-                    Thread.currentThread().interrupt();
-                }
-            }
-        }
-    }
-
-    private static final class InvalidMaterializationException extends Exception {
-        private static final long serialVersionUID = 1L;
-    }
-
-    private record RestoreStaging(
-            Path path,
-            Object fileKey,
-            FileTime creationTime,
-            Optional<String> identityMarker) {
-        RestoreStaging afterMaterialization(
-                RecoveryDestination.Materialization materialization) throws IOException {
-            if (!path.equals(materialization.path())) {
-                throw new IOException("Restore destination changed its staging path");
-            }
-            if (materialization.preservesDirectoryIdentity()) {
-                requireUnchanged();
-                return this;
-            }
-            if (materialization.fileKey() == null
-                    && materialization.directoryIdentityMarker().isEmpty()) {
-                throw new IOException("Restored directory has no stable identity");
-            }
-            RestoreStaging replacement = new RestoreStaging(
-                    path,
-                    materialization.fileKey(),
-                    materialization.creationTime(),
-                    materialization.directoryIdentityMarker());
-            replacement.requireUnchanged();
-            return replacement;
-        }
-
-        void requireUnchanged() throws IOException {
-            requireIdentityAt(path);
-        }
-
-        void requireIdentityAt(Path candidate) throws IOException {
-            BasicFileAttributes attributes = Files.readAttributes(
-                    candidate, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-            Optional<String> currentMarker = identityMarker.isPresent()
-                    ? DirectoryIdentityMarker.read(candidate)
-                    : Optional.empty();
-            boolean sameIdentity = fileKey != null
-                    ? Objects.equals(fileKey, attributes.fileKey())
-                    : identityMarker.isPresent() && identityMarker.equals(currentMarker);
-            boolean sameMarker = identityMarker.isEmpty() || identityMarker.equals(currentMarker);
-            if (!sameIdentity
-                    || !sameMarker
-                    || !attributes.isDirectory()
-                    || attributes.isSymbolicLink()
-                    || attributes.isOther()
-                    || isWindowsReparsePoint(candidate)) {
-                throw new IOException("Private restore staging changed during restoration");
-            }
-        }
-    }
-
-    private record RestoreRoot(Path path, Object fileKey, FileTime creationTime) {
-        static RestoreRoot open(Path requested) throws IOException {
-            Path normalized = Objects.requireNonNull(requested, "requested")
-                    .toAbsolutePath()
-                    .normalize();
-            Files.createDirectories(normalized);
-            if (Files.isSymbolicLink(normalized) || isWindowsReparsePoint(normalized)) {
-                throw new IOException("Worlds directory must not be a link or reparse point");
-            }
-            Path real = normalized.toRealPath();
-            if (real.getParent() == null || real.getFileName() == null) {
-                throw new IOException("Worlds directory must not be a filesystem root");
-            }
-            BasicFileAttributes attributes = Files.readAttributes(
-                    real, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-            if (!attributes.isDirectory()
-                    || attributes.isSymbolicLink()
-                    || attributes.isOther()
-                    || isWindowsReparsePoint(real)) {
-                throw new IOException("Worlds directory is unsafe");
-            }
-            return new RestoreRoot(real, attributes.fileKey(), attributes.creationTime());
-        }
-
-        void requireUnchanged() throws IOException {
-            if (!path.toRealPath().equals(path)) {
-                throw new IOException("Worlds directory changed during restore");
-            }
-            BasicFileAttributes attributes = Files.readAttributes(
-                    path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-            boolean sameIdentity = fileKey != null
-                    ? Objects.equals(fileKey, attributes.fileKey())
-                    : Objects.equals(creationTime, attributes.creationTime());
-            if (!sameIdentity
-                    || !attributes.isDirectory()
-                    || attributes.isSymbolicLink()
-                    || attributes.isOther()
-                    || isWindowsReparsePoint(path)) {
-                throw new IOException("Worlds directory changed during restore");
-            }
-        }
-    }
 }

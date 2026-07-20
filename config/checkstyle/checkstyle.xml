@@ -11,6 +11,13 @@
         <module name="EmptyLineSeparator"/>
         <module name="EqualsHashCode"/>
         <module name="MissingSwitchDefault"/>
+        <module name="MethodLength">
+            <property name="max" value="100"/>
+            <property name="countEmpty" value="false"/>
+        </module>
+        <module name="CyclomaticComplexity">
+            <property name="max" value="15"/>
+        </module>
         <module name="NeedBraces"/>
         <module name="OneStatementPerLine"/>
         <module name="OuterTypeFilename"/>
