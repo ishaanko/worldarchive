@@ -1,5 +1,6 @@
 package dev.ishaankot.worldarchive.storage.git;
 
+import dev.ishaankot.worldarchive.core.FileSystemSafety;
 import java.io.IOException;
 import java.nio.channels.FileChannel;
 import java.nio.file.FileAlreadyExistsException;
@@ -9,13 +10,10 @@ import java.nio.file.OpenOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
-import java.util.Map;
 import java.util.Set;
 
 /** Creates and opens repository control paths without following links. */
 final class GitRepositoryPathGuard {
-    private static final int WINDOWS_REPARSE_POINT = 0x400;
-
     private GitRepositoryPathGuard() {
     }
 
@@ -64,10 +62,7 @@ final class GitRepositoryPathGuard {
                     absolute,
                     BasicFileAttributes.class,
                     LinkOption.NOFOLLOW_LINKS);
-            if (!existing.isRegularFile()
-                    || existing.isSymbolicLink()
-                    || existing.isOther()
-                    || isWindowsReparsePoint(absolute)) {
+            if (!FileSystemSafety.isOrdinaryRegularFile(absolute, existing)) {
                 throw new GitStorageException("Git repository lock is not a regular file");
             }
         }
@@ -81,10 +76,7 @@ final class GitRepositoryPathGuard {
                     absolute,
                     BasicFileAttributes.class,
                     LinkOption.NOFOLLOW_LINKS);
-            if (!attributes.isRegularFile()
-                    || attributes.isSymbolicLink()
-                    || attributes.isOther()
-                    || isWindowsReparsePoint(absolute)) {
+            if (!FileSystemSafety.isOrdinaryRegularFile(absolute, attributes)) {
                 throw new GitStorageException("Git repository lock is not a regular file");
             }
             return channel;
@@ -100,27 +92,8 @@ final class GitRepositoryPathGuard {
                 component,
                 BasicFileAttributes.class,
                 LinkOption.NOFOLLOW_LINKS);
-        if (!attributes.isDirectory()
-                || attributes.isSymbolicLink()
-                || attributes.isOther()
-                || isWindowsReparsePoint(component)) {
+        if (!FileSystemSafety.isOrdinaryDirectory(component, attributes)) {
             throw new GitStorageException("Git repository path contains a link or special entry");
-        }
-    }
-
-    private static boolean isWindowsReparsePoint(Path path) throws IOException {
-        if (!"\\".equals(path.getFileSystem().getSeparator())) {
-            return false;
-        }
-        try {
-            Map<String, Object> attributes = Files.readAttributes(
-                    path,
-                    "dos:attributes",
-                    LinkOption.NOFOLLOW_LINKS);
-            Object raw = attributes.get("attributes");
-            return raw instanceof Integer value && (value & WINDOWS_REPARSE_POINT) != 0;
-        } catch (UnsupportedOperationException | IllegalArgumentException exception) {
-            return false;
         }
     }
 }

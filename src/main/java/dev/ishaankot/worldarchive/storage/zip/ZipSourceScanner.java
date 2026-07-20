@@ -1,5 +1,6 @@
 package dev.ishaankot.worldarchive.storage.zip;
 
+import dev.ishaankot.worldarchive.core.FileSystemSafety;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.nio.file.FileVisitResult;
@@ -13,14 +14,11 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
 /** Finds a stable, portable set of regular world files without following links. */
 final class ZipSourceScanner {
-    private static final int WINDOWS_REPARSE_POINT = 0x400;
-
     private ZipSourceScanner() {
     }
 
@@ -62,10 +60,7 @@ final class ZipSourceScanner {
                 if (isExcludedTree(relative) || isRootSessionLock(relative)) {
                     return FileVisitResult.CONTINUE;
                 }
-                if (attributes.isSymbolicLink()
-                        || attributes.isOther()
-                        || !attributes.isRegularFile()
-                        || isWindowsReparsePoint(file)) {
+                if (!FileSystemSafety.isOrdinaryRegularFile(file, attributes)) {
                     throw new ZipBackupException("World source contains a link or special file");
                 }
                 String portable = portable(relative);
@@ -97,10 +92,7 @@ final class ZipSourceScanner {
 
     static void requireUnchanged(SourceEntry source) throws IOException {
         BasicFileAttributes current = readAttributes(source.path());
-        if (!current.isRegularFile()
-                || current.isSymbolicLink()
-                || current.isOther()
-                || isWindowsReparsePoint(source.path())
+        if (!FileSystemSafety.isOrdinaryRegularFile(source.path(), current)
                 || current.size() != source.size()
                 || !current.lastModifiedTime().equals(source.lastModifiedTime())
                 || !identityCreationTime(current).equals(source.creationTime())
@@ -125,27 +117,11 @@ final class ZipSourceScanner {
             String message)
             throws ZipBackupException {
         try {
-            if (!attributes.isDirectory()
-                    || attributes.isSymbolicLink()
-                    || attributes.isOther()
-                    || isWindowsReparsePoint(path)) {
+            if (!FileSystemSafety.isOrdinaryDirectory(path, attributes)) {
                 throw new ZipBackupException(message);
             }
         } catch (IOException exception) {
             throw new ZipBackupException(message, exception);
-        }
-    }
-
-    private static boolean isWindowsReparsePoint(Path path) throws IOException {
-        try {
-            Map<String, Object> attributes = Files.readAttributes(
-                    path,
-                    "dos:attributes",
-                    LinkOption.NOFOLLOW_LINKS);
-            Object raw = attributes.get("attributes");
-            return raw instanceof Integer value && (value & WINDOWS_REPARSE_POINT) != 0;
-        } catch (UnsupportedOperationException | IllegalArgumentException exception) {
-            return false;
         }
     }
 

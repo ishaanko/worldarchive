@@ -66,99 +66,16 @@ final class ZipArchiveInspector {
             throw new IOException("ZIP archive has an invalid size");
         }
         archive.position(0);
-        Set<String> problems = new LinkedHashSet<>();
-        Map<String, String> normalizedEntries = new HashMap<>();
-        Map<String, Boolean> pathKinds = new HashMap<>();
-        List<ObservedFile> worldFiles = new ArrayList<>();
-        List<StreamedEntry> streamedEntries = new ArrayList<>();
-        byte[] manifestBytes = null;
-        byte[] inventoryBytes = null;
-        long[] uncompressedBytes = new long[] {0};
-        int entryCount = 0;
-
+        ArchiveScan scan = new ArchiveScan();
         InputStream channelInput = new NonClosingInputStream(Channels.newInputStream(archive));
         try (ZipInputStream zip = new ZipInputStream(channelInput, StandardCharsets.UTF_8)) {
             ZipEntry entry;
             while ((entry = zip.getNextEntry()) != null) {
-                requireNotInterrupted();
-                entryCount++;
-                if (entryCount > ZipLimits.MAXIMUM_ARCHIVE_ENTRIES) {
-                    throw new IOException("ZIP archive exceeds its entry limit");
-                }
-                String name = entry.getName();
-                streamedEntries.add(new StreamedEntry(name, entry.isDirectory()));
-                String normalized = null;
-                try {
-                    normalized = PortableZipPath.collisionKey(name, entry.isDirectory());
-                } catch (IllegalArgumentException exception) {
-                    problems.add("Archive contains an unsafe entry path.");
-                }
-                if (normalized != null
-                        && normalizedEntries.putIfAbsent(normalized, name) != null) {
-                    problems.add("Archive contains duplicate normalized entry paths.");
-                }
-                if (normalized != null
-                        && !registerPathKind(name, entry.isDirectory(), pathKinds)) {
-                    problems.add("Archive contains a file/directory path conflict.");
-                }
-
-                if (name.equals(ZipArchiveFormat.MANIFEST_ENTRY) && !entry.isDirectory()) {
-                    if (manifestBytes != null) {
-                        problems.add("Archive contains duplicate normalized entry paths.");
-                        drain(zip, uncompressedBytes);
-                    } else {
-                        manifestBytes = readLimited(
-                                zip,
-                                entry.getSize(),
-                                ZipArchiveFormat.MAXIMUM_MANIFEST_BYTES,
-                                uncompressedBytes);
-                    }
-                } else if (name.equals(ZipArchiveFormat.INVENTORY_ENTRY)
-                        && !entry.isDirectory()) {
-                    if (inventoryBytes != null) {
-                        problems.add("Archive contains duplicate normalized entry paths.");
-                        drain(zip, uncompressedBytes);
-                    } else {
-                        inventoryBytes = readLimited(
-                                zip,
-                                entry.getSize(),
-                                ZipArchiveFormat.MAXIMUM_INVENTORY_BYTES,
-                                uncompressedBytes);
-                    }
-                } else if (name.equals(ZipArchiveFormat.WORLD_PREFIX) && entry.isDirectory()) {
-                    if (drain(zip, uncompressedBytes) != 0) {
-                        problems.add("Archive contains data in a directory entry.");
-                    }
-                } else if (name.startsWith(ZipArchiveFormat.WORLD_PREFIX)
-                        && name.length() > ZipArchiveFormat.WORLD_PREFIX.length()) {
-                    if (entry.isDirectory()) {
-                        if (drain(zip, uncompressedBytes) != 0) {
-                            problems.add("Archive contains data in a directory entry.");
-                        }
-                    } else {
-                        String relative = name.substring(ZipArchiveFormat.WORLD_PREFIX.length());
-                        DigestResult digest = digest(zip, uncompressedBytes);
-                        worldFiles.add(new ObservedFile(
-                                relative, digest.byteCount(), digest.sha256()));
-                    }
-                } else {
-                    problems.add("Archive contains an entry outside its versioned namespaces.");
-                    drain(zip, uncompressedBytes);
-                }
+                scan.accept(entry, zip);
                 zip.closeEntry();
             }
         }
-
-        validateCentralDirectory(archive, archiveSize, streamedEntries, problems);
-        BackupManifest manifest = decodeManifest(manifestBytes, problems);
-        ZipInventory inventory = decodeInventory(inventoryBytes, problems);
-        VerificationCounts counts = verifyInventory(manifest, inventory, worldFiles, problems);
-        return new Inspection(
-                Optional.ofNullable(manifest),
-                Optional.ofNullable(inventory),
-                counts.files(),
-                counts.bytes(),
-                List.copyOf(problems));
+        return scan.finish(archive, archiveSize);
     }
 
     static BackupManifest readManifest(Path archive) throws IOException {
@@ -416,51 +333,16 @@ final class ZipArchiveInspector {
                 throw new IOException("ZIP central directory entry is truncated");
             }
             byte[] header = readAt(archive, offset, CENTRAL_DIRECTORY_HEADER_BYTES);
-            if (unsignedInt(header, 0) != 0x0201_4b50L) {
-                throw new IOException("ZIP central directory entry is malformed");
-            }
-            int versionMadeBy = unsignedShort(header, 4);
-            int hostSystem = versionMadeBy >>> 8;
-            int nameLength = unsignedShort(header, 28);
-            int extraLength = unsignedShort(header, 30);
-            int commentLength = unsignedShort(header, 32);
-            if (unsignedShort(header, 34) != 0) {
-                throw new IOException("Multi-disk ZIP archives are unsupported");
-            }
-            if (nameLength <= 0 || nameLength > ZipLimits.MAXIMUM_PATH_UTF8_BYTES) {
-                throw new IOException("ZIP central directory entry name is invalid");
-            }
+            CentralEntryHeader metadata = centralEntryHeader(header);
             byte[] centralName = readAt(
-                    archive, offset + CENTRAL_DIRECTORY_HEADER_BYTES, nameLength);
-            byte[] streamedName = streamedEntries.get(index)
-                    .name()
-                    .getBytes(StandardCharsets.UTF_8);
-            if (!Arrays.equals(centralName, streamedName)
-                    || streamedEntries.get(index).directory()
-                            != (centralName[centralName.length - 1] == '/')) {
-                throw new IOException(
-                        "ZIP central directory does not match its streamed entries");
-            }
-            long externalAttributes = unsignedInt(header, 38);
-            int unixType = (int) (externalAttributes >>> 16) & UNIX_FILE_TYPE_MASK;
-            boolean unixHost = hostSystem == 3 || hostSystem == 19;
-            if (unixType == UNIX_SYMBOLIC_LINK
-                    || (unixHost
-                            && unixType != 0
-                            && unixType != UNIX_REGULAR_FILE
-                            && unixType != UNIX_DIRECTORY)
-                    || (externalAttributes & WINDOWS_REPARSE_POINT) != 0) {
+                    archive,
+                    offset + CENTRAL_DIRECTORY_HEADER_BYTES,
+                    metadata.nameLength());
+            requireMatchingCentralName(centralName, streamedEntries.get(index));
+            if (containsSpecialEntry(metadata)) {
                 problems.add("Archive contains a symbolic-link or special entry.");
             }
-            long recordLength;
-            try {
-                recordLength = Math.addExact(
-                        CENTRAL_DIRECTORY_HEADER_BYTES,
-                        Math.addExact(nameLength, Math.addExact(extraLength, commentLength)));
-                offset = Math.addExact(offset, recordLength);
-            } catch (ArithmeticException exception) {
-                throw new IOException("ZIP central directory entry size overflow", exception);
-            }
+            offset = nextCentralOffset(offset, metadata);
             if (offset > centralEnd) {
                 throw new IOException("ZIP central directory entry exceeds its bounds");
             }
@@ -579,6 +461,205 @@ final class ZipArchiveInspector {
     }
 
     private record Zip64End(long offset, long entryCount, long centralSize, long centralOffset) {
+    }
+
+    private record CentralEntryHeader(
+            int hostSystem,
+            int nameLength,
+            int extraLength,
+            int commentLength,
+            long externalAttributes) {
+    }
+
+    private static final class ArchiveScan {
+        private final Set<String> problems = new LinkedHashSet<>();
+
+        private final Map<String, String> normalizedEntries = new HashMap<>();
+
+        private final Map<String, Boolean> pathKinds = new HashMap<>();
+
+        private final List<ObservedFile> worldFiles = new ArrayList<>();
+
+        private final List<StreamedEntry> streamedEntries = new ArrayList<>();
+
+        private final long[] uncompressedBytes = new long[] {0};
+
+        private byte[] manifestBytes;
+
+        private byte[] inventoryBytes;
+
+        private int entryCount;
+
+        private void accept(ZipEntry entry, ZipInputStream zip) throws IOException {
+            requireNotInterrupted();
+            entryCount++;
+            if (entryCount > ZipLimits.MAXIMUM_ARCHIVE_ENTRIES) {
+                throw new IOException("ZIP archive exceeds its entry limit");
+            }
+            String name = entry.getName();
+            boolean directory = entry.isDirectory();
+            streamedEntries.add(new StreamedEntry(name, directory));
+            registerPath(name, directory);
+            readPayload(entry, zip);
+        }
+
+        private void registerPath(String name, boolean directory) {
+            String normalized;
+            try {
+                normalized = PortableZipPath.collisionKey(name, directory);
+            } catch (IllegalArgumentException exception) {
+                problems.add("Archive contains an unsafe entry path.");
+                return;
+            }
+            if (normalizedEntries.putIfAbsent(normalized, name) != null) {
+                problems.add("Archive contains duplicate normalized entry paths.");
+            }
+            if (!registerPathKind(name, directory, pathKinds)) {
+                problems.add("Archive contains a file/directory path conflict.");
+            }
+        }
+
+        private void readPayload(ZipEntry entry, ZipInputStream zip) throws IOException {
+            String name = entry.getName();
+            if (name.equals(ZipArchiveFormat.MANIFEST_ENTRY) && !entry.isDirectory()) {
+                manifestBytes = readMetadata(
+                        zip,
+                        entry,
+                        manifestBytes,
+                        ZipArchiveFormat.MAXIMUM_MANIFEST_BYTES);
+            } else if (name.equals(ZipArchiveFormat.INVENTORY_ENTRY)
+                    && !entry.isDirectory()) {
+                inventoryBytes = readMetadata(
+                        zip,
+                        entry,
+                        inventoryBytes,
+                        ZipArchiveFormat.MAXIMUM_INVENTORY_BYTES);
+            } else if (name.equals(ZipArchiveFormat.WORLD_PREFIX)
+                    && entry.isDirectory()) {
+                requireEmptyDirectoryEntry(zip);
+            } else if (name.startsWith(ZipArchiveFormat.WORLD_PREFIX)
+                    && name.length() > ZipArchiveFormat.WORLD_PREFIX.length()) {
+                readWorldEntry(entry, zip);
+            } else {
+                problems.add(
+                        "Archive contains an entry outside its versioned namespaces.");
+                drain(zip, uncompressedBytes);
+            }
+        }
+
+        private byte[] readMetadata(
+                ZipInputStream zip,
+                ZipEntry entry,
+                byte[] existing,
+                int maximumBytes) throws IOException {
+            if (existing != null) {
+                problems.add("Archive contains duplicate normalized entry paths.");
+                drain(zip, uncompressedBytes);
+                return existing;
+            }
+            return readLimited(
+                    zip,
+                    entry.getSize(),
+                    maximumBytes,
+                    uncompressedBytes);
+        }
+
+        private void readWorldEntry(ZipEntry entry, ZipInputStream zip) throws IOException {
+            if (entry.isDirectory()) {
+                requireEmptyDirectoryEntry(zip);
+                return;
+            }
+            String relative = entry.getName().substring(
+                    ZipArchiveFormat.WORLD_PREFIX.length());
+            DigestResult digest = digest(zip, uncompressedBytes);
+            worldFiles.add(new ObservedFile(
+                    relative,
+                    digest.byteCount(),
+                    digest.sha256()));
+        }
+
+        private void requireEmptyDirectoryEntry(ZipInputStream zip) throws IOException {
+            if (drain(zip, uncompressedBytes) != 0) {
+                problems.add("Archive contains data in a directory entry.");
+            }
+        }
+
+        private Inspection finish(SeekableByteChannel archive, long archiveSize)
+                throws IOException {
+            validateCentralDirectory(archive, archiveSize, streamedEntries, problems);
+            BackupManifest manifest = decodeManifest(manifestBytes, problems);
+            ZipInventory inventory = decodeInventory(inventoryBytes, problems);
+            VerificationCounts counts = verifyInventory(
+                    manifest,
+                    inventory,
+                    worldFiles,
+                    problems);
+            return new Inspection(
+                    Optional.ofNullable(manifest),
+                    Optional.ofNullable(inventory),
+                    counts.files(),
+                    counts.bytes(),
+                    List.copyOf(problems));
+        }
+    }
+
+    private static CentralEntryHeader centralEntryHeader(byte[] header) throws IOException {
+        if (unsignedInt(header, 0) != 0x0201_4b50L) {
+            throw new IOException("ZIP central directory entry is malformed");
+        }
+        if (unsignedShort(header, 34) != 0) {
+            throw new IOException("Multi-disk ZIP archives are unsupported");
+        }
+        int nameLength = unsignedShort(header, 28);
+        if (nameLength <= 0 || nameLength > ZipLimits.MAXIMUM_PATH_UTF8_BYTES) {
+            throw new IOException("ZIP central directory entry name is invalid");
+        }
+        return new CentralEntryHeader(
+                unsignedShort(header, 4) >>> 8,
+                nameLength,
+                unsignedShort(header, 30),
+                unsignedShort(header, 32),
+                unsignedInt(header, 38));
+    }
+
+    private static void requireMatchingCentralName(
+            byte[] centralName,
+            StreamedEntry streamedEntry) throws IOException {
+        byte[] streamedName = streamedEntry.name().getBytes(StandardCharsets.UTF_8);
+        boolean centralDirectory = centralName[centralName.length - 1] == '/';
+        if (!Arrays.equals(centralName, streamedName)
+                || streamedEntry.directory() != centralDirectory) {
+            throw new IOException(
+                    "ZIP central directory does not match its streamed entries");
+        }
+    }
+
+    private static boolean containsSpecialEntry(CentralEntryHeader metadata) {
+        int unixType = (int) (metadata.externalAttributes() >>> 16)
+                & UNIX_FILE_TYPE_MASK;
+        boolean unixHost = metadata.hostSystem() == 3 || metadata.hostSystem() == 19;
+        boolean specialUnixType = unixType != 0
+                && unixType != UNIX_REGULAR_FILE
+                && unixType != UNIX_DIRECTORY;
+        return unixType == UNIX_SYMBOLIC_LINK
+                || (unixHost && specialUnixType)
+                || (metadata.externalAttributes() & WINDOWS_REPARSE_POINT) != 0;
+    }
+
+    private static long nextCentralOffset(
+            long offset,
+            CentralEntryHeader metadata) throws IOException {
+        try {
+            long variableLength = Math.addExact(
+                    metadata.nameLength(),
+                    Math.addExact(metadata.extraLength(), metadata.commentLength()));
+            long recordLength = Math.addExact(
+                    CENTRAL_DIRECTORY_HEADER_BYTES,
+                    variableLength);
+            return Math.addExact(offset, recordLength);
+        } catch (ArithmeticException exception) {
+            throw new IOException("ZIP central directory entry size overflow", exception);
+        }
     }
 
     private static final class NonClosingInputStream extends InputStream {

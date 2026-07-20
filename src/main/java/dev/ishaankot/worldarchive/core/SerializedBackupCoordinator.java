@@ -628,6 +628,18 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
         if (!operation.terminal.compareAndSet(false, true)) {
             return;
         }
+        Throwable terminalFailure = releaseOperationResources(operation, failure);
+        reportTerminalProgress(operation, result, terminalFailure);
+        CreateOperation next = releaseLane(operation);
+        completeOperation(operation, result, terminalFailure);
+        if (next != null) {
+            startOperation(next);
+        }
+    }
+
+    private static Throwable releaseOperationResources(
+            CreateOperation operation,
+            Throwable failure) {
         Throwable terminalFailure = failure;
         CapturedBackup captured = operation.capture.getAndSet(null);
         if (captured != null) {
@@ -651,7 +663,13 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
                 }
             }
         }
+        return terminalFailure;
+    }
 
+    private void reportTerminalProgress(
+            CreateOperation operation,
+            BackupResult result,
+            Throwable terminalFailure) {
         if (terminalFailure == null && result.status() != dev.ishaankot.worldarchive.model.BackupStatus.FAILED) {
             report(operation, OperationPhase.COMPLETE, 1, 1, completionMessage(result));
         } else if (terminalFailure == null) {
@@ -659,7 +677,9 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
         } else if (!operation.cancelled.get()) {
             report(operation, OperationPhase.FAILED, 0, 0, "Backup could not be completed");
         }
+    }
 
+    private CreateOperation releaseLane(CreateOperation operation) {
         CreateOperation next = null;
         WorldLane lane = operation.lane;
         if (lane != null) {
@@ -674,16 +694,19 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
                 }
             }
         }
+        return next;
+    }
 
+    private static void completeOperation(
+            CreateOperation operation,
+            BackupResult result,
+            Throwable terminalFailure) {
         if (!operation.result.isCancelled()) {
             if (terminalFailure == null) {
                 operation.result.complete(result);
             } else {
                 operation.result.completeExceptionally(terminalFailure);
             }
-        }
-        if (next != null) {
-            startOperation(next);
         }
     }
 

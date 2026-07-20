@@ -1,17 +1,15 @@
 package dev.ishaankot.worldarchive.storage.zip;
 
+import dev.ishaankot.worldarchive.core.FileSystemSafety;
 import java.io.IOException;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
-import java.util.Map;
 
 /** Rejects links, junctions, and other reparse components in managed storage paths. */
 final class ManagedPathGuard {
-    private static final int WINDOWS_REPARSE_POINT = 0x400;
-
     private ManagedPathGuard() {
     }
 
@@ -72,10 +70,7 @@ final class ManagedPathGuard {
         }
         requireDirectory(parent, message);
         BasicFileAttributes attributes = read(absolute, message);
-        if (!attributes.isRegularFile()
-                || attributes.isSymbolicLink()
-                || attributes.isOther()
-                || isWindowsReparsePoint(absolute, message)) {
+        if (!FileSystemSafety.isOrdinaryRegularFile(absolute, attributes)) {
             throw new ZipBackupException(message);
         }
         return attributes;
@@ -122,29 +117,8 @@ final class ManagedPathGuard {
 
     private static void requireDirectoryComponent(Path component, String message) throws IOException {
         BasicFileAttributes attributes = read(component, message);
-        if (!attributes.isDirectory()
-                || attributes.isSymbolicLink()
-                || attributes.isOther()
-                || isWindowsReparsePoint(component, message)) {
+        if (!FileSystemSafety.isOrdinaryDirectory(component, attributes)) {
             throw new ZipBackupException(message);
-        }
-    }
-
-    private static boolean isWindowsReparsePoint(Path path, String message) throws IOException {
-        if (!"\\".equals(path.getFileSystem().getSeparator())) {
-            return false;
-        }
-        try {
-            Map<String, Object> attributes = Files.readAttributes(
-                    path,
-                    "dos:attributes",
-                    LinkOption.NOFOLLOW_LINKS);
-            Object raw = attributes.get("attributes");
-            return raw instanceof Integer value && (value & WINDOWS_REPARSE_POINT) != 0;
-        } catch (UnsupportedOperationException | IllegalArgumentException exception) {
-            return false;
-        } catch (IOException exception) {
-            throw new ZipBackupException(message, exception);
         }
     }
 

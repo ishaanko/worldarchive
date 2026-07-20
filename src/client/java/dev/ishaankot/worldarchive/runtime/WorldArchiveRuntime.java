@@ -11,23 +11,17 @@ import dev.ishaankot.worldarchive.core.BackupBackend;
 import dev.ishaankot.worldarchive.core.BackupCaptureGate;
 import dev.ishaankot.worldarchive.core.BackupCoordinator;
 import dev.ishaankot.worldarchive.core.BackupService;
-import dev.ishaankot.worldarchive.core.CaptureProgressListener;
 import dev.ishaankot.worldarchive.core.ConfiguredBackupDestinationSelector;
 import dev.ishaankot.worldarchive.core.CreateBackupRequest;
-import dev.ishaankot.worldarchive.core.DeleteBackupRequest;
-import dev.ishaankot.worldarchive.core.DeletePreparation;
 import dev.ishaankot.worldarchive.core.FileSystemBackupCaptureFactory;
 import dev.ishaankot.worldarchive.core.FileWorldInventoryStore;
 import dev.ishaankot.worldarchive.core.LockingWorldOperationGate;
-import dev.ishaankot.worldarchive.core.NoCatchUpSchedule;
 import dev.ishaankot.worldarchive.core.OperationProgress;
 import dev.ishaankot.worldarchive.core.PreparedBackup;
 import dev.ishaankot.worldarchive.core.ProgressListener;
-import dev.ishaankot.worldarchive.core.RestoreBackupRequest;
 import dev.ishaankot.worldarchive.core.RestoreBackupResult;
 import dev.ishaankot.worldarchive.core.SerializedBackupCoordinator;
 import dev.ishaankot.worldarchive.model.BackupId;
-import dev.ishaankot.worldarchive.model.BackupRecord;
 import dev.ishaankot.worldarchive.model.BackupResult;
 import dev.ishaankot.worldarchive.model.BackupTrigger;
 import dev.ishaankot.worldarchive.model.DestinationHealth;
@@ -45,15 +39,12 @@ import dev.ishaankot.worldarchive.storage.git.SystemGitCommandRunner;
 import dev.ishaankot.worldarchive.storage.git.WorldGitSnapshotStore;
 import dev.ishaankot.worldarchive.storage.zip.ZipBackupBackend;
 import dev.ishaankot.worldarchive.storage.zip.ZipBackupStore;
-import dev.ishaankot.worldarchive.ui.BackupBrowserScreen;
 import dev.ishaankot.worldarchive.ui.BackupClientFacade;
 import dev.ishaankot.worldarchive.ui.BackupWorldContext;
 import dev.ishaankot.worldarchive.ui.BackupWorldSelection;
 import dev.ishaankot.worldarchive.ui.model.BackupBrowserCapabilities;
 import dev.ishaankot.worldarchive.ui.model.BackupRow;
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
@@ -79,23 +70,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 import net.minecraft.ChatFormatting;
-import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
-import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
-import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.toasts.SystemToast;
 import net.minecraft.client.gui.screens.PauseScreen;
 import net.minecraft.client.gui.screens.Screen;
-import net.minecraft.client.gui.screens.TitleScreen;
-import net.minecraft.client.gui.screens.worldselection.SelectWorldScreen;
-import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.network.chat.Component;
-import net.minecraft.server.MinecraftServer;
-import net.minecraft.util.Util;
-import net.minecraft.world.level.storage.LevelResource;
-import net.minecraft.world.level.storage.LevelStorageSource;
-import net.minecraft.world.level.validation.ContentValidationException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -130,6 +110,8 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
 
     private final Clock clock = Clock.systemUTC();
 
+    private final RuntimeLifecycle lifecycle = new RuntimeLifecycle(this, clock);
+
     private final RuntimeStateRegistry<RuntimeState> stateRegistry = new RuntimeStateRegistry<>();
 
     private final ConcurrentMap<PreparedBackup, PreparedOwnership> externallyPrepared =
@@ -146,7 +128,9 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
 
     private final Set<CompletableFuture<BackupResult>> exitWork = ConcurrentHashMap.newKeySet();
 
-    private final RuntimeCoordinator coordinatorView = new RuntimeCoordinator();
+    private final BackupCoordinator coordinatorView = new RuntimeBackupCoordinator(this);
+
+    private final RuntimeNavigation navigation = new RuntimeNavigation(this);
 
     private final AtomicBoolean closed = new AtomicBoolean();
 
@@ -161,23 +145,6 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
     private final AtomicBoolean retainedWarningShown = new AtomicBoolean();
 
     private final Object stateLock = new Object();
-
-    private final Object lifecycleLock = new Object();
-
-    private IntegratedServer activeServer;
-
-    private BackupWorldContext liveWorld;
-
-    private long liveWorldRevision;
-
-    private IntegratedServer stoppingServer;
-
-    private boolean clientStopping;
-
-    private final LiveBackupSaveGate<MinecraftServer, PendingLiveBackup> liveSaveGate =
-            new LiveBackupSaveGate<>();
-
-    private ScheduleState scheduleState;
 
     private WorldArchiveRuntime(Minecraft minecraft) {
         this.minecraft = Objects.requireNonNull(minecraft, "minecraft");
@@ -205,7 +172,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         }
         WorldArchiveRuntime created = new WorldArchiveRuntime(Minecraft.getInstance());
         INSTANCE.set(created);
-        created.registerLifecycleEvents();
+        created.lifecycle.register();
         ClientSettingsAccess.addConfigurationGuard(created::acquireConfigurationChange);
         ClientSettingsAccess.addConfigurationListener(created::reload);
         ClientSettingsAccess.ready().whenComplete((ignored, throwable) -> {
@@ -242,11 +209,11 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
             }
             RuntimeState replacement = buildState(resolved);
             stateRegistry.install(replacement);
-            reconcileWorldPathsAndSchedule(replacement);
+            lifecycle.reconcile(replacement);
             refreshStorageSafety(replacement);
             clearPersistedWorldSettingsFailures(resolved);
         }
-        ensureLiveWorldResolution();
+        lifecycle.ensureLiveWorldResolution();
     }
 
     private void validateConfigurationChange(WorldArchiveConfig config) {
@@ -349,21 +316,8 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         if (!closed.compareAndSet(false, true)) {
             return;
         }
-        PendingLiveBackup abandoned;
-        synchronized (lifecycleLock) {
-            abandoned = liveSaveGate.clear().orElse(null);
-            scheduleState = null;
-            liveWorld = null;
-            activeServer = null;
-            stoppingServer = null;
-            clientStopping = false;
-            liveWorldRevision++;
-        }
+        lifecycle.close();
         actionContexts.clear();
-        if (abandoned != null) {
-            abandoned.fail(
-                    new IllegalStateException("Minecraft stopped before the pending save completed"));
-        }
         if (!awaitExitWork(CLIENT_SHUTDOWN_WAIT)) {
             observeExitResult(
                     null,
@@ -402,6 +356,42 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         return coordinatorView;
     }
 
+    RuntimeConfigurationGate configurationGate() {
+        return configurationGate;
+    }
+
+    RuntimeStateRegistry<RuntimeState> states() {
+        return stateRegistry;
+    }
+
+    ConcurrentMap<PreparedBackup, PreparedOwnership> preparedCaptures() {
+        return externallyPrepared;
+    }
+
+    boolean isClosed() {
+        return closed.get();
+    }
+
+    Minecraft minecraft() {
+        return minecraft;
+    }
+
+    ExecutorService workerExecutor() {
+        return workerExecutor;
+    }
+
+    RuntimeActionContextRegistry actionContexts() {
+        return actionContexts;
+    }
+
+    RuntimeWorldPathRegistry worldPaths() {
+        return worldPaths;
+    }
+
+    BackupWorldContext currentLiveWorld() {
+        return lifecycle.liveWorld();
+    }
+
     @Override
     public BackupService backupService() {
         return coordinatorView;
@@ -412,9 +402,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         if (closed.get() || stateRegistry.currentOrNull() == null) {
             return Optional.empty();
         }
-        synchronized (lifecycleLock) {
-            return Optional.ofNullable(liveWorld).map(BackupWorldContext::worldId);
-        }
+        return lifecycle.activeWorldId();
     }
 
     @Override
@@ -423,10 +411,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
             ProgressListener progressListener) {
         Objects.requireNonNull(label, "label");
         Objects.requireNonNull(progressListener, "progressListener");
-        BackupWorldContext world;
-        synchronized (lifecycleLock) {
-            world = liveWorld;
-        }
+        BackupWorldContext world = lifecycle.liveWorld();
         if (world == null) {
             return failedStage("No integrated world is ready for backup");
         }
@@ -473,9 +458,13 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
             if (busyAcrossStates(world.worldId())) {
                 return failedStage("A backup is already running for this world");
             }
-            LiveMatch match = liveMatch(world);
-            if (match != null) {
-                return queueRequestedSave(state, match.server(), request, progressListener);
+            IntegratedServer server = lifecycle.matchingServer(world);
+            if (server != null) {
+                return lifecycle.queueRequestedSave(
+                        state,
+                        server,
+                        request,
+                        progressListener);
             }
             return state.coordinator().createBackup(request, progressListener);
         });
@@ -491,7 +480,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         }
         CreateBackupRequest request = request(world, Optional.empty(), BackupTrigger.MANUAL);
         WorldArchiveConfig config = state.config();
-        boolean sourceAvailable = sourceDirectoryAvailable(world);
+        boolean sourceAvailable = navigation.sourceDirectoryAvailable(world);
         boolean createAvailable = false;
         if (sourceAvailable) {
             try {
@@ -516,181 +505,42 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
     public void openManagedFolder(
             BackupWorldContext world,
             Optional<BackupRow> selectedBackup) {
-        Objects.requireNonNull(world, "world");
-        Objects.requireNonNull(selectedBackup, "selectedBackup");
-        RuntimeConfigurationGate.Permit permit = configurationGate.enterBackup();
-        boolean transferred = false;
-        try {
-            RuntimeState state = requireCurrentState();
-            storageIssue(state).ifPresent(issue -> {
-                throw new IllegalStateException(issue);
-            });
-            Path destination = managedPath(state, world, selectedBackup);
-            workerExecutor.execute(() -> {
-                boolean clientCallbackScheduled = false;
-                try {
-                    Files.createDirectories(destination);
-                    if (!closed.get()) {
-                        minecraft.execute(() -> {
-                            try {
-                                if (!closed.get()) {
-                                    Util.getPlatform().openPath(destination);
-                                }
-                            } catch (RuntimeException exception) {
-                                logFailure("Managed backup folder could not be opened", exception);
-                            } finally {
-                                permit.close();
-                            }
-                        });
-                        clientCallbackScheduled = true;
-                    }
-                } catch (IOException | RuntimeException exception) {
-                    logFailure("Managed backup folder could not be opened", exception);
-                } finally {
-                    if (!clientCallbackScheduled) {
-                        permit.close();
-                    }
-                }
-            });
-            transferred = true;
-        } catch (RejectedExecutionException exception) {
-            throw new IllegalStateException("WorldArchive is shutting down");
-        } finally {
-            if (!transferred) {
-                permit.close();
-            }
-        }
+        navigation.openManagedFolder(world, selectedBackup);
     }
 
     @Override
     public void openSettings(Screen returnTo) {
-        Objects.requireNonNull(returnTo, "returnTo");
-        if (!closed.get()) {
-            minecraft.execute(() -> minecraft.setScreenAndShow(ClientSettingsAccess.createScreen(returnTo)));
-        }
+        navigation.openSettings(returnTo);
     }
 
     @Override
     public void selectRestoredWorld(Screen returnTo, RestoreBackupResult result) {
-        Objects.requireNonNull(returnTo, "returnTo");
-        Objects.requireNonNull(result, "result");
-        minecraft.execute(() -> {
-            if (closed.get()) {
-                return;
-            }
-            Optional<String> storageName = validatedRestoredStorageName(result);
-            if (storageName.isEmpty()) {
-                return;
-            }
-            String name = storageName.orElseThrow();
-            RestoredWorldTransition.afterLeavingActiveWorld(
-                    this::hasActiveWorldSession,
-                    () -> minecraft.disconnectFromWorld(ClientLevel.DEFAULT_QUIT_MESSAGE),
-                    leftActiveWorld -> showRestoredWorldSelection(
-                            leftActiveWorld ? new TitleScreen() : returnTo,
-                            name));
-        });
+        navigation.selectRestoredWorld(returnTo, result);
     }
 
     @Override
     public void playRestoredWorld(Screen returnTo, RestoreBackupResult result) {
-        Objects.requireNonNull(returnTo, "returnTo");
-        Objects.requireNonNull(result, "result");
-        minecraft.execute(() -> {
-            if (closed.get()) {
-                return;
-            }
-            Optional<String> storageName = validatedRestoredStorageName(result);
-            if (storageName.isEmpty()) {
-                return;
-            }
-            String name = storageName.orElseThrow();
-            RestoredWorldTransition.afterLeavingActiveWorld(
-                    this::hasActiveWorldSession,
-                    () -> minecraft.disconnectFromWorld(ClientLevel.DEFAULT_QUIT_MESSAGE),
-                    leftActiveWorld -> playRestoredWorld(
-                            leftActiveWorld ? new TitleScreen() : returnTo,
-                            name,
-                            leftActiveWorld));
-        });
-    }
-
-    private boolean hasActiveWorldSession() {
-        return minecraft.hasSingleplayerServer()
-                || minecraft.level != null
-                || minecraft.getConnection() != null;
-    }
-
-    private void showRestoredWorldSelection(Screen returnTo, String storageName) {
-        SelectWorldScreen screen = new SelectWorldScreen(returnTo);
-        minecraft.setScreenAndShow(screen);
-        RestoredWorldSelection.install(screen, storageName);
-    }
-
-    private void playRestoredWorld(
-            Screen returnTo,
-            String storageName,
-            boolean selectOnFailure) {
-        try (LevelStorageSource.LevelStorageAccess ignored =
-                minecraft.getLevelSource().validateAndCreateAccess(storageName)) {
-            // Validation and a clean session close happen before vanilla starts the world.
-        } catch (IOException | ContentValidationException exception) {
-            logFailure("Restored world validation failed", exception);
-            handleRestoredWorldPlayFailure(returnTo, storageName, selectOnFailure);
-            return;
-        }
-        minecraft.createWorldOpenFlows().openWorld(
-                storageName,
-                () -> handleRestoredWorldPlayFailure(
-                        returnTo,
-                        storageName,
-                        selectOnFailure));
-    }
-
-    private void handleRestoredWorldPlayFailure(
-            Screen returnTo,
-            String storageName,
-            boolean selectRestoredWorld) {
-        if (selectRestoredWorld) {
-            showRestoredWorldSelection(returnTo, storageName);
-        } else {
-            minecraft.setScreenAndShow(returnTo);
-        }
+        navigation.playRestoredWorld(returnTo, result);
     }
 
     @Override
     public void openBrowser() {
-        BackupWorldContext world;
-        synchronized (lifecycleLock) {
-            world = liveWorld;
-        }
-        if (world == null || unavailable()) {
-            return;
-        }
-        BackupWorldContext selected = world;
-        minecraft.execute(() -> {
-            if (!closed.get()) {
-                minecraft.setScreenAndShow(new BackupBrowserScreen(
-                        new PauseScreen(true),
-                        selected,
-                        this));
-            }
-        });
+        navigation.openBrowser();
     }
 
     @Override
     public void openRestore(BackupId backupId) {
-        openBrowserForBackup(backupId, CommandAction.RESTORE);
+        navigation.openRestore(backupId);
     }
 
     @Override
     public void openDeleteConfirmation(BackupId backupId) {
-        openBrowserForBackup(backupId, CommandAction.DELETE);
+        navigation.openDeleteConfirmation(backupId);
     }
 
     @Override
     public void openSettings() {
-        openSettings(new PauseScreen(true));
+        navigation.openSettings(new PauseScreen(true));
     }
 
     private RuntimeState buildState(WorldArchiveConfig config) {
@@ -747,381 +597,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         return state;
     }
 
-    private void registerLifecycleEvents() {
-        ServerLifecycleEvents.SERVER_STARTED.register(this::serverStarted);
-        ServerLifecycleEvents.SERVER_STOPPING.register(this::serverStopping);
-        ServerLifecycleEvents.AFTER_SAVE.register(this::afterSave);
-        ServerLifecycleEvents.SERVER_STOPPED.register(this::serverStopped);
-        ClientTickEvents.END_CLIENT_TICK.register(this::clientTick);
-        ClientLifecycleEvents.CLIENT_STOPPING.register(this::clientStopping);
-    }
-
-    private void serverStarted(MinecraftServer server) {
-        if (closed.get() || !(server instanceof IntegratedServer integrated)) {
-            return;
-        }
-        synchronized (lifecycleLock) {
-            activeServer = integrated;
-            stoppingServer = null;
-            liveWorld = null;
-            scheduleState = null;
-            liveWorldRevision++;
-        }
-        ensureLiveWorldResolution();
-    }
-
-    private void ensureLiveWorldResolution() {
-        IntegratedServer server;
-        long revision;
-        synchronized (lifecycleLock) {
-            if (closed.get() || activeServer == null || liveWorld != null) {
-                return;
-            }
-            server = activeServer;
-            revision = ++liveWorldRevision;
-        }
-        final BackupWorldSelection selection;
-        try {
-            selection = selectionFor(server);
-        } catch (RuntimeException exception) {
-            logFailure("Integrated world path could not be resolved", exception);
-            return;
-        }
-        submit(() -> resolveWorldBlocking(selection)).whenComplete((resolved, throwable) -> {
-            if (throwable != null) {
-                logFailure("Integrated world identity could not be resolved", throwable);
-                return;
-            }
-            synchronized (lifecycleLock) {
-                if (closed.get()
-                        || activeServer != server
-                        || liveWorldRevision != revision
-                        || resolved.isEmpty()) {
-                    return;
-                }
-                liveWorld = resolved.orElseThrow();
-                resetScheduleLocked(stateRegistry.currentOrNull(), liveWorld);
-            }
-        });
-    }
-
-    private void serverStopping(MinecraftServer server) {
-        if (closed.get() || !(server instanceof IntegratedServer integrated)) {
-            return;
-        }
-        synchronized (lifecycleLock) {
-            if (activeServer != integrated) {
-                return;
-            }
-            stoppingServer = integrated;
-        }
-
-        BackupWorldContext world = liveWorldFor(integrated);
-        Throwable resolutionFailure = null;
-        if (world == null) {
-            try {
-                world = resolveWorldBlocking(selectionFor(integrated)).orElse(null);
-            } catch (IOException | RuntimeException exception) {
-                resolutionFailure = exception;
-                logFailure("Exit backup world identity could not be resolved", exception);
-            }
-        }
-        if (world == null) {
-            observeExitResult(
-                    null,
-                    resolutionFailure == null
-                            ? new IllegalStateException(
-                                    "Exit backup world identity was unavailable")
-                            : resolutionFailure);
-            return;
-        }
-        RuntimeConfigurationGate.Permit permit = configurationGate.enterBackup();
-        boolean transferred = false;
-        try {
-            RuntimeState state = stateRegistry.currentOrNull();
-            if (state == null || closed.get()) {
-                observeExitResult(
-                        null,
-                        new IllegalStateException(
-                                "World-exit backup runtime was unavailable"));
-                return;
-            }
-            Optional<String> storageIssue = storageIssue(state);
-            if (storageIssue.isPresent()) {
-                observeExitResult(
-                        null,
-                        new IllegalStateException(storageIssue.orElseThrow()));
-                return;
-            }
-            CreateBackupRequest request = request(
-                    world,
-                    Optional.empty(),
-                    BackupTrigger.WORLD_EXIT);
-            if (!state.enabledDestinations(request)) {
-                return;
-            }
-
-            PendingLiveBackup exit = new PendingLiveBackup(
-                    state,
-                    integrated,
-                    request,
-                    ProgressListener.NO_OP,
-                    new CompletableFuture<>());
-            LiveBackupSaveGate.ExitInstall<PendingLiveBackup> installation;
-            synchronized (lifecycleLock) {
-                if (activeServer != integrated || stoppingServer != integrated) {
-                    return;
-                }
-                installation = liveSaveGate.installExit(integrated, exit);
-            }
-            if (!installation.installed()) {
-                observeExitResult(
-                        null,
-                        new IllegalStateException(
-                                "Another integrated world is still completing its exit backup"));
-                return;
-            }
-            exit.settled().whenComplete((ignored, throwable) -> permit.close());
-            transferred = true;
-            PendingLiveBackup displaced = installation.displaced().orElse(null);
-            if (displaced != null) {
-                displaced.fail(
-                        new IllegalStateException("World shutdown replaced the pending manual save"));
-            }
-            trackExit(exit.result());
-        } finally {
-            if (!transferred) {
-                permit.close();
-            }
-        }
-    }
-
-    private void afterSave(MinecraftServer server, boolean flush, boolean force) {
-        PendingLiveBackup requested;
-        synchronized (lifecycleLock) {
-            requested = liveSaveGate.observeRequestedSave(server, flush, force).orElse(null);
-            if (requested == null) {
-                liveSaveGate.observeExitSave(
-                        server,
-                        flush,
-                        force);
-            }
-        }
-        if (requested != null) {
-            captureAndDispatch(requested);
-        }
-    }
-
-    private void serverStopped(MinecraftServer server) {
-        LiveBackupSaveGate.StopResult<PendingLiveBackup> stopped;
-        boolean shutdownAfterServer;
-        synchronized (lifecycleLock) {
-            if (activeServer != server
-                    && stoppingServer != server
-                    && !liveSaveGate.ownedBy(server)) {
-                return;
-            }
-            stopped = liveSaveGate.stop(server);
-            if (activeServer == server) {
-                activeServer = null;
-                liveWorld = null;
-                scheduleState = null;
-                liveWorldRevision++;
-            }
-            if (stoppingServer == server) {
-                stoppingServer = null;
-            }
-            shutdownAfterServer = clientStopping
-                    && activeServer == null
-                    && stoppingServer == null;
-        }
-        switch (stopped.kind()) {
-            case NONE -> { }
-            case REQUEST_ABANDONED -> stopped.value().orElseThrow().fail(
-                    new IllegalStateException("The server stopped before the pending save completed"));
-            case EXIT_MISSING_SAVE -> stopped.value().orElseThrow().fail(
-                    new IllegalStateException("The server stopped before its final save completed"));
-            case EXIT_READY -> {
-                enqueueWorldExitNotice(BackgroundBackupWarnings.worldExitStartedNotice());
-                captureAndDispatch(stopped.value().orElseThrow());
-            }
-            default -> throw new IllegalStateException("Unknown live-save stop outcome");
-        }
-        if (shutdownAfterServer) {
-            shutdown();
-        }
-    }
-
-    private void clientStopping(Minecraft ignored) {
-        boolean noIntegratedServer;
-        synchronized (lifecycleLock) {
-            clientStopping = true;
-            noIntegratedServer = activeServer == null && stoppingServer == null;
-        }
-        if (noIntegratedServer) {
-            shutdown();
-        }
-    }
-
-    private void clientTick(Minecraft ignored) {
-        showRetainedBackgroundWarning();
-        RuntimeState state = stateRegistry.currentOrNull();
-        if (closed.get() || state == null || !state.config().triggers().scheduledEnabled()) {
-            return;
-        }
-        ScheduleState scheduled;
-        BackupWorldContext world;
-        IntegratedServer server;
-        synchronized (lifecycleLock) {
-            scheduled = scheduleState;
-            world = liveWorld;
-            server = activeServer;
-            if (scheduled == null
-                    || scheduled.state() != state
-                    || world == null
-                    || server == null
-                    || !scheduled.worldId().equals(world.worldId())
-                    || scheduled.schedule().poll(clock.instant()).isEmpty()) {
-                return;
-            }
-            if (liveSaveGate.hasPending()) {
-                return;
-            }
-        }
-        withBackupPermit(() -> {
-            if (stateRegistry.currentOrNull() != state
-                    || busyAcrossStates(world.worldId())) {
-                return failedStage("Scheduled backup configuration changed before capture");
-            }
-            Optional<String> storageIssue = storageIssue(state);
-            if (storageIssue.isPresent()) {
-                return failedStage(storageIssue.orElseThrow());
-            }
-            CreateBackupRequest request = request(
-                    world,
-                    Optional.empty(),
-                    BackupTrigger.SCHEDULED);
-            if (!state.enabledDestinations(request)) {
-                return failedStage("Scheduled backups are disabled for this world");
-            }
-            return queueRequestedSave(state, server, request, ProgressListener.NO_OP);
-        })
-                .whenComplete(this::observeScheduledResult);
-    }
-
-    private CompletionStage<BackupResult> queueRequestedSave(
-            RuntimeState state,
-            IntegratedServer server,
-            CreateBackupRequest request,
-            ProgressListener progressListener) {
-        if (closed.get()) {
-            return failedStage("WorldArchive is shutting down");
-        }
-        PendingLiveBackup pending = new PendingLiveBackup(
-                state,
-                server,
-                request,
-                progressListener,
-                new CompletableFuture<>());
-        synchronized (lifecycleLock) {
-            if (activeServer != server || stoppingServer == server) {
-                return failedStage("The integrated world is closing");
-            }
-            if (liveSaveGate.hasPending()) {
-                return failedStage("Another world save is already pending");
-            }
-            if (!liveSaveGate.queueRequested(server, pending)) {
-                return failedStage("Another world save is already pending");
-            }
-        }
-        try {
-            server.execute(() -> invokeRequestedSave(pending));
-        } catch (RejectedExecutionException exception) {
-            clearAndFailPending(pending, "The integrated server rejected the backup save");
-        }
-        return pending.result().minimalCompletionStage();
-    }
-
-    private void invokeRequestedSave(PendingLiveBackup pending) {
-        synchronized (lifecycleLock) {
-            if (liveSaveGate.pending().orElse(null) != pending
-                    || stoppingServer == pending.server()) {
-                return;
-            }
-            if (!liveSaveGate.armRequested(pending.server(), pending)) {
-                return;
-            }
-        }
-        try {
-            pending.server().saveEverything(false, true, true);
-        } catch (RuntimeException exception) {
-            clearAndFailPending(pending, "The integrated world could not be saved");
-            logFailure("Requested world save failed", exception);
-        } finally {
-            synchronized (lifecycleLock) {
-                if (liveSaveGate.clear(pending.server(), pending).isPresent()) {
-                    pending.fail(new IllegalStateException(
-                            "The requested save produced no matching capture event"));
-                }
-            }
-        }
-    }
-
-    private void captureAndDispatch(PendingLiveBackup pending) {
-        PreparedBackup prepared;
-        try {
-            CaptureProgressListener captureProgress = (completed, total) -> pending.state()
-                    .coordinator()
-                    .currentOperation(pending.request().worldId())
-                    .ifPresent(progress -> notifyProgress(pending.progressListener(), progress));
-            prepared = pending.state().coordinator().prepareCapture(
-                    pending.request(),
-                    captureProgress);
-        } catch (IOException | InterruptedException | RuntimeException | Error exception) {
-            if (exception instanceof InterruptedException) {
-                Thread.currentThread().interrupt();
-            }
-            pending.fail(safeFailure(
-                    exception,
-                    "World capture could not be prepared"));
-            if (exception instanceof Error error) {
-                throw error;
-            }
-            return;
-        }
-
-        CompletionStage<BackupResult> operation;
-        try {
-            operation = pending.state().coordinator().createPreparedBackup(
-                    prepared,
-                    pending.progressListener());
-        } catch (RuntimeException | Error exception) {
-            try {
-                prepared.close();
-            } catch (IOException closeFailure) {
-                exception.addSuppressed(closeFailure);
-            }
-            pending.fail(safeFailure(
-                    exception,
-                    "Prepared backup could not be started"));
-            if (exception instanceof Error error) {
-                throw error;
-            }
-            return;
-        }
-        operation.whenComplete((result, throwable) -> {
-            if (throwable != null) {
-                pending.fail(throwable);
-            } else if (result == null) {
-                pending.fail(
-                        new IllegalStateException("Backup completed without a result"));
-            } else {
-                pending.succeed(result);
-            }
-        });
-    }
-
-    private Optional<BackupWorldContext> resolveWorldBlocking(
+    Optional<BackupWorldContext> resolveWorldBlocking(
             BackupWorldSelection selection) throws IOException {
         Path realWorld = selection.worldDirectory().toRealPath();
         if (!realWorld.equals(selection.worldDirectory())) {
@@ -1138,84 +614,15 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         return Optional.of(new BackupWorldContext(worldId, selection));
     }
 
-    private static BackupWorldSelection selectionFor(IntegratedServer server) {
-        Path worldDirectory = server.getWorldPath(LevelResource.ROOT)
-                .toAbsolutePath()
-                .normalize();
-        Path worldsDirectory = worldDirectory.getParent();
-        Path fileName = worldDirectory.getFileName();
-        if (worldsDirectory == null || fileName == null) {
-            throw new IllegalStateException("Integrated world path has no storage parent");
-        }
-        return new BackupWorldSelection(
-                worldDirectory,
-                worldsDirectory,
-                fileName.toString(),
-                server.getWorldData().getLevelName());
-    }
-
-    private void reconcileWorldPathsAndSchedule(RuntimeState state) {
-        synchronized (lifecycleLock) {
-            for (WorldConfig configured : state.config().worlds()) {
-                worldPaths.configure(configured.worldId(), configured.path());
-            }
-            if (liveWorld != null
-                    && !matchesKnownWorld(
-                            liveWorld.worldId(),
-                            liveWorld.worldDirectory(),
-                            state.config())) {
-                liveWorld = null;
-                liveWorldRevision++;
-            }
-            resetScheduleLocked(state, liveWorld);
-        }
-    }
-
-    private void resetScheduleLocked(
-            RuntimeState state,
-            BackupWorldContext world) {
-        if (state == null || world == null || activeServer == null) {
-            scheduleState = null;
-            return;
-        }
-        scheduleState = new ScheduleState(
-                state,
-                world.worldId(),
-                NoCatchUpSchedule.minutes(
-                        state.config().triggers().scheduleIntervalMinutes(),
-                        clock.instant()));
-    }
-
-    private BackupWorldContext liveWorldFor(IntegratedServer server) {
-        synchronized (lifecycleLock) {
-            return activeServer == server ? liveWorld : null;
-        }
-    }
-
-    private LiveMatch liveMatch(BackupWorldContext world) {
-        synchronized (lifecycleLock) {
-            if (activeServer == null
-                    || liveWorld == null
-                    || !liveWorld.worldId().equals(world.worldId())
-                    || !liveWorld.worldDirectory().equals(world.worldDirectory())) {
-                return null;
-            }
-            return new LiveMatch(activeServer);
-        }
-    }
-
-    private boolean busyAcrossStates(WorldId worldId) {
-        synchronized (lifecycleLock) {
-            PendingLiveBackup pending = liveSaveGate.pending().orElse(null);
-            if (pending != null && pending.request().worldId().equals(worldId)) {
-                return true;
-            }
+    boolean busyAcrossStates(WorldId worldId) {
+        if (lifecycle.hasPending(worldId)) {
+            return true;
         }
         return stateRegistry.retained().stream()
                 .anyMatch(state -> state.coordinator().isBusy(worldId));
     }
 
-    private static CreateBackupRequest request(
+    static CreateBackupRequest request(
             BackupWorldContext world,
             Optional<String> label,
             BackupTrigger trigger) {
@@ -1227,7 +634,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
                 trigger);
     }
 
-    private boolean registerWorldPath(
+    boolean registerWorldPath(
             WorldId worldId,
             Path worldDirectory,
             RuntimeState state) {
@@ -1238,7 +645,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         return worldPaths.isRegistered(worldId, world);
     }
 
-    private boolean matchesKnownWorld(
+    boolean matchesKnownWorld(
             WorldId worldId,
             Path worldDirectory,
             WorldArchiveConfig config) {
@@ -1283,7 +690,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         }
     }
 
-    private boolean registerDiscoveredWorldPathHeld(
+    boolean registerDiscoveredWorldPathHeld(
             WorldId worldId,
             Path world,
             RuntimeState state) {
@@ -1337,7 +744,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         }
     }
 
-    private Optional<String> storageIssue(RuntimeState state) {
+    Optional<String> storageIssue(RuntimeState state) {
         Optional<String> issue = RuntimeStorageSafety.issue(
                 state.config(), worldPaths.snapshotPaths());
         if (stateRegistry.currentOrNull() == state) {
@@ -1346,158 +753,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         return issue;
     }
 
-    private Path managedPath(
-            RuntimeState state,
-            BackupWorldContext world,
-            Optional<BackupRow> selected) {
-        if (selected.isPresent() && selected.orElseThrow().zip().durable()) {
-            return state.storagePaths().zipDirectory().resolve(world.worldId().toString());
-        }
-        if (selected.isPresent() && selected.orElseThrow().git().durable()) {
-            return state.gitBackend().repositoryFor(world.worldId());
-        }
-        if (state.config().zip().enabled()) {
-            return state.storagePaths().zipDirectory();
-        }
-        return state.gitBackend().repositoryFor(world.worldId());
-    }
-
-    private Optional<String> validatedRestoredStorageName(RestoreBackupResult result) {
-        try {
-            Path restored = result.restoredWorldDirectory().toAbsolutePath().normalize();
-            Path base = minecraft.getLevelSource().getBaseDir().toAbsolutePath().normalize();
-            Path fileName = restored.getFileName();
-            if (fileName == null
-                    || !base.equals(restored.getParent())
-                    || !Files.isDirectory(restored, LinkOption.NOFOLLOW_LINKS)) {
-                logFailure(
-                        "Restored world path could not be validated",
-                        new IOException("Restored world is outside the active saves directory"));
-                return Optional.empty();
-            }
-            return Optional.of(fileName.toString());
-        } catch (SecurityException exception) {
-            logFailure("Restored world path could not be validated", exception);
-            return Optional.empty();
-        }
-    }
-
-    private void openBrowserForBackup(BackupId backupId, CommandAction action) {
-        Objects.requireNonNull(backupId, "backupId");
-        Objects.requireNonNull(action, "action");
-        RuntimeState state = stateRegistry.currentOrNull();
-        if (state == null || closed.get()) {
-            return;
-        }
-        state.coordinator().findBackup(backupId).whenComplete((record, throwable) -> {
-            if (throwable != null || record == null || record.isEmpty()) {
-                if (throwable != null) {
-                    logFailure(action + " target could not be loaded", throwable);
-                }
-                return;
-            }
-            contextForRecord(state, record.orElseThrow()).whenComplete((context, contextFailure) -> {
-                if (contextFailure != null || context == null || context.isEmpty()) {
-                    if (contextFailure != null) {
-                        logFailure(action + " world could not be resolved", contextFailure);
-                    }
-                    return;
-                }
-                minecraft.execute(() -> {
-                    if (!closed.get()) {
-                        PauseScreen parent = new PauseScreen(true);
-                        BackupBrowserScreen browser = switch (action) {
-                            case RESTORE -> BackupBrowserScreen.forRestore(
-                                    parent,
-                                    context.orElseThrow(),
-                                    this,
-                                    backupId);
-                            case DELETE -> BackupBrowserScreen.forDelete(
-                                    parent,
-                                    context.orElseThrow(),
-                                    this,
-                                    backupId);
-                        };
-                        minecraft.setScreenAndShow(browser);
-                    }
-                });
-            });
-        });
-    }
-
-    private CompletionStage<Optional<BackupWorldContext>> contextForRecord(
-            RuntimeState state,
-            BackupRecord record) {
-        BackupWorldContext missingSource = missingSourceContext(record);
-        BackupWorldContext active;
-        synchronized (lifecycleLock) {
-            active = liveWorld;
-        }
-        if (active != null && active.worldId().equals(record.manifest().worldId())) {
-            return CompletableFuture.completedFuture(Optional.of(active));
-        }
-        Optional<WorldConfig> configured = state.config().worlds().stream()
-                .filter(world -> world.worldId().equals(record.manifest().worldId()))
-                .findFirst();
-        if (configured.isEmpty()) {
-            return CompletableFuture.completedFuture(Optional.of(missingSource));
-        }
-        Path path = configured.orElseThrow().path();
-        Path parent = path.getParent();
-        Path fileName = path.getFileName();
-        if (parent == null || fileName == null) {
-            return CompletableFuture.completedFuture(Optional.of(missingSource));
-        }
-        try {
-            return resolveWorld(new BackupWorldSelection(
-                    path,
-                    parent,
-                    fileName.toString(),
-                    record.manifest().worldName()))
-                    .handle((resolved, throwable) -> resolved != null && resolved.isPresent()
-                            ? resolved
-                            : Optional.of(missingSource));
-        } catch (IllegalArgumentException exception) {
-            return CompletableFuture.completedFuture(Optional.of(missingSource));
-        }
-    }
-
-    private BackupWorldContext missingSourceContext(BackupRecord record) {
-        Path worldsDirectory = minecraft.getLevelSource().getBaseDir()
-                .toAbsolutePath()
-                .normalize();
-        String storageName = ".worldarchive-missing-" + record.manifest().worldId();
-        BackupWorldContext context = new BackupWorldContext(
-                record.manifest().worldId(),
-                worldsDirectory.resolve(storageName),
-                worldsDirectory,
-                storageName,
-                record.manifest().worldName());
-        return actionContexts.markActionOnly(context);
-    }
-
-    private boolean sourceDirectoryAvailable(BackupWorldContext world) {
-        if (!actionContexts.sourceActionsAllowed(world)) {
-            return false;
-        }
-        try {
-            return Files.isDirectory(world.worldDirectory(), LinkOption.NOFOLLOW_LINKS)
-                    && Files.isRegularFile(
-                            world.worldDirectory().resolve("level.dat"),
-                            LinkOption.NOFOLLOW_LINKS);
-        } catch (SecurityException exception) {
-            return false;
-        }
-    }
-
-    private void clearAndFailPending(PendingLiveBackup pending, String message) {
-        synchronized (lifecycleLock) {
-            liveSaveGate.clear(pending.server(), pending);
-        }
-        pending.fail(new IllegalStateException(message));
-    }
-
-    private void trackExit(CompletableFuture<BackupResult> result) {
+    void trackExit(CompletableFuture<BackupResult> result) {
         exitWork.add(result);
         result.whenComplete((value, throwable) -> {
             observeExitResult(value, throwable);
@@ -1505,7 +761,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         });
     }
 
-    private void observeScheduledResult(BackupResult result, Throwable throwable) {
+    void observeScheduledResult(BackupResult result, Throwable throwable) {
         Optional<String> warning = BackgroundBackupWarnings.scheduled(result, throwable);
         if (warning.isEmpty()) {
             backgroundWarning.set(Optional.empty());
@@ -1521,7 +777,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         }
     }
 
-    private void observeExitResult(BackupResult result, Throwable throwable) {
+    void observeExitResult(BackupResult result, Throwable throwable) {
         if (throwable != null) {
             logFailure("World-exit backup did not complete", throwable);
         } else if (result == null) {
@@ -1543,7 +799,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         enqueueWorldExitNotice(notice);
     }
 
-    private void showRetainedBackgroundWarning() {
+    void showRetainedBackgroundWarning() {
         if (closed.get()) {
             return;
         }
@@ -1580,7 +836,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
                 Component.literal(notice.message()).withStyle(color));
     }
 
-    private void enqueueWorldExitNotice(BackgroundBackupWarnings.ExitNotice notice) {
+    void enqueueWorldExitNotice(BackgroundBackupWarnings.ExitNotice notice) {
         if (closed.get()) {
             return;
         }
@@ -1591,7 +847,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         });
     }
 
-    private RuntimeState requireCurrentState() {
+    RuntimeState requireCurrentState() {
         RuntimeState state = stateRegistry.currentOrNull();
         if (state == null || closed.get()) {
             throw new IllegalStateException("WorldArchive is still loading");
@@ -1599,11 +855,11 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         return state;
     }
 
-    private boolean unavailable() {
+    boolean unavailable() {
         return closed.get() || stateRegistry.currentOrNull() == null;
     }
 
-    private <T> CompletionStage<T> withBackupPermit(
+    <T> CompletionStage<T> withBackupPermit(
             Supplier<CompletionStage<T>> operation) {
         RuntimeConfigurationGate.Permit permit = configurationGate.enterBackup();
         try {
@@ -1618,7 +874,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         }
     }
 
-    private <T> CompletionStage<T> submit(Callable<T> operation) {
+    <T> CompletionStage<T> submit(Callable<T> operation) {
         if (closed.get()) {
             return failedStage("WorldArchive is shutting down");
         }
@@ -1637,11 +893,11 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         return result;
     }
 
-    private static <T> CompletionStage<T> failedStage(String message) {
+    static <T> CompletionStage<T> failedStage(String message) {
         return CompletableFuture.failedFuture(new IllegalStateException(message));
     }
 
-    private static void notifyProgress(
+    static void notifyProgress(
             ProgressListener listener,
             OperationProgress progress) {
         try {
@@ -1651,12 +907,12 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         }
     }
 
-    private static RuntimeException safeFailure(Throwable throwable, String fallback) {
+    static RuntimeException safeFailure(Throwable throwable, String fallback) {
         String message = safeMessage(throwable, fallback);
         return new CompletionException(message, throwable);
     }
 
-    private void logFailure(String fallback, Throwable throwable) {
+    void logFailure(String fallback, Throwable throwable) {
         LOGGER.warn("{}: {}", fallback, safeMessage(throwable, fallback));
     }
 
@@ -1679,302 +935,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         return redacted.length() <= 512 ? redacted : redacted.substring(0, 512);
     }
 
-    private final class RuntimeCoordinator implements BackupCoordinator {
-        @Override
-        public PreparedBackup prepareCapture(
-                CreateBackupRequest request,
-                CaptureProgressListener progressListener)
-                throws IOException, InterruptedException {
-            RuntimeConfigurationGate.Permit permit = configurationGate.enterBackup();
-            boolean transferred = false;
-            try {
-                RuntimeState state = stateRegistry.currentOrNull();
-                if (state == null || closed.get()) {
-                    throw new IOException("WorldArchive is still loading");
-                }
-                if (!registerWorldPath(request.worldId(), request.worldDirectory(), state)) {
-                    throw new IOException("The world identity is registered to a different folder");
-                }
-                Optional<String> storageIssue = storageIssue(state);
-                if (storageIssue.isPresent()) {
-                    throw new IOException(storageIssue.orElseThrow());
-                }
-                PreparedBackup prepared = state.coordinator().prepareCapture(
-                        request,
-                        progressListener);
-                PreparedOwnership ownership = new PreparedOwnership(state, permit);
-                if (externallyPrepared.putIfAbsent(prepared, ownership) != null) {
-                    prepared.close();
-                    throw new IOException("Prepared capture is already registered");
-                }
-                try {
-                    prepared.addReleaseObserver(
-                            () -> releaseAbandonedPrepared(prepared, ownership));
-                } catch (RuntimeException | Error exception) {
-                    externallyPrepared.remove(prepared, ownership);
-                    try {
-                        prepared.close();
-                    } catch (IOException closeFailure) {
-                        exception.addSuppressed(closeFailure);
-                    }
-                    throw exception;
-                }
-                transferred = true;
-                return prepared;
-            } finally {
-                if (!transferred) {
-                    permit.close();
-                }
-            }
-        }
-
-        private void releaseAbandonedPrepared(
-                PreparedBackup prepared,
-                PreparedOwnership ownership) {
-            if (externallyPrepared.remove(prepared, ownership)) {
-                ownership.permit().close();
-            }
-        }
-
-        @Override
-        public CompletionStage<BackupResult> createPreparedBackup(
-                PreparedBackup preparedBackup,
-                ProgressListener progressListener) {
-            Objects.requireNonNull(preparedBackup, "preparedBackup");
-            Objects.requireNonNull(progressListener, "progressListener");
-            PreparedOwnership ownership = externallyPrepared.remove(preparedBackup);
-            if (ownership == null) {
-                return failedStage("Prepared capture does not belong to this runtime");
-            }
-            Optional<String> storageIssue = storageIssue(ownership.state());
-            if (storageIssue.isPresent()) {
-                try {
-                    preparedBackup.close();
-                } catch (IOException exception) {
-                    ownership.permit().close();
-                    return CompletableFuture.failedFuture(exception);
-                }
-                ownership.permit().close();
-                return failedStage(storageIssue.orElseThrow());
-            }
-            try {
-                CompletionStage<BackupResult> stage = ownership.state()
-                        .coordinator()
-                        .createPreparedBackup(preparedBackup, progressListener);
-                stage.whenComplete((ignored, throwable) -> ownership.permit().close());
-                return stage;
-            } catch (RuntimeException | Error exception) {
-                ownership.permit().close();
-                throw exception;
-            }
-        }
-
-        @Override
-        public CompletionStage<BackupResult> createBackup(
-                CreateBackupRequest request,
-                ProgressListener progressListener) {
-            return withBackupPermit(() -> {
-                RuntimeState state = stateRegistry.currentOrNull();
-                if (state == null || closed.get()) {
-                    return failedStage("WorldArchive is still loading");
-                }
-                if (!registerWorldPath(request.worldId(), request.worldDirectory(), state)) {
-                    return failedStage("The world identity is registered to a different folder");
-                }
-                Optional<String> storageIssue = storageIssue(state);
-                if (storageIssue.isPresent()) {
-                    return failedStage(storageIssue.orElseThrow());
-                }
-                return state.coordinator().createBackup(request, progressListener);
-            });
-        }
-
-        @Override
-        public Optional<OperationProgress> currentOperation(WorldId worldId) {
-            Objects.requireNonNull(worldId, "worldId");
-            if (closed.get()) {
-                return Optional.empty();
-            }
-            RuntimeState current = stateRegistry.currentOrNull();
-            if (current != null) {
-                Optional<OperationProgress> active = current.coordinator().currentOperation(worldId);
-                if (active.isPresent()) {
-                    return active;
-                }
-            }
-            return stateRegistry.retained().stream()
-                    .filter(state -> state != current)
-                    .map(state -> state.coordinator().currentOperation(worldId))
-                    .flatMap(Optional::stream)
-                    .findFirst();
-        }
-
-        @Override
-        public CompletionStage<List<BackupRecord>> listBackups(Optional<WorldId> worldId) {
-            RuntimeState state = stateRegistry.currentOrNull();
-            return state == null || closed.get()
-                    ? failedStage("WorldArchive is still loading")
-                    : state.coordinator().listBackups(worldId);
-        }
-
-        @Override
-        public CompletionStage<Optional<BackupRecord>> findBackup(BackupId backupId) {
-            RuntimeState state = stateRegistry.currentOrNull();
-            return state == null || closed.get()
-                    ? failedStage("WorldArchive is still loading")
-                    : state.coordinator().findBackup(backupId);
-        }
-
-        @Override
-        public CompletionStage<RestoreBackupResult> restoreBackup(
-                RestoreBackupRequest request,
-                ProgressListener progressListener) {
-            RuntimeConfigurationGate.Permit operationPermit = configurationGate.enterBackup();
-            RuntimeState state = stateRegistry.currentOrNull();
-            if (state == null || closed.get()) {
-                operationPermit.close();
-                return failedStage("WorldArchive is still loading");
-            }
-            Optional<String> storageIssue = storageIssue(state);
-            if (storageIssue.isPresent()) {
-                operationPermit.close();
-                return failedStage(storageIssue.orElseThrow());
-            }
-            CompletionStage<RestoreBackupResult> operation;
-            try {
-                operation = state.coordinator().restoreBackup(request, progressListener);
-            } catch (RuntimeException | Error exception) {
-                operationPermit.close();
-                throw exception;
-            }
-            CompletableFuture<RestoreBackupResult> completion = new CompletableFuture<>();
-            operation.whenComplete((result, throwable) -> {
-                if (throwable != null || result == null) {
-                    operationPermit.close();
-                    completion.completeExceptionally(throwable == null
-                            ? new IllegalStateException("Restore completed without a result")
-                            : throwable);
-                    return;
-                }
-                RuntimeConfigurationGate.Permit registrationPermit = null;
-                Throwable registrationFailure = null;
-                try {
-                    registrationPermit = configurationGate
-                            .transitionBackupToConfigurationChange(operationPermit);
-                    Path restored = result.restoredWorldDirectory()
-                            .toAbsolutePath()
-                            .normalize();
-                    if (!registerDiscoveredWorldPathHeld(
-                            result.restoredWorldId(), restored, stateRegistry.currentOrNull())) {
-                        throw new IllegalStateException(
-                                "The restored world identity is registered to another folder");
-                    }
-                } catch (RuntimeException | Error exception) {
-                    operationPermit.close();
-                    registrationFailure = exception;
-                } finally {
-                    if (registrationPermit != null) {
-                        registrationPermit.close();
-                    }
-                }
-                if (registrationFailure == null) {
-                    completion.complete(result);
-                } else {
-                    completion.completeExceptionally(registrationFailure);
-                }
-            });
-            return completion;
-        }
-
-        @Override
-        public CompletionStage<DeletePreparation> prepareDelete(BackupId backupId) {
-            RuntimeState state = stateRegistry.currentOrNull();
-            return state == null || closed.get()
-                    ? failedStage("WorldArchive is still loading")
-                    : state.coordinator().prepareDelete(backupId);
-        }
-
-        @Override
-        public CompletionStage<BackupResult> deleteBackup(
-                DeleteBackupRequest request,
-                ProgressListener progressListener) {
-            return withBackupPermit(() -> {
-                RuntimeState state = stateRegistry.currentOrNull();
-                if (state == null || closed.get()) {
-                    return failedStage("WorldArchive is still loading");
-                }
-                Optional<String> storageIssue = storageIssue(state);
-                return storageIssue.isPresent()
-                        ? failedStage(storageIssue.orElseThrow())
-                        : state.coordinator().deleteBackup(request, progressListener);
-            });
-        }
-
-        @Override
-        public CompletionStage<BackupResult> verifyBackup(
-                BackupId backupId,
-                ProgressListener progressListener) {
-            return withBackupPermit(() -> {
-                RuntimeState state = stateRegistry.currentOrNull();
-                if (state == null || closed.get()) {
-                    return failedStage("WorldArchive is still loading");
-                }
-                Optional<String> storageIssue = storageIssue(state);
-                return storageIssue.isPresent()
-                        ? failedStage(storageIssue.orElseThrow())
-                        : state.coordinator().verifyBackup(backupId, progressListener);
-            });
-        }
-
-        @Override
-        public CompletionStage<BackupResult> syncBackup(
-                BackupId backupId,
-                ProgressListener progressListener) {
-            return withBackupPermit(() -> {
-                RuntimeState state = stateRegistry.currentOrNull();
-                if (state == null || closed.get()) {
-                    return failedStage("WorldArchive is still loading");
-                }
-                Optional<String> storageIssue = storageIssue(state);
-                return storageIssue.isPresent()
-                        ? failedStage(storageIssue.orElseThrow())
-                        : state.coordinator().syncBackup(backupId, progressListener);
-            });
-        }
-
-        @Override
-        public CompletionStage<List<DestinationHealth>> health(Optional<WorldId> worldId) {
-            return withBackupPermit(() -> {
-                RuntimeState state = stateRegistry.currentOrNull();
-                if (state == null || closed.get()) {
-                    return failedStage("WorldArchive is still loading");
-                }
-                if (storageIssue(state).isPresent()) {
-                    return CompletableFuture.completedFuture(storageAwareHealth(
-                            state.config(), disabledHealth(state.config())));
-                }
-                if (!state.config().git().enabled() && !state.config().zip().enabled()) {
-                    return CompletableFuture.completedFuture(disabledHealth(state.config()));
-                }
-                return state.coordinator().health(worldId).thenApply(health -> {
-                    health.stream()
-                            .filter(item -> item.destination() == DestinationType.GIT)
-                            .findFirst()
-                            .ifPresent(item -> {
-                                if (item.status() == DestinationHealthStatus.HEALTHY) {
-                                    state.selector().gitToolsAvailable(true);
-                                } else if (item.status() == DestinationHealthStatus.TOOL_MISSING) {
-                                    state.selector().gitToolsAvailable(false);
-                                }
-                            });
-                    return storageAwareHealth(
-                            state.config(), configuredHealth(state.config(), health));
-                });
-            });
-        }
-    }
-
-    private List<DestinationHealth> storageAwareHealth(
+    List<DestinationHealth> storageAwareHealth(
             WorldArchiveConfig config,
             List<DestinationHealth> health) {
         Optional<String> issue = storageSafety.warning();
@@ -1997,7 +958,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
                 .toList();
     }
 
-    private List<DestinationHealth> configuredHealth(
+    List<DestinationHealth> configuredHealth(
             WorldArchiveConfig config,
             List<DestinationHealth> health) {
         List<DestinationHealth> configured = new ArrayList<>(health.size());
@@ -2016,125 +977,10 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         return List.copyOf(configured);
     }
 
-    private List<DestinationHealth> disabledHealth(WorldArchiveConfig config) {
+    List<DestinationHealth> disabledHealth(WorldArchiveConfig config) {
         return configuredHealth(config, List.of(
                 DestinationHealth.notChecked(DestinationType.GIT),
                 DestinationHealth.notChecked(DestinationType.ZIP)));
     }
 
-    private record PreparedOwnership(
-            RuntimeState state,
-            RuntimeConfigurationGate.Permit permit) {
-        private PreparedOwnership {
-            Objects.requireNonNull(state, "state");
-            Objects.requireNonNull(permit, "permit");
-        }
-    }
-
-    private record RuntimeState(
-            WorldArchiveConfig config,
-            RuntimeStoragePaths storagePaths,
-            WorldGitSnapshotStore gitBackend,
-            RuntimeDestinationSelector selector,
-            SerializedBackupCoordinator coordinator) {
-        private RuntimeState {
-            Objects.requireNonNull(config, "config");
-            Objects.requireNonNull(storagePaths, "storagePaths");
-            Objects.requireNonNull(gitBackend, "gitBackend");
-            Objects.requireNonNull(selector, "selector");
-            Objects.requireNonNull(coordinator, "coordinator");
-        }
-
-        private boolean enabledDestinations(CreateBackupRequest request) {
-            return !selector.select(request).isEmpty();
-        }
-
-        private void close() {
-            gitBackend.close();
-        }
-    }
-
-    private record ScheduleState(
-            RuntimeState state,
-            WorldId worldId,
-            NoCatchUpSchedule schedule) {
-        private ScheduleState {
-            Objects.requireNonNull(state, "state");
-            Objects.requireNonNull(worldId, "worldId");
-            Objects.requireNonNull(schedule, "schedule");
-        }
-    }
-
-    private static final class PendingLiveBackup {
-        private final RuntimeState state;
-
-        private final IntegratedServer server;
-
-        private final CreateBackupRequest request;
-
-        private final ProgressListener progressListener;
-
-        private final CompletableFuture<BackupResult> result;
-
-        private final CompletableFuture<Void> settled = new CompletableFuture<>();
-
-        private PendingLiveBackup(
-                RuntimeState state,
-                IntegratedServer server,
-                CreateBackupRequest request,
-                ProgressListener progressListener,
-                CompletableFuture<BackupResult> result) {
-            this.state = Objects.requireNonNull(state, "state");
-            this.server = Objects.requireNonNull(server, "server");
-            this.request = Objects.requireNonNull(request, "request");
-            this.progressListener = Objects.requireNonNull(progressListener, "progressListener");
-            this.result = Objects.requireNonNull(result, "result");
-        }
-
-        private RuntimeState state() {
-            return state;
-        }
-
-        private IntegratedServer server() {
-            return server;
-        }
-
-        private CreateBackupRequest request() {
-            return request;
-        }
-
-        private ProgressListener progressListener() {
-            return progressListener;
-        }
-
-        private CompletableFuture<BackupResult> result() {
-            return result;
-        }
-
-        private CompletableFuture<Void> settled() {
-            return settled;
-        }
-
-        private void succeed(BackupResult value) {
-            result.complete(value);
-            settled.complete(null);
-        }
-
-        private void fail(Throwable throwable) {
-            result.completeExceptionally(throwable);
-            settled.complete(null);
-        }
-
-    }
-
-    private record LiveMatch(IntegratedServer server) {
-        private LiveMatch {
-            Objects.requireNonNull(server, "server");
-        }
-    }
-
-    private enum CommandAction {
-        RESTORE,
-        DELETE
-    }
 }
