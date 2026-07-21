@@ -271,7 +271,7 @@ final class FileSystemBackupCaptureFactoryTest {
             assertThrows(java.util.concurrent.CancellationException.class, capture::get);
         } finally {
             release.countDown();
-            executor.shutdownNow();
+            executor.shutdown();
             assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
         }
         try (var entries = Files.list(captures)) {
