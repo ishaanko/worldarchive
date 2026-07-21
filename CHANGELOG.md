@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.2 (2026-07-20)
+
+### Changed
+
+- Refactor runtime lifecycle, navigation, recovery, and storage internals into
+  focused components without changing supported behavior or data formats.
+
+### Fixed
+
+- Stabilize private-capture cancellation coverage so test teardown does not
+  interrupt cleanup a second time.
+
 ## 0.1.1 (2026-07-18)
 
 ### Changed
