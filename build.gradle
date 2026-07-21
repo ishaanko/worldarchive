@@ -83,10 +83,11 @@ checkstyle {
 }
 
 tasks.named('jar') {
-    inputs.property 'projectName', project.name
+    def archiveProjectName = project.name
+    inputs.property 'projectName', archiveProjectName
 
     from('LICENSE') {
-        rename { "${it}_${project.name}" }
+        rename { "${it}_${archiveProjectName}" }
     }
 }
 

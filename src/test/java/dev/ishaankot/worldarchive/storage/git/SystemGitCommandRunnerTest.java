@@ -67,6 +67,46 @@ class SystemGitCommandRunnerTest {
     }
 
     @Test
+    void timeoutIncludesBlockedStandardInputWrite() {
+        GitCommand base = command(List.of("sleep", "10000"), Duration.ofMillis(100), 1_024, Set.of());
+        GitCommand command = new GitCommand(
+                base.arguments(),
+                base.workingDirectory(),
+                base.environment(),
+                new byte[2_000_000],
+                base.secrets(),
+                base.timeout(),
+                base.maximumOutputBytes());
+        long started = System.nanoTime();
+
+        assertThrows(GitCommandTimeoutException.class, () -> new SystemGitCommandRunner().run(command));
+
+        assertTrue(Duration.ofNanos(System.nanoTime() - started).compareTo(Duration.ofSeconds(3)) < 0);
+    }
+
+    @Test
+    void mandatoryNonInteractiveEnvironmentCannotBeOverridden() throws Exception {
+        GitCommand base = command(
+                List.of("environment", "GIT_TERMINAL_PROMPT"),
+                Duration.ofSeconds(10),
+                1_024,
+                Set.of());
+        GitCommand command = new GitCommand(
+                base.arguments(),
+                base.workingDirectory(),
+                Map.of("GIT_TERMINAL_PROMPT", "1"),
+                base.standardInput(),
+                base.secrets(),
+                base.timeout(),
+                base.maximumOutputBytes());
+
+        GitCommandResult result = new SystemGitCommandRunner().run(command);
+
+        assertTrue(result.successful());
+        assertEquals("0", result.standardOutput());
+    }
+
+    @Test
     void interruptionCancelsTheNativeProcess() throws Exception {
         GitCommand command = command(List.of("sleep", "10000"), Duration.ofSeconds(30), 1_024, Set.of());
         AtomicReference<Throwable> failure = new AtomicReference<>();
@@ -112,7 +152,7 @@ class SystemGitCommandRunnerTest {
         Path childPid = temporaryDirectory.resolve("quick-child.pid");
         GitCommand command = command(
                 List.of("spawn-inherited", childPid.toString(), "10000", "10"),
-                Duration.ofMillis(350),
+                Duration.ofSeconds(2),
                 1_024,
                 Set.of());
 
