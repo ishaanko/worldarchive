@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.3 (2026-07-21)
+
+### Fixed
+
+- Retry world discovery while a newly created world's `level.dat` is still
+  being published, so backup features become available without a restart.
+- Apply Git command timeouts to blocked standard-input writes as well as the
+  process itself.
+- Keep Git commands non-interactive even when a caller supplies conflicting
+  environment values.
+- Configure the release JAR's bundled license in a way that remains compatible
+  with Gradle 10.
+
 ## 0.1.2 (2026-07-20)
 
 ### Changed
