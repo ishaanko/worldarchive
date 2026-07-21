@@ -14,6 +14,7 @@ import dev.ishaankot.worldarchive.ui.BackupWorldSelection;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.Duration;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -29,6 +30,8 @@ import net.minecraft.world.level.storage.LevelResource;
 
 /** Owns integrated-server save gates, scheduling, and live-world lifecycle state. */
 final class RuntimeLifecycle {
+    private static final Duration WORLD_RESOLUTION_RETRY_DELAY = Duration.ofMillis(250);
+
     private final WorldArchiveRuntime runtime;
 
     private final Clock clock;
@@ -37,6 +40,9 @@ final class RuntimeLifecycle {
 
     private final LiveBackupSaveGate<MinecraftServer, PendingLiveBackup> saveGate =
             new LiveBackupSaveGate<>();
+
+    private final RetryGate<IntegratedServer> worldResolutionRetries =
+            new RetryGate<>(WORLD_RESOLUTION_RETRY_DELAY);
 
     private IntegratedServer activeServer;
 
@@ -67,17 +73,23 @@ final class RuntimeLifecycle {
     void ensureLiveWorldResolution() {
         IntegratedServer server;
         long revision;
+        RetryGate.Attempt<IntegratedServer> attempt;
         synchronized (lock) {
             if (runtime.isClosed() || activeServer == null || liveWorld != null) {
                 return;
             }
             server = activeServer;
-            revision = ++liveWorldRevision;
+            attempt = worldResolutionRetries.tryStart(server, System.nanoTime()).orElse(null);
+            if (attempt == null) {
+                return;
+            }
+            revision = liveWorldRevision;
         }
         final BackupWorldSelection selection;
         try {
             selection = selectionFor(server);
         } catch (RuntimeException exception) {
+            worldResolutionRetries.complete(attempt);
             runtime.logFailure("Integrated world path could not be resolved", exception);
             return;
         }
@@ -85,6 +97,7 @@ final class RuntimeLifecycle {
                 .whenComplete((resolved, throwable) -> completeWorldResolution(
                         server,
                         revision,
+                        attempt,
                         resolved,
                         throwable));
     }
@@ -117,6 +130,7 @@ final class RuntimeLifecycle {
             activeServer = null;
             stoppingServer = null;
             clientStopping = false;
+            worldResolutionRetries.reset();
             liveWorldRevision++;
         }
         if (abandoned != null) {
@@ -196,6 +210,7 @@ final class RuntimeLifecycle {
             stoppingServer = null;
             liveWorld = null;
             scheduleState = null;
+            worldResolutionRetries.reset();
             liveWorldRevision++;
         }
         ensureLiveWorldResolution();
@@ -304,6 +319,7 @@ final class RuntimeLifecycle {
     }
 
     private void afterSave(MinecraftServer server, boolean flush, boolean force) {
+        ensureLiveWorldResolution();
         PendingLiveBackup requested;
         synchronized (lock) {
             requested = saveGate.observeRequestedSave(server, flush, force).orElse(null);
@@ -330,6 +346,7 @@ final class RuntimeLifecycle {
                 activeServer = null;
                 liveWorld = null;
                 scheduleState = null;
+                worldResolutionRetries.reset();
                 liveWorldRevision++;
             }
             if (stoppingServer == server) {
@@ -377,6 +394,7 @@ final class RuntimeLifecycle {
     }
 
     private void clientTick(Minecraft ignored) {
+        ensureLiveWorldResolution();
         runtime.showRetainedBackgroundWarning();
         RuntimeState state = runtime.states().currentOrNull();
         if (runtime.isClosed()
@@ -533,16 +551,18 @@ final class RuntimeLifecycle {
     private void completeWorldResolution(
             IntegratedServer server,
             long revision,
+            RetryGate.Attempt<IntegratedServer> attempt,
             Optional<BackupWorldContext> resolved,
             Throwable throwable) {
         if (throwable != null) {
             runtime.logFailure("Integrated world identity could not be resolved", throwable);
-            return;
         }
         synchronized (lock) {
-            if (runtime.isClosed()
+            if (!worldResolutionRetries.complete(attempt)
+                    || runtime.isClosed()
                     || activeServer != server
                     || liveWorldRevision != revision
+                    || throwable != null
                     || resolved.isEmpty()) {
                 return;
             }

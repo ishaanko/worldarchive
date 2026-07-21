@@ -15,6 +15,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -58,12 +59,12 @@ public final class SystemGitCommandRunner implements GitCommandRunner {
         builder.directory(command.workingDirectory().toFile());
         builder.redirectErrorStream(false);
         Map<String, String> environment = builder.environment();
+        environment.putAll(command.environment());
         environment.put("GIT_TERMINAL_PROMPT", "0");
         environment.put("GCM_INTERACTIVE", "Never");
         environment.put("GIT_ASKPASS", "");
         environment.put("SSH_ASKPASS", "");
         environment.put("GIT_LFS_FORCE_PROGRESS", "0");
-        environment.putAll(command.environment());
 
         Process process;
         try {
@@ -78,6 +79,15 @@ public final class SystemGitCommandRunner implements GitCommandRunner {
                 () -> output.read(process.getInputStream()));
         Thread errorReader = Thread.ofVirtual().name("worldarchive-git-stderr").start(
                 () -> error.read(process.getErrorStream()));
+        AtomicReference<IOException> inputFailure = new AtomicReference<>();
+        byte[] standardInput = command.standardInput();
+        Thread inputWriter = Thread.ofVirtual().name("worldarchive-git-stdin").start(() -> {
+            try (var input = process.getOutputStream()) {
+                input.write(standardInput);
+            } catch (IOException exception) {
+                inputFailure.set(exception);
+            }
+        });
         Set<ProcessHandle> observedDescendants = ConcurrentHashMap.newKeySet();
         AtomicBoolean observeDescendants = new AtomicBoolean(true);
         Thread descendantObserver = Thread.ofVirtual().name("worldarchive-git-descendants").start(() -> {
@@ -94,32 +104,34 @@ public final class SystemGitCommandRunner implements GitCommandRunner {
         });
 
         try {
-            try (var input = process.getOutputStream()) {
-                input.write(command.standardInput());
-            }
-            if (!waitForExit(process, observedDescendants, deadlineNanos)
-                    || !joinReadersUntil(
+            if (!waitForExit(process, observedDescendants, inputFailure, deadlineNanos)
+                    || !joinCommunicationsUntil(
                             process,
                             observedDescendants,
+                            inputWriter,
                             outputReader,
                             errorReader,
                             deadlineNanos)) {
                 terminate(process, observedDescendants);
                 closeProcessStreams(process);
-                joinReadersAfterTermination(outputReader, errorReader);
+                joinCommunicationsAfterTermination(inputWriter, outputReader, errorReader);
                 throw new GitCommandTimeoutException(command.timeout());
+            }
+            if (inputFailure.get() != null) {
+                throw new IOException("Unable to write Git process input", inputFailure.get());
             }
         } catch (InterruptedException exception) {
             terminate(process, observedDescendants);
             closeProcessStreams(process);
+            inputWriter.interrupt();
             outputReader.interrupt();
             errorReader.interrupt();
-            joinReadersAfterTermination(outputReader, errorReader);
+            joinCommunicationsAfterTermination(inputWriter, outputReader, errorReader);
             throw exception;
         } catch (IOException exception) {
             terminate(process, observedDescendants);
             closeProcessStreams(process);
-            joinReadersAfterTermination(outputReader, errorReader);
+            joinCommunicationsAfterTermination(inputWriter, outputReader, errorReader);
             throw exception;
         } finally {
             observeDescendants.set(false);
@@ -147,8 +159,12 @@ public final class SystemGitCommandRunner implements GitCommandRunner {
     private static boolean waitForExit(
             Process process,
             Set<ProcessHandle> observedDescendants,
-            long deadlineNanos) throws InterruptedException {
+            AtomicReference<IOException> inputFailure,
+            long deadlineNanos) throws IOException, InterruptedException {
         while (true) {
+            if (inputFailure.get() != null) {
+                throw new IOException("Unable to write Git process input", inputFailure.get());
+            }
             observeDescendants(process, observedDescendants);
             if (!process.isAlive()) {
                 return true;
@@ -164,13 +180,14 @@ public final class SystemGitCommandRunner implements GitCommandRunner {
         }
     }
 
-    private static boolean joinReadersUntil(
+    private static boolean joinCommunicationsUntil(
             Process process,
             Set<ProcessHandle> observedDescendants,
+            Thread inputWriter,
             Thread outputReader,
             Thread errorReader,
             long deadlineNanos) throws InterruptedException {
-        while (outputReader.isAlive() || errorReader.isAlive()) {
+        while (inputWriter.isAlive() || outputReader.isAlive() || errorReader.isAlive()) {
             observeDescendants(process, observedDescendants);
             long remaining = deadlineNanos - System.nanoTime();
             if (remaining <= 0) {
@@ -179,6 +196,7 @@ public final class SystemGitCommandRunner implements GitCommandRunner {
             long waitMillis = Math.max(
                     1L,
                     Math.min(PROCESS_POLL_MILLIS, TimeUnit.NANOSECONDS.toMillis(remaining)));
+            inputWriter.join(waitMillis);
             outputReader.join(waitMillis);
             errorReader.join(waitMillis);
         }
@@ -253,11 +271,16 @@ public final class SystemGitCommandRunner implements GitCommandRunner {
         }
     }
 
-    private static void joinReadersAfterTermination(Thread outputReader, Thread errorReader) {
+    private static void joinCommunicationsAfterTermination(
+            Thread inputWriter,
+            Thread outputReader,
+            Thread errorReader) {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(TERMINATION_GRACE_MILLIS);
         boolean interrupted = false;
-        while ((outputReader.isAlive() || errorReader.isAlive()) && System.nanoTime() < deadline) {
+        while ((inputWriter.isAlive() || outputReader.isAlive() || errorReader.isAlive())
+                && System.nanoTime() < deadline) {
             try {
+                inputWriter.join(PROCESS_POLL_MILLIS);
                 outputReader.join(PROCESS_POLL_MILLIS);
                 errorReader.join(PROCESS_POLL_MILLIS);
             } catch (InterruptedException exception) {
@@ -265,6 +288,7 @@ public final class SystemGitCommandRunner implements GitCommandRunner {
                 break;
             }
         }
+        inputWriter.interrupt();
         outputReader.interrupt();
         errorReader.interrupt();
         if (interrupted) {

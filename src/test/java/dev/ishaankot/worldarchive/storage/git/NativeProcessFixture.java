@@ -12,6 +12,7 @@ public final class NativeProcessFixture {
     public static void main(String[] arguments) throws Exception {
         switch (arguments[0]) {
             case "output" -> System.out.print(arguments[1].repeat(Integer.parseInt(arguments[2])));
+            case "environment" -> System.out.print(System.getenv(arguments[1]));
             case "sleep" -> Thread.sleep(Long.parseLong(arguments[1]));
             case "spawn-inherited" -> spawnInherited(arguments);
             default -> throw new IllegalArgumentException("Unknown fixture operation");
