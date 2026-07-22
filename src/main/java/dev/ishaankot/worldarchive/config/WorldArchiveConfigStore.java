@@ -115,6 +115,9 @@ public final class WorldArchiveConfigStore {
             } else if (schemaVersion == 3) {
                 parsed = migrateVersionThree(root);
                 migrated = true;
+            } else if (schemaVersion == 4) {
+                parsed = migrateVersionFour(root);
+                migrated = true;
             } else {
                 parsed = parseCurrent(root);
                 migrated = false;
@@ -134,19 +137,12 @@ public final class WorldArchiveConfigStore {
         JsonObject destinations = requiredObject(root, "destinations");
         GitDestinationConfig git = parseCurrentGit(requiredObject(destinations, "git"));
         ZipDestinationConfig zip = parseCurrentZip(requiredObject(destinations, "zip"));
-        JsonArray worldsArray = requiredArray(root, "worlds");
-        List<WorldConfig> worlds = new ArrayList<>(worldsArray.size());
-        for (JsonElement element : worldsArray) {
-            if (!element.isJsonObject()) {
-                throw new ConfigurationException("Per-world configuration must be an object");
-            }
-            JsonObject world = element.getAsJsonObject();
-            worlds.add(new WorldConfig(
-                    WorldId.parse(requiredString(world, "worldId")),
-                    requiredBoolean(world, "enabled"),
-                    requiredPath(world, "path")));
-        }
-        return new WorldArchiveConfig(WorldArchiveConfig.CURRENT_SCHEMA_VERSION, triggers, git, zip, worlds);
+        return new WorldArchiveConfig(
+                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
+                triggers,
+                git,
+                zip,
+                parseWorlds(requiredArray(root, "worlds")));
     }
 
     private WorldArchiveConfig migrateVersionOne(JsonObject root) throws IOException {
@@ -211,6 +207,44 @@ public final class WorldArchiveConfigStore {
                 parseWorlds(requiredArray(root, "worlds")));
     }
 
+    /** Moves the schema-4 global URL template onto the worlds that it previously covered. */
+    private WorldArchiveConfig migrateVersionFour(JsonObject root) throws IOException {
+        TriggerConfig triggers = parseGlobalTriggers(requiredObject(root, "triggers"));
+        JsonObject destinations = requiredObject(root, "destinations");
+        JsonObject gitObject = requiredObject(destinations, "git");
+        Optional<String> template = optionalString(gitObject, "remoteUrlTemplate");
+        if (template.isPresent()
+                && !GitDestinationConfig.isPerWorldRemoteTemplate(template.orElseThrow())) {
+            throw new ConfigurationException(
+                    "Git remoteUrlTemplate must include exactly one {worldId} placeholder");
+        }
+        GitDestinationConfig git = new GitDestinationConfig(
+                requiredBoolean(gitObject, "enabled"),
+                optionalPath(gitObject, "repositoryRoot"),
+                requiredString(gitObject, "remoteName"),
+                Optional.empty(),
+                parseDestinationTriggers(requiredObject(gitObject, "triggers")),
+                requiredStringArray(gitObject, "lfsPatterns"),
+                parseHealth(requiredObject(gitObject, "health"), DestinationType.GIT),
+                optionalPath(gitObject, "legacySharedRepository"),
+                optionalString(gitObject, "legacyRemoteUrl"));
+        List<WorldConfig> worlds = parseWorlds(requiredArray(root, "worlds")).stream()
+                .map(world -> new WorldConfig(
+                        world.worldId(),
+                        world.enabled(),
+                        world.path(),
+                        template.map(value -> RemoteUrlPolicy.resolveWorldId(
+                                value,
+                                world.worldId().value()))))
+                .toList();
+        return new WorldArchiveConfig(
+                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
+                triggers,
+                git,
+                parseCurrentZip(requiredObject(destinations, "zip")),
+                worlds);
+    }
+
     /** Migrates the unversioned prototype layout that preceded schema version 1. */
     private WorldArchiveConfig migrateLegacy(JsonObject root) throws IOException {
         TriggerConfig triggers = new TriggerConfig(
@@ -241,17 +275,11 @@ public final class WorldArchiveConfigStore {
     }
 
     private GitDestinationConfig parseCurrentGit(JsonObject object) throws IOException {
-        Optional<String> remoteUrlTemplate = optionalString(object, "remoteUrlTemplate");
-        if (remoteUrlTemplate.isPresent()
-                && !GitDestinationConfig.isPerWorldRemoteTemplate(remoteUrlTemplate.orElseThrow())) {
-            throw new ConfigurationException(
-                    "Git remoteUrlTemplate must include exactly one {worldId} placeholder");
-        }
         return new GitDestinationConfig(
                 requiredBoolean(object, "enabled"),
                 optionalPath(object, "repositoryRoot"),
                 requiredString(object, "remoteName"),
-                remoteUrlTemplate,
+                Optional.empty(),
                 parseDestinationTriggers(requiredObject(object, "triggers")),
                 requiredStringArray(object, "lfsPatterns"),
                 parseHealth(requiredObject(object, "health"), DestinationType.GIT),
@@ -318,7 +346,6 @@ public final class WorldArchiveConfigStore {
         git.addProperty("enabled", config.git().enabled());
         config.git().repository().ifPresent(path -> git.addProperty("repositoryRoot", path.toString()));
         git.addProperty("remoteName", config.git().remoteName());
-        config.git().remoteUrl().ifPresent(url -> git.addProperty("remoteUrlTemplate", url));
         config.git().legacyRepository()
                 .ifPresent(path -> git.addProperty("legacySharedRepository", path.toString()));
         config.git().legacyRemoteUrl().ifPresent(url -> git.addProperty("legacyRemoteUrl", url));
@@ -343,6 +370,7 @@ public final class WorldArchiveConfigStore {
             world.addProperty("worldId", worldConfig.worldId().toString());
             world.addProperty("enabled", worldConfig.enabled());
             world.addProperty("path", worldConfig.path().toString());
+            worldConfig.remoteUrl().ifPresent(url -> world.addProperty("remoteUrl", url));
             worlds.add(world);
         }
         root.add("worlds", worlds);
@@ -527,7 +555,8 @@ public final class WorldArchiveConfigStore {
             worlds.add(new WorldConfig(
                     WorldId.parse(requiredString(world, "worldId")),
                     requiredBoolean(world, "enabled"),
-                    requiredPath(world, "path")));
+                    requiredPath(world, "path"),
+                    optionalString(world, "remoteUrl")));
         }
         return worlds;
     }

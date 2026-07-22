@@ -258,13 +258,51 @@ class GitBackupBackendIntegrationTest extends GitBackupBackendIntegrationTestSup
             assertEquals(SyncStatus.SYNCED, result.syncStatus());
             String expectedRef = GitSnapshot.refName(worldId, backupId);
             assertEquals(expectedRef, result.artifactId().orElseThrow());
+            GitSnapshot snapshot = await(backend.listSnapshots(Optional.of(worldId))).getFirst();
             String remoteCommit = nativeGit(
                     "--git-dir=" + remote,
                     "rev-parse",
                     "--verify",
-                    expectedRef).trim();
-            assertEquals(await(backend.listSnapshots(Optional.of(worldId))).getFirst().commitId(), remoteCommit);
+                    GitRemoteSnapshotRef.current(snapshot)).trim();
+            assertEquals(snapshot.commitId(), remoteCommit);
         }
+    }
+
+    @Test
+    void migratesLegacyUuidBranchToReadableDatedBranch() throws Exception {
+        Path remote = temporaryDirectory.resolve("legacy-branch-remote.git");
+        nativeGit("init", "--bare", remote.toString());
+        Path world = temporaryDirectory.resolve("legacy-branch-world");
+        Files.createDirectories(world);
+        Files.writeString(world.resolve("notes.txt"), "readable branch", StandardCharsets.UTF_8);
+        WorldId worldId = WorldId.create();
+        BackupId backupId = BackupId.create();
+        GitBackendSettings localSettings = settings(Optional.empty());
+        GitSnapshot snapshot;
+
+        try (GitBackupBackend local = new GitBackupBackend(localSettings)) {
+            assertEquals(DestinationStatus.SUCCESS, await(local.createBackup(
+                    capture(world, worldId, backupId, Instant.parse("2026-07-21T22:33:23Z")),
+                    ProgressListener.NO_OP)).status());
+            snapshot = await(local.listSnapshots(Optional.of(worldId))).getFirst();
+        }
+        nativeGit(
+                "--git-dir=" + localSettings.repository(),
+                "push",
+                remote.toUri().toString(),
+                snapshot.refName() + ":" + snapshot.refName());
+
+        try (GitBackupBackend synced = new GitBackupBackend(settings(
+                Optional.of(remote.toUri().toString())))) {
+            assertEquals(
+                    DestinationStatus.SUCCESS,
+                    await(synced.syncSnapshot(worldId, backupId)).status());
+        }
+
+        assertTrue(remoteRef(remote, snapshot.refName()).isEmpty());
+        assertEquals(
+                snapshot.commitId(),
+                remoteRef(remote, GitRemoteSnapshotRef.current(snapshot)).orElseThrow());
     }
 
     @Test
@@ -338,6 +376,8 @@ class GitBackupBackendIntegrationTest extends GitBackupBackendIntegrationTestSup
                     capture(world, worldId, backupId, Instant.now()),
                     ProgressListener.NO_OP));
             assertEquals(DestinationStatus.SUCCESS, result.status(), result.message().orElse(""));
+            GitSnapshot snapshot = await(backend.listSnapshots(Optional.of(worldId))).getFirst();
+            String remoteSnapshotRef = GitRemoteSnapshotRef.current(snapshot);
             nativeGit(
                     "--git-dir=" + remoteSettings.repository(),
                     "update-ref",
@@ -346,7 +386,7 @@ class GitBackupBackendIntegrationTest extends GitBackupBackendIntegrationTestSup
 
             assertThrows(GitStorageException.class, () ->
                     await(backend.deleteSnapshot(worldId, backupId)));
-            assertTrue(remoteRef(remote, snapshotRef).isPresent());
+            assertTrue(remoteRef(remote, remoteSnapshotRef).isPresent());
         }
     }
 

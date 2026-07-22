@@ -11,6 +11,7 @@ import dev.ishaankot.worldarchive.model.BackupId;
 import dev.ishaankot.worldarchive.model.BackupManifest;
 import dev.ishaankot.worldarchive.model.BackupTrigger;
 import dev.ishaankot.worldarchive.model.DestinationStatus;
+import dev.ishaankot.worldarchive.model.SyncStatus;
 import dev.ishaankot.worldarchive.model.WorldId;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -156,12 +157,56 @@ class WorldGitSnapshotStoreIntegrationTest {
                     capture(world("remote-two", "two"), secondWorldId, secondBackupId, Instant.now()),
                     ProgressListener.NO_OP)).status());
 
-            assertFalse(remoteRef(firstRemote, GitSnapshot.refName(firstWorldId, firstBackupId)).isEmpty());
-            assertTrue(remoteRef(firstRemote, GitSnapshot.refName(secondWorldId, secondBackupId)).isEmpty());
-            assertFalse(remoteRef(secondRemote, GitSnapshot.refName(secondWorldId, secondBackupId)).isEmpty());
-            assertTrue(remoteRef(secondRemote, GitSnapshot.refName(firstWorldId, firstBackupId)).isEmpty());
+            GitSnapshot firstSnapshot = await(store.listSnapshots(
+                    Optional.of(firstWorldId))).getFirst();
+            GitSnapshot secondSnapshot = await(store.listSnapshots(
+                    Optional.of(secondWorldId))).getFirst();
+            assertFalse(remoteRef(firstRemote, GitRemoteSnapshotRef.current(firstSnapshot)).isEmpty());
+            assertTrue(remoteRef(firstRemote, GitRemoteSnapshotRef.current(secondSnapshot)).isEmpty());
+            assertFalse(remoteRef(secondRemote, GitRemoteSnapshotRef.current(secondSnapshot)).isEmpty());
+            assertTrue(remoteRef(secondRemote, GitRemoteSnapshotRef.current(firstSnapshot)).isEmpty());
             assertFalse(remoteRef(firstRemote, "refs/heads/main").isEmpty());
             assertFalse(remoteRef(secondRemote, "refs/heads/main").isEmpty());
+        }
+    }
+
+    @Test
+    void synchronizesEveryNewWorldCommitImmediately() throws Exception {
+        Path repositoryRoot = temporaryDirectory.resolve("automatic-sync-repositories");
+        Path remote = temporaryDirectory.resolve("automatic-sync-remote.git");
+        nativeGit("init", "--bare", remote.toString());
+        WorldId worldId = WorldId.create();
+        Path world = world("automatic-sync-world", "first");
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+
+        try (WorldGitSnapshotStore store = new WorldGitSnapshotStore(
+                settings(repositoryRoot, Optional.empty()),
+                Optional.empty(),
+                Map.of(worldId, remote.toUri().toString()),
+                new SystemGitCommandRunner(),
+                executor)) {
+            var first = await(store.createBackup(
+                    capture(world, worldId, BackupId.create(), Instant.now().minusSeconds(2)),
+                    ProgressListener.NO_OP));
+            assertEquals(DestinationStatus.SUCCESS, first.status());
+            assertEquals(SyncStatus.SYNCED, first.syncStatus());
+            String firstRemoteCommit = remoteRef(remote, "refs/heads/main").orElseThrow();
+
+            Files.writeString(world.resolve("level.dat"), "second", StandardCharsets.UTF_8);
+            var second = await(store.createBackup(
+                    capture(world, worldId, BackupId.create(), Instant.now()),
+                    ProgressListener.NO_OP));
+            assertEquals(DestinationStatus.SUCCESS, second.status());
+            assertEquals(SyncStatus.SYNCED, second.syncStatus());
+            String secondRemoteCommit = remoteRef(remote, "refs/heads/main").orElseThrow();
+
+            assertFalse(firstRemoteCommit.equals(secondRemoteCommit));
+            assertEquals(secondRemoteCommit, nativeGit(
+                    "--git-dir=" + store.repositoryFor(worldId),
+                    "rev-parse",
+                    "refs/heads/main").trim());
+        } finally {
+            executor.shutdownNow();
         }
     }
 
@@ -271,7 +316,9 @@ class WorldGitSnapshotStoreIntegrationTest {
                     await(store.syncSnapshot(worldId, backupId)).status());
             assertFalse(remoteRef(
                     legacyRemote,
-                    GitSnapshot.refName(worldId, backupId)).isEmpty());
+                    GitRemoteSnapshotRef.current(
+                            backupId,
+                            legacyCapture.manifest().createdAt())).isEmpty());
             assertFalse(Files.exists(store.repositoryFor(worldId)));
         }
     }

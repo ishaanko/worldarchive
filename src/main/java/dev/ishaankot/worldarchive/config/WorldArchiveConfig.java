@@ -18,7 +18,7 @@ public record WorldArchiveConfig(
         GitDestinationConfig git,
         ZipDestinationConfig zip,
         List<WorldConfig> worlds) {
-    public static final int CURRENT_SCHEMA_VERSION = 4;
+    public static final int CURRENT_SCHEMA_VERSION = 5;
 
     public WorldArchiveConfig {
         if (schemaVersion != CURRENT_SCHEMA_VERSION) {
@@ -26,6 +26,10 @@ public record WorldArchiveConfig(
         }
         Objects.requireNonNull(triggers, "triggers");
         Objects.requireNonNull(git, "git");
+        if (git.remoteUrl().isPresent()) {
+            throw new IllegalArgumentException(
+                    "Global Git remote templates are not supported; configure each world instead");
+        }
         Objects.requireNonNull(zip, "zip");
         worlds = List.copyOf(worlds);
         Set<WorldId> worldIds = new HashSet<>();
@@ -69,7 +73,11 @@ public record WorldArchiveConfig(
         }
         for (WorldConfig world : worlds) {
             Path canonicalPath = PathSafety.canonicalize(world.path());
-            canonicalWorlds.add(new WorldConfig(world.worldId(), world.enabled(), canonicalPath));
+            canonicalWorlds.add(new WorldConfig(
+                    world.worldId(),
+                    world.enabled(),
+                    canonicalPath,
+                    world.remoteUrl()));
             allWorldPaths.add(canonicalPath);
         }
         Optional<Path> gitRepository = canonicalizeDestination(git.repository(), allWorldPaths);

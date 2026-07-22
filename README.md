@@ -39,9 +39,10 @@ WorldArchive disables the Git destination and leaves ZIP backups available.
 Install Fabric Loader, Fabric API, and Mod Menu, then copy the WorldArchive JAR
 into the Minecraft instance's `mods` folder.
 
-Select a world on the **Select World** screen and choose **Backups**. The backup
-browser can create, restore, delete, sync, and verify backups. It also shows the
-status, size, changed-file count, and available destinations for each backup.
+Choose **World Backups** on the title screen, or select a world on the
+**Select World** screen and choose **Backups**. The backup browser can create,
+restore, delete, sync, and verify backups. It also shows the status, size,
+changed-file count, and available destinations for each backup.
 
 Backups can be created in three ways:
 
@@ -60,11 +61,12 @@ succeeds, the successful copy is kept and the backup is reported as a partial
 success. Failed remote Git pushes are marked **pending sync** and can be retried
 later.
 
-Git stores each world's history in its own repository. To sync to GitHub or
-another server, configure a remote URL template containing `{worldId}`, such as
-`https://github.com/example/minecraft-{worldId}.git`. Each matching remote
-repository must already exist; WorldArchive does not create server-side
-repositories or request account credentials.
+Git stores each world's history in its own repository. To sync a world to
+GitHub or another server, open the **Worlds** settings tab, choose that world,
+and paste the clone URL of an existing empty repository into **Git remote**.
+WorldArchive creates a short six-character world code automatically; users do
+not need to find, copy, or add it to the URL. WorldArchive does not create
+server-side repositories or request account credentials.
 
 Restoring a backup verifies it and creates a new, uniquely named world. The
 original world is never overwritten or modified.

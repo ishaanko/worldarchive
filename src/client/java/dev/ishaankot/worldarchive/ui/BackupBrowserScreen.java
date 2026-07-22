@@ -403,12 +403,12 @@ public final class BackupBrowserScreen extends Screen {
                 contentWidth,
                 Math.max(128, height - 48));
         int y = Math.max(150, height - 24);
-        int buttonWidth = actionButtonWidth(contentWidth);
-        int currentX = x;
-        for (BackupAction action : List.of(
-                BackupAction.VERIFY,
+        List<BackupAction> secondaryActions = List.of(
                 BackupAction.OPEN_FOLDER,
-                BackupAction.SETTINGS)) {
+                BackupAction.SETTINGS);
+        int buttonWidth = actionButtonWidth(contentWidth, secondaryActions.size() + 1);
+        int currentX = x;
+        for (BackupAction action : secondaryActions) {
             addActionButton(action, availability.get(action), currentX, y, buttonWidth);
             currentX += buttonWidth + ACTION_GAP;
         }
@@ -423,7 +423,7 @@ public final class BackupBrowserScreen extends Screen {
             int x,
             int contentWidth,
             int y) {
-        int buttonWidth = actionButtonWidth(contentWidth);
+        int buttonWidth = actionButtonWidth(contentWidth, actions.size());
         int currentX = x;
         for (BackupAction action : actions) {
             addActionButton(action, availability.get(action), currentX, y, buttonWidth);
@@ -447,8 +447,8 @@ public final class BackupBrowserScreen extends Screen {
         addRenderableWidget(button);
     }
 
-    private int actionButtonWidth(int contentWidth) {
-        return Math.max(32, (contentWidth - ACTION_GAP * 3) / 4);
+    private int actionButtonWidth(int contentWidth, int buttonCount) {
+        return Math.max(32, (contentWidth - ACTION_GAP * (buttonCount - 1)) / buttonCount);
     }
 
     private void runAction(BackupAction action) {
@@ -463,7 +463,7 @@ public final class BackupBrowserScreen extends Screen {
                     listener -> service.syncBackup(row.backupId(), listener)));
             case VERIFY -> selectedRow().ifPresent(row -> openResultOperation(
                     BackupOperation.VERIFY,
-                    "Verifying backup",
+                    "Checking backup integrity",
                     listener -> service.verifyBackup(row.backupId(), listener)));
             case OPEN_FOLDER -> openFolder();
             case SETTINGS -> openSettings();

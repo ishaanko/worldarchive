@@ -75,6 +75,14 @@ final class SettingsStatusPresenter {
             return Tooltip.create(Component.translatable(
                     "screen.worldarchive.settings.schedule_interval_tooltip"));
         }
+        if (field == SettingsField.WORLD_REMOTE_URL) {
+            return Tooltip.create(Component.translatable(
+                    "screen.worldarchive.settings.world_remote_steps"));
+        }
+        if (field == SettingsField.GIT_REMOTE_NAME) {
+            return Tooltip.create(Component.translatable(
+                    "screen.worldarchive.settings.remote_name_tooltip"));
+        }
         return null;
     }
 
@@ -89,7 +97,6 @@ final class SettingsStatusPresenter {
             case GIT -> List.of(
                     SettingsField.GIT_REPOSITORY,
                     SettingsField.GIT_REMOTE_NAME,
-                    SettingsField.GIT_REMOTE_URL,
                     SettingsField.GIT_LFS_PATTERNS,
                     SettingsField.SCHEDULE_INTERVAL,
                     SettingsField.DESTINATIONS);
@@ -97,7 +104,9 @@ final class SettingsStatusPresenter {
                     SettingsField.ZIP_DESTINATION,
                     SettingsField.SCHEDULE_INTERVAL,
                     SettingsField.DESTINATIONS);
-            case WORLDS -> List.of(SettingsField.DESTINATIONS);
+            case WORLDS -> List.of(
+                    SettingsField.WORLD_REMOTE_URL,
+                    SettingsField.DESTINATIONS);
         };
         for (SettingsField field : pageFields) {
             String issue = validation.issues().get(field);

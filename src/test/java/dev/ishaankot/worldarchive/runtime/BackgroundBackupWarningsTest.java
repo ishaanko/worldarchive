@@ -59,23 +59,23 @@ final class BackgroundBackupWarningsTest {
         BackupResult skipped = result(List.of());
 
         assertNotice(
-                "World saved; backup is running",
+                "Creating backup... Keep Minecraft open until it finishes.",
                 BackgroundBackupWarnings.NoticeSeverity.SUCCESS,
                 BackgroundBackupWarnings.worldExitStartedNotice());
         assertNotice(
-                "World saved and backup completed",
+                "Backup finished. You can safely quit Minecraft.",
                 BackgroundBackupWarnings.NoticeSeverity.SUCCESS,
                 BackgroundBackupWarnings.worldExitNotice(success, null));
         assertNotice(
-                "World saved; backup completed with warnings",
+                "Backup created with warnings",
                 BackgroundBackupWarnings.NoticeSeverity.WARNING,
                 BackgroundBackupWarnings.worldExitNotice(partial, null));
         assertNotice(
-                "World saved; backup failed",
+                "Backup failed; world was saved",
                 BackgroundBackupWarnings.NoticeSeverity.ERROR,
                 BackgroundBackupWarnings.worldExitNotice(failed, null));
         assertNotice(
-                "World saved; backup skipped",
+                "Backup skipped; world was saved",
                 BackgroundBackupWarnings.NoticeSeverity.WARNING,
                 BackgroundBackupWarnings.worldExitNotice(skipped, null));
         assertNotice(

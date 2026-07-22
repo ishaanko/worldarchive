@@ -47,6 +47,7 @@ final class WorldArchiveConfigStoreTest {
         Path gitRepository = Files.createDirectory(temporaryDirectory.resolve("git-世界"));
         Path zipDestination = Files.createDirectory(temporaryDirectory.resolve("zip-é"));
         Path legacyGitRepository = Files.createDirectory(temporaryDirectory.resolve("legacy-git"));
+        Path world = Files.createDirectory(temporaryDirectory.resolve("forever-world"));
         Path file = temporaryDirectory.resolve("worldarchive.json");
         WorldArchiveConfigStore store = new WorldArchiveConfigStore(file);
         WorldArchiveConfig expected = new WorldArchiveConfig(
@@ -56,27 +57,32 @@ final class WorldArchiveConfigStoreTest {
                         true,
                         Optional.of(gitRepository),
                         "backup-origin",
-                        Optional.of("ssh://example.invalid/backups-{worldId}.git"),
+                        Optional.empty(),
                         DestinationTriggerConfig.defaults(),
                         GitDestinationConfig.DEFAULT_LFS_PATTERNS,
                         dev.ishaankot.worldarchive.model.DestinationHealth.notChecked(
                                 dev.ishaankot.worldarchive.model.DestinationType.GIT),
                         Optional.of(legacyGitRepository),
                         Optional.of("ssh://example.invalid/legacy-backups.git")),
-                new ZipDestinationConfig(true, Optional.of(zipDestination)));
+                new ZipDestinationConfig(true, Optional.of(zipDestination)),
+                java.util.List.of(new WorldConfig(
+                        dev.ishaankot.worldarchive.model.WorldId.create(),
+                        true,
+                        world,
+                        Optional.of("ssh://example.invalid/forever-world.git"))));
 
-        store.save(expected, java.util.List.of());
-        WorldArchiveConfig canonicalExpected = expected.validateDestinations(java.util.List.of());
-        assertEquals(canonicalExpected, store.load(java.util.List.of()));
-        assertEquals(canonicalExpected, store.load(java.util.List.of()));
+        store.save(expected, java.util.List.of(world));
+        WorldArchiveConfig canonicalExpected = expected.validateDestinations(java.util.List.of(world));
+        assertEquals(canonicalExpected, store.load(java.util.List.of(world)));
+        assertEquals(canonicalExpected, store.load(java.util.List.of(world)));
         String serialized = Files.readString(file, StandardCharsets.UTF_8);
         assertTrue(serialized.contains("git-世界"));
         assertTrue(serialized.contains("\"repositoryRoot\""));
-        assertTrue(serialized.contains("\"remoteUrlTemplate\""));
+        assertFalse(serialized.contains("\"remoteUrlTemplate\""));
+        assertTrue(serialized.contains("\"remoteUrl\": \"ssh://example.invalid/forever-world.git\""));
         assertTrue(serialized.contains("\"legacySharedRepository\""));
         assertTrue(serialized.contains("\"legacyRemoteUrl\""));
         assertFalse(serialized.contains("\"repository\":"));
-        assertFalse(serialized.contains("\"remoteUrl\":"));
         assertFalse(serialized.toLowerCase().contains("password"));
     }
 
@@ -85,19 +91,22 @@ final class WorldArchiveConfigStoreTest {
         Path file = temporaryDirectory.resolve("plain-current-remote.json");
         WorldArchiveConfigStore store = new WorldArchiveConfigStore(file);
         WorldArchiveConfig defaults = WorldArchiveConfig.defaults();
-        WorldArchiveConfig templated = new WorldArchiveConfig(
+        Path world = Files.createDirectory(temporaryDirectory.resolve("schema-four-world"));
+        WorldArchiveConfig current = new WorldArchiveConfig(
                 WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
                 defaults.triggers(),
-                new GitDestinationConfig(
-                        true,
-                        Optional.empty(),
-                        "origin",
-                        Optional.of("https://example.invalid/world-{worldId}.git")),
+                defaults.git(),
                 defaults.zip(),
-                defaults.worlds());
-        store.save(templated, java.util.List.of());
+                java.util.List.of(new WorldConfig(
+                        dev.ishaankot.worldarchive.model.WorldId.create(),
+                        true,
+                        world)));
+        store.save(current, java.util.List.of(world));
         String invalid = Files.readString(file, StandardCharsets.UTF_8)
-                .replace("world-{worldId}.git", "shared.git");
+                .replace("\"schemaVersion\": 5", "\"schemaVersion\": 4")
+                .replace(
+                        "\"remoteName\": \"origin\",",
+                        "\"remoteName\": \"origin\",\n      \"remoteUrlTemplate\": \"https://example.invalid/shared.git\",");
         Files.writeString(file, invalid, StandardCharsets.UTF_8);
 
         ConfigurationException exception = assertThrows(
@@ -105,6 +114,41 @@ final class WorldArchiveConfigStoreTest {
                 () -> store.load(java.util.List.of()));
 
         assertTrue(exception.getMessage().contains("{worldId}"));
+    }
+
+    @Test
+    void migratesSchemaFourTemplateToEachExistingWorld() throws IOException {
+        Path file = temporaryDirectory.resolve("schema-four-template.json");
+        Path world = Files.createDirectory(temporaryDirectory.resolve("migrated-world"));
+        dev.ishaankot.worldarchive.model.WorldId worldId =
+                dev.ishaankot.worldarchive.model.WorldId.create();
+        WorldArchiveConfig defaults = WorldArchiveConfig.defaults();
+        WorldArchiveConfig current = new WorldArchiveConfig(
+                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
+                defaults.triggers(),
+                defaults.git(),
+                defaults.zip(),
+                java.util.List.of(new WorldConfig(worldId, true, world)));
+        WorldArchiveConfigStore store = new WorldArchiveConfigStore(file);
+        store.save(current, java.util.List.of(world));
+        String schemaFour = Files.readString(file, StandardCharsets.UTF_8)
+                .replace("\"schemaVersion\": 5", "\"schemaVersion\": 4")
+                .replace(
+                        "\"remoteName\": \"origin\",",
+                        "\"remoteName\": \"origin\",\n"
+                                + "      \"remoteUrlTemplate\": "
+                                + "\"https://example.invalid/world-{worldId}.git\",");
+        Files.writeString(file, schemaFour, StandardCharsets.UTF_8);
+
+        WorldArchiveConfig migrated = store.load(java.util.List.of(world));
+
+        assertTrue(migrated.git().remoteUrl().isEmpty());
+        assertEquals(
+                "https://example.invalid/world-" + worldId + ".git",
+                migrated.worlds().getFirst().remoteUrl().orElseThrow());
+        String persisted = Files.readString(file, StandardCharsets.UTF_8);
+        assertTrue(persisted.contains("\"schemaVersion\": 5"));
+        assertFalse(persisted.contains("remoteUrlTemplate"));
     }
 
     @Test
@@ -152,7 +196,7 @@ final class WorldArchiveConfigStoreTest {
         assertEquals(60, migrated.triggers().scheduleIntervalMinutes());
         assertFalse(migrated.git().enabled());
         assertEquals(zipDestination.toRealPath(), migrated.zip().destination().orElseThrow());
-        assertTrue(Files.readString(file, StandardCharsets.UTF_8).contains("\"schemaVersion\": 4"));
+        assertTrue(Files.readString(file, StandardCharsets.UTF_8).contains("\"schemaVersion\": 5"));
     }
 
     @Test
@@ -221,7 +265,7 @@ final class WorldArchiveConfigStoreTest {
                 migrated.git().health());
         assertTrue(Files.isDirectory(legacyGit));
         String persisted = Files.readString(file, StandardCharsets.UTF_8);
-        assertTrue(persisted.contains("\"schemaVersion\": 4"));
+        assertTrue(persisted.contains("\"schemaVersion\": 5"));
         assertTrue(persisted.contains("\"legacySharedRepository\""));
         assertFalse(persisted.contains("\"repository\":"));
     }

@@ -5,6 +5,7 @@ import dev.ishaankot.worldarchive.model.WorldId;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -122,6 +123,12 @@ final class GitRefStore {
 
     Optional<String> resolveRemote(String refName)
             throws IOException, InterruptedException, GitStorageException {
+        Map<String, String> matches = resolveRemotePattern(refName);
+        return Optional.ofNullable(matches.get(refName));
+    }
+
+    Map<String, String> resolveRemotePattern(String refPattern)
+            throws IOException, InterruptedException, GitStorageException {
         repository.configureRemote();
         GitCommandResult result = commands.checked(
                 List.of(
@@ -129,27 +136,29 @@ final class GitRefStore {
                         "ls-remote",
                         "--refs",
                         settings.remoteName(),
-                        refName),
+                        refPattern),
                 settings.repository(),
                 Map.of(),
                 new byte[0]);
         List<String> lines = result.standardOutput().lines()
                 .filter(line -> !line.isBlank())
                 .toList();
-        if (lines.isEmpty()) {
-            return Optional.empty();
+        Map<String, String> matches = new LinkedHashMap<>();
+        for (String line : lines) {
+            int separator = line.indexOf('\t');
+            if (separator < 1) {
+                throw new GitStorageException(
+                        "Configured Git remote returned an invalid snapshot ref");
+            }
+            String refName = line.substring(separator + 1);
+            String previous = matches.put(refName, GitCommands.objectId(
+                    line.substring(0, separator)));
+            if (previous != null) {
+                throw new GitStorageException(
+                        "Configured Git remote returned a duplicate snapshot ref");
+            }
         }
-        if (lines.size() != 1) {
-            throw new GitStorageException(
-                    "Configured Git remote returned an ambiguous snapshot ref");
-        }
-        String line = lines.getFirst();
-        int separator = line.indexOf('\t');
-        if (separator < 1 || !line.substring(separator + 1).equals(refName)) {
-            throw new GitStorageException(
-                    "Configured Git remote returned an invalid snapshot ref");
-        }
-        return Optional.of(GitCommands.objectId(line.substring(0, separator)));
+        return Map.copyOf(matches);
     }
 
     void updateWithRollback(

@@ -42,7 +42,8 @@ final class BackupCreateScreen extends Screen {
         MultiLineTextWidget explanation = new MultiLineTextWidget(
                         contentX,
                         top + 24,
-                        Component.literal("Add an optional label, or leave it blank."),
+                        Component.literal("Add an optional label, or leave it blank.\n"
+                                + "Large worlds may take a while. Keep Minecraft open until it finishes."),
                         font)
                 .setMaxWidth(contentWidth)
                 .setCentered(true);

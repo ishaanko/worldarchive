@@ -1,6 +1,5 @@
 package dev.ishaankot.worldarchive.ui;
 
-import dev.ishaankot.worldarchive.ui.model.BackupDestinationView;
 import dev.ishaankot.worldarchive.ui.model.BackupRow;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -168,22 +167,17 @@ final class BackupRowButton extends AbstractButton {
     }
 
     private static String detailLine(BackupRow row) {
-        return "Git " + availability(row.git())
-                + "  ZIP " + availability(row.zip())
-                + "  Remote " + words(row.remoteSyncStatus().name())
-                + "  Verify " + words(row.verificationStatus().name())
-                + "  " + size(row.logicalSizeBytes())
-                + "  " + row.changedFileCount() + " changed";
+        String remote = remote(row);
+        return storedIn(row)
+                + (remote.isEmpty() ? "" : " | " + remote)
+                + " | " + size(row.logicalSizeBytes());
     }
 
     private static String tooltip(BackupRow row) {
         return primaryLine(row)
-                + "\nGit: " + availability(row.git())
-                + "\nZIP: " + availability(row.zip())
-                + "\nRemote sync: " + words(row.remoteSyncStatus().name())
-                + "\nVerification: " + words(row.verificationStatus().name())
-                + "\nLogical size: " + size(row.logicalSizeBytes())
-                + "\nChanged files: " + row.changedFileCount()
+                + "\n" + storedIn(row)
+                + (remote(row).isEmpty() ? "" : "\n" + remote(row))
+                + "\nSize: " + size(row.logicalSizeBytes())
                 + "\nBackup ID: " + row.backupId();
     }
 
@@ -196,20 +190,31 @@ final class BackupRowButton extends AbstractButton {
         };
     }
 
-    private static String availability(BackupDestinationView destination) {
-        return switch (destination.availability()) {
-            case NOT_CREATED -> "not created";
-            case AVAILABLE -> "available";
-            case PENDING_SYNC -> "pending sync";
-            case FAILED -> "failed";
-            case SKIPPED -> "skipped";
-            default -> throw new IllegalStateException(
-                    "Unknown destination availability: " + destination.availability());
-        };
+    private static String storedIn(BackupRow row) {
+        boolean git = row.git().durable();
+        boolean zip = row.zip().durable();
+        if (git && zip) {
+            return "Saved in Git and ZIP";
+        }
+        if (git) {
+            return "Saved in Git";
+        }
+        if (zip) {
+            return "Saved as ZIP";
+        }
+        return "Backup unavailable";
     }
 
-    private static String words(String value) {
-        return value.toLowerCase(Locale.ROOT).replace('_', ' ');
+    private static String remote(BackupRow row) {
+        return switch (row.remoteSyncStatus()) {
+            case SYNCED -> "GitHub synced";
+            case PENDING -> "GitHub sync pending";
+            case FAILED -> "GitHub sync failed";
+            case NOT_SYNCED -> "GitHub not synced";
+            case NOT_CONFIGURED -> "";
+            default -> throw new IllegalStateException(
+                    "Unknown remote status: " + row.remoteSyncStatus());
+        };
     }
 
     private static String size(long bytes) {
