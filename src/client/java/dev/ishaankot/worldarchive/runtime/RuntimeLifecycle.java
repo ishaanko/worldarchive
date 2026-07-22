@@ -205,6 +205,16 @@ final class RuntimeLifecycle {
         if (runtime.isClosed() || !(server instanceof IntegratedServer integrated)) {
             return;
         }
+        final BackupWorldSelection selection;
+        try {
+            selection = selectionFor(integrated);
+        } catch (RuntimeException exception) {
+            runtime.logFailure("Integrated world path could not be resolved", exception);
+            return;
+        }
+        if (!runtime.acceptsLiveWorld(selection)) {
+            return;
+        }
         synchronized (lock) {
             activeServer = integrated;
             stoppingServer = null;
