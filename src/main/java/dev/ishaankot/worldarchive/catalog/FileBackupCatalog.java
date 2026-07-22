@@ -15,9 +15,11 @@ import dev.ishaankot.worldarchive.model.BackupRecord;
 import dev.ishaankot.worldarchive.model.BackupResult;
 import dev.ishaankot.worldarchive.model.BackupStatus;
 import dev.ishaankot.worldarchive.model.BackupTrigger;
+import dev.ishaankot.worldarchive.model.ArtifactOwnership;
 import dev.ishaankot.worldarchive.model.DestinationResult;
 import dev.ishaankot.worldarchive.model.DestinationStatus;
 import dev.ishaankot.worldarchive.model.DestinationType;
+import dev.ishaankot.worldarchive.model.ImportSourceId;
 import dev.ishaankot.worldarchive.model.SyncStatus;
 import dev.ishaankot.worldarchive.model.VerificationStatus;
 import dev.ishaankot.worldarchive.model.WorldId;
@@ -36,6 +38,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -45,7 +48,7 @@ import java.util.function.UnaryOperator;
 
 /** Thread- and process-safe JSON catalog with atomic publication. */
 public final class FileBackupCatalog implements BackupCatalog {
-    public static final int CURRENT_SCHEMA_VERSION = 2;
+    public static final int CURRENT_SCHEMA_VERSION = 3;
 
     private static final Gson GSON = new GsonBuilder()
             .setPrettyPrinting()
@@ -87,6 +90,29 @@ public final class FileBackupCatalog implements BackupCatalog {
             records.add(record);
             writeRecords(records);
             return null;
+        });
+    }
+
+    @Override
+    public CatalogMergeResult merge(BackupRecord discovered) throws IOException {
+        Objects.requireNonNull(discovered, "discovered");
+        return withLock(() -> {
+            List<BackupRecord> records = readRecords();
+            for (int index = 0; index < records.size(); index++) {
+                BackupRecord existing = records.get(index);
+                if (!existing.manifest().backupId().equals(discovered.manifest().backupId())) {
+                    continue;
+                }
+                CatalogMergeResult result = BackupRecordMerger.merge(existing, discovered);
+                if (result.status() == CatalogMergeStatus.MERGED) {
+                    records.set(index, result.record());
+                    writeRecords(records);
+                }
+                return result;
+            }
+            records.add(discovered);
+            writeRecords(records);
+            return new CatalogMergeResult(CatalogMergeStatus.ADDED, discovered);
         });
     }
 
@@ -271,6 +297,9 @@ public final class FileBackupCatalog implements BackupCatalog {
         result.message().ifPresent(value -> encoded.addProperty("message", value));
         encoded.addProperty("verificationStatus", result.verificationStatus().name());
         encoded.addProperty("syncStatus", result.syncStatus().name());
+        encoded.addProperty("ownership", result.ownership().name());
+        result.importSourceId().ifPresent(value ->
+                encoded.addProperty("importSourceId", value.toString()));
         return encoded;
     }
 
@@ -332,13 +361,21 @@ public final class FileBackupCatalog implements BackupCatalog {
         SyncStatus sync = schemaVersion == 1
                 ? SyncStatus.NOT_CONFIGURED
                 : requiredEnum(encoded, "syncStatus", SyncStatus.class);
+        ArtifactOwnership ownership = schemaVersion < 3
+                ? ArtifactOwnership.MANAGED
+                : requiredEnum(encoded, "ownership", ArtifactOwnership.class);
+        Optional<ImportSourceId> sourceId = schemaVersion < 3
+                ? Optional.empty()
+                : optionalString(encoded, "importSourceId").map(ImportSourceId::parse);
         return new DestinationResult(
                 requiredEnum(encoded, "destination", DestinationType.class),
                 requiredEnum(encoded, "status", DestinationStatus.class),
                 optionalString(encoded, "artifactId"),
                 optionalString(encoded, "message"),
                 verification,
-                sync);
+                sync,
+                ownership,
+                sourceId);
     }
 
     private static JsonObject requiredObject(JsonObject object, String name) throws IOException {

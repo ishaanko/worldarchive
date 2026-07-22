@@ -1,5 +1,10 @@
 package dev.ishaankot.worldarchive.recovery;
 
+import dev.ishaankot.worldarchive.importing.ImportArtifactBinding;
+import dev.ishaankot.worldarchive.importing.ImportSource;
+import dev.ishaankot.worldarchive.importing.ImportSourceMode;
+import dev.ishaankot.worldarchive.importing.ImportSourceRegistry;
+import dev.ishaankot.worldarchive.model.ArtifactOwnership;
 import dev.ishaankot.worldarchive.model.BackupRecord;
 import dev.ishaankot.worldarchive.model.DestinationHealth;
 import dev.ishaankot.worldarchive.model.DestinationHealthStatus;
@@ -25,9 +30,19 @@ final class GitRecoveryDestination implements RecoveryDestination {
 
     private final Clock clock;
 
+    private final Optional<ImportSourceRegistry> sources;
+
     GitRecoveryDestination(GitSnapshotStore backend, Clock clock) {
+        this(backend, clock, Optional.empty());
+    }
+
+    GitRecoveryDestination(
+            GitSnapshotStore backend,
+            Clock clock,
+            Optional<ImportSourceRegistry> sources) {
         this.backend = Objects.requireNonNull(backend, "backend");
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.sources = Objects.requireNonNull(sources, "sources");
     }
 
     @Override
@@ -39,8 +54,10 @@ final class GitRecoveryDestination implements RecoveryDestination {
     public VerificationOutcome verify(BackupRecord record, DestinationResult destination)
             throws Exception {
         requireArtifact(record, destination);
-        GitVerification verification = await(backend.verifySnapshot(
-                record.manifest().worldId(), record.manifest().backupId()));
+        GitVerification verification = destination.ownership() == ArtifactOwnership.EXTERNAL
+                ? hydrateExternal(record, destination)
+                : await(backend.verifySnapshot(
+                        record.manifest().worldId(), record.manifest().backupId()));
         return verificationOutcome(record, destination, verification);
     }
 
@@ -49,10 +66,12 @@ final class GitRecoveryDestination implements RecoveryDestination {
             BackupRecord record,
             DestinationResult destination) throws Exception {
         requireArtifact(record, destination);
-        GitVerification verification = awaitDrained(backend.verifyRestorableSnapshot(
-                record.manifest().worldId(),
-                record.manifest().backupId(),
-                record.manifest()));
+        GitVerification verification = destination.ownership() == ArtifactOwnership.EXTERNAL
+                ? hydrateExternal(record, destination)
+                : awaitDrained(backend.verifyRestorableSnapshot(
+                        record.manifest().worldId(),
+                        record.manifest().backupId(),
+                        record.manifest()));
         return verificationOutcome(record, destination, verification);
     }
 
@@ -86,6 +105,9 @@ final class GitRecoveryDestination implements RecoveryDestination {
             DestinationResult destination,
             Path emptyTarget) throws Exception {
         requireArtifact(record, destination);
+        if (destination.ownership() == ArtifactOwnership.EXTERNAL) {
+            hydrateExternal(record, destination);
+        }
         GitBackupBackend.RestoreResult restored = awaitDrained(
                 backend.restoreSnapshotForRecovery(
                 record.manifest().worldId(),
@@ -106,7 +128,15 @@ final class GitRecoveryDestination implements RecoveryDestination {
     @Override
     public boolean delete(BackupRecord record, DestinationResult destination) throws Exception {
         requireArtifact(record, destination);
-        await(backend.deleteSnapshot(record.manifest().worldId(), record.manifest().backupId()));
+        if (destination.ownership() != ArtifactOwnership.MANAGED) {
+            await(backend.deleteLocalSnapshot(
+                    record.manifest().worldId(), record.manifest().backupId()));
+            sources.orElseThrow(() -> new BackupRecoveryException(
+                    "Imported Git source registry is unavailable"))
+                    .unlink(destination.importSourceId().orElseThrow(), record.manifest().backupId());
+        } else {
+            await(backend.deleteSnapshot(record.manifest().worldId(), record.manifest().backupId()));
+        }
         // A false backend result means the exact local and configured remote refs are absent.
         return true;
     }
@@ -115,6 +145,9 @@ final class GitRecoveryDestination implements RecoveryDestination {
     public DestinationResult sync(BackupRecord record, DestinationResult destination)
             throws Exception {
         requireArtifact(record, destination);
+        if (destination.ownership() != ArtifactOwnership.MANAGED) {
+            return destination;
+        }
         DestinationResult result = await(backend.syncSnapshot(
                 record.manifest().worldId(), record.manifest().backupId()));
         if (result.destination() != DestinationType.GIT) {
@@ -156,6 +189,31 @@ final class GitRecoveryDestination implements RecoveryDestination {
                 || !destination.artifactId().orElseThrow().equals(expected)) {
             throw new BackupRecoveryException("Git artifact identity does not match the catalog");
         }
+    }
+
+    private GitVerification hydrateExternal(
+            BackupRecord record,
+            DestinationResult destination) throws Exception {
+        ImportSource source = sources.orElseThrow(() -> new BackupRecoveryException(
+                "Imported Git source registry is unavailable"))
+                .find(destination.importSourceId().orElseThrow())
+                .orElseThrow(() -> new BackupRecoveryException(
+                        "Imported Git source is no longer linked"));
+        if (source.mode() != ImportSourceMode.GIT_REMOTE_BACKED) {
+            throw new BackupRecoveryException("Imported Git source mode is invalid");
+        }
+        ImportArtifactBinding binding = source.artifact(record.manifest().backupId())
+                .orElseThrow(() -> new BackupRecoveryException(
+                        "Imported Git artifact binding is missing"));
+        if (!binding.worldId().equals(record.manifest().worldId())) {
+            throw new BackupRecoveryException("Imported Git world identity does not match");
+        }
+        return awaitDrained(backend.hydrateExternalSnapshot(
+                record.manifest().worldId(),
+                record.manifest().backupId(),
+                record.manifest(),
+                binding.fingerprint(),
+                source.location()));
     }
 
     private static <T> T await(CompletionStage<T> stage) throws Exception {

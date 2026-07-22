@@ -3,16 +3,22 @@ package dev.ishaankot.worldarchive.ui;
 import dev.ishaankot.worldarchive.core.BackupService;
 import dev.ishaankot.worldarchive.core.ProgressListener;
 import dev.ishaankot.worldarchive.core.RestoreBackupResult;
+import dev.ishaankot.worldarchive.importing.BackupImportService;
 import dev.ishaankot.worldarchive.model.BackupResult;
 import dev.ishaankot.worldarchive.ui.model.BackupBrowserCapabilities;
 import dev.ishaankot.worldarchive.ui.model.BackupRow;
 import java.util.Optional;
+import java.util.List;
 import java.util.concurrent.CompletionStage;
 import net.minecraft.client.gui.screens.Screen;
 
 /** Injectable boundary between native client screens and runtime-owned services or navigation. */
 public interface BackupClientFacade {
     BackupService backupService();
+
+    BackupImportService importService();
+
+    CompletionStage<List<BackupWorldEntry>> backupWorlds();
 
     CompletionStage<Optional<BackupWorldContext>> resolveWorld(BackupWorldSelection selection);
 

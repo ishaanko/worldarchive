@@ -20,6 +20,11 @@ import dev.ishaankot.worldarchive.command.model.CommandHelpView;
 import dev.ishaankot.worldarchive.command.model.CommandOutcomeView;
 import dev.ishaankot.worldarchive.core.OperationProgress;
 import dev.ishaankot.worldarchive.core.ProgressListener;
+import dev.ishaankot.worldarchive.importing.GitConnectionMode;
+import dev.ishaankot.worldarchive.importing.GitHydrationMode;
+import dev.ishaankot.worldarchive.importing.ImportPreview;
+import dev.ishaankot.worldarchive.importing.ImportSummary;
+import dev.ishaankot.worldarchive.importing.ZipImportMode;
 import dev.ishaankot.worldarchive.model.BackupId;
 import dev.ishaankot.worldarchive.model.BackupRecord;
 import dev.ishaankot.worldarchive.model.BackupResult;
@@ -32,10 +37,12 @@ import dev.ishaankot.worldarchive.model.SensitiveDataRedactor;
 import dev.ishaankot.worldarchive.model.WorldId;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
@@ -125,10 +132,70 @@ public final class WorldArchiveClientCommands {
                                         context.getSource(),
                                         facade,
                                         Optional.of(StringArgumentType.getString(context, "id"))))))
+                .then(importTree(facade))
+                .then(literal("rebuild")
+                        .executes(context -> rebuildCatalog(context.getSource(), facade)))
                 .then(literal("status")
                         .executes(context -> status(context.getSource(), facade)))
                 .then(literal("config")
                         .executes(context -> openSettings(context.getSource(), facade)));
+    }
+
+    private static LiteralArgumentBuilder<FabricClientCommandSource> importTree(
+            BackupCommandFacade facade) {
+        return literal("import")
+                .executes(context -> importHelp(context.getSource()))
+                .then(literal("confirm")
+                        .then(argument("token", StringArgumentType.word())
+                                .executes(context -> confirmImport(
+                                        context.getSource(),
+                                        facade,
+                                        StringArgumentType.getString(context, "token")))))
+                .then(literal("git")
+                        .then(gitImportMode(facade, "full", GitHydrationMode.FULL_DOWNLOAD))
+                        .then(gitImportMode(facade, "remote", GitHydrationMode.REMOTE_BACKED)))
+                .then(literal("zip")
+                        .then(zipImportMode(facade, "copy", ZipImportMode.COPY))
+                        .then(zipImportMode(facade, "link", ZipImportMode.LINK)));
+    }
+
+    private static LiteralArgumentBuilder<FabricClientCommandSource> gitImportMode(
+            BackupCommandFacade facade,
+            String name,
+            GitHydrationMode hydration) {
+        return literal(name)
+                .then(gitConnectionMode(
+                        facade, hydration, "recovery", GitConnectionMode.RECOVERY_ONLY))
+                .then(gitConnectionMode(
+                        facade, hydration, "connect", GitConnectionMode.CONNECT));
+    }
+
+    private static LiteralArgumentBuilder<FabricClientCommandSource> gitConnectionMode(
+            BackupCommandFacade facade,
+            GitHydrationMode hydration,
+            String name,
+            GitConnectionMode connection) {
+        return literal(name)
+                .then(argument("remote", StringArgumentType.greedyString())
+                        .executes(context -> previewGitImport(
+                                context.getSource(),
+                                facade,
+                                StringArgumentType.getString(context, "remote"),
+                                hydration,
+                                connection)));
+    }
+
+    private static LiteralArgumentBuilder<FabricClientCommandSource> zipImportMode(
+            BackupCommandFacade facade,
+            String name,
+            ZipImportMode mode) {
+        return literal(name)
+                .then(argument("folder", StringArgumentType.greedyString())
+                        .executes(context -> previewZipImport(
+                                context.getSource(),
+                                facade,
+                                StringArgumentType.getString(context, "folder"),
+                                mode)));
     }
 
     private static com.mojang.brigadier.builder.RequiredArgumentBuilder<
@@ -157,6 +224,8 @@ public final class WorldArchiveClientCommands {
                 .append(" ")
                 .append(action("[Open Folder]", "/backup folder", "Open managed backup files"))
                 .append(" ")
+                .append(action("[Import]", "/backup import", "Recover existing backups"))
+                .append(" ")
                 .append(action("[Help]", "/backup help", "Show every command")));
         return 1;
     }
@@ -173,6 +242,129 @@ public final class WorldArchiveClientCommands {
                             .withStyle(ChatFormatting.GRAY)));
         }
         return 1;
+    }
+
+    private static int importHelp(FabricClientCommandSource source) {
+        source.sendFeedback(Component.literal("WorldArchive Recovery Import")
+                .withStyle(ChatFormatting.AQUA, ChatFormatting.BOLD));
+        source.sendFeedback(Component.literal(
+                "/backup import git <full|remote> <recovery|connect> <remote>"));
+        source.sendFeedback(Component.literal(
+                "/backup import zip <copy|link> <folder>"));
+        source.sendFeedback(Component.literal(
+                "Every import is previewed first and never overwrites a conflict.")
+                .withStyle(ChatFormatting.GRAY));
+        return 1;
+    }
+
+    private static int previewGitImport(
+            FabricClientCommandSource source,
+            BackupCommandFacade facade,
+            String remote,
+            GitHydrationMode hydration,
+            GitConnectionMode connection) {
+        source.sendFeedback(Component.literal("Inspecting remote WorldArchive history...")
+                .withStyle(ChatFormatting.GRAY));
+        facade.backupImports().previewGit(remote, hydration, connection)
+                .whenComplete((preview, throwable) -> onClient(source, () -> {
+                    if (throwable != null) {
+                        sendFailure(source, "Git import preview failed", throwable);
+                        return;
+                    }
+                    sendImportPreview(source, preview);
+                }));
+        return 1;
+    }
+
+    private static int previewZipImport(
+            FabricClientCommandSource source,
+            BackupCommandFacade facade,
+            String folder,
+            ZipImportMode mode) {
+        Path path;
+        try {
+            path = Path.of(folder);
+        } catch (RuntimeException exception) {
+            source.sendError(Component.literal("ZIP import folder is invalid."));
+            return 0;
+        }
+        source.sendFeedback(Component.literal("Inspecting WorldArchive ZIP folder...")
+                .withStyle(ChatFormatting.GRAY));
+        facade.backupImports().previewZip(path, mode)
+                .whenComplete((preview, throwable) -> onClient(source, () -> {
+                    if (throwable != null) {
+                        sendFailure(source, "ZIP import preview failed", throwable);
+                        return;
+                    }
+                    sendImportPreview(source, preview);
+                }));
+        return 1;
+    }
+
+    private static void sendImportPreview(
+            FabricClientCommandSource source,
+            ImportPreview preview) {
+        long conflicts = preview.items().stream()
+                .filter(item -> item.disposition()
+                        == dev.ishaankot.worldarchive.importing.ImportDisposition.CONFLICT)
+                .count();
+        source.sendFeedback(Component.literal(preview.kind() + " import preview")
+                .withStyle(ChatFormatting.AQUA, ChatFormatting.BOLD));
+        source.sendFeedback(Component.literal(preview.items().size() + " backup(s), "
+                + preview.actionableCount() + " change(s), " + conflicts + " conflict(s), "
+                + preview.issues().size() + " issue(s)").withStyle(ChatFormatting.GRAY));
+        if (preview.actionableCount() > 0) {
+            String command = "/backup import confirm " + preview.token();
+            source.sendFeedback(action(
+                    "[Confirm Recovery]",
+                    command,
+                    "Import only the exact artifacts in this preview"));
+        } else {
+            source.sendFeedback(Component.literal("Nothing needs to be imported.")
+                    .withStyle(ChatFormatting.GRAY));
+        }
+    }
+
+    private static int confirmImport(
+            FabricClientCommandSource source,
+            BackupCommandFacade facade,
+            String input) {
+        UUID token;
+        try {
+            token = UUID.fromString(input);
+        } catch (IllegalArgumentException exception) {
+            source.sendError(Component.literal("Import confirmation token is invalid."));
+            return 0;
+        }
+        source.sendFeedback(Component.literal("Recovering previewed backup artifacts...")
+                .withStyle(ChatFormatting.GRAY));
+        facade.backupImports().execute(token).whenComplete((summary, throwable) ->
+                onClient(source, () -> sendImportSummary(source, summary, throwable)));
+        return 1;
+    }
+
+    private static int rebuildCatalog(
+            FabricClientCommandSource source,
+            BackupCommandFacade facade) {
+        source.sendFeedback(Component.literal("Rebuilding catalog from managed local storage...")
+                .withStyle(ChatFormatting.GRAY));
+        facade.backupImports().rebuildLocal().whenComplete((summary, throwable) ->
+                onClient(source, () -> sendImportSummary(source, summary, throwable)));
+        return 1;
+    }
+
+    private static void sendImportSummary(
+            FabricClientCommandSource source,
+            ImportSummary summary,
+            Throwable throwable) {
+        if (throwable != null || summary == null) {
+            sendFailure(source, "Backup recovery failed", throwable == null
+                    ? new IllegalStateException("No recovery result was returned") : throwable);
+            return;
+        }
+        ChatFormatting color = summary.conflicts() == 0 && summary.issues() == 0
+                ? ChatFormatting.GREEN : ChatFormatting.YELLOW;
+        source.sendFeedback(Component.literal(summary.message()).withStyle(color));
     }
 
     private static int create(

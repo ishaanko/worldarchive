@@ -2,6 +2,7 @@ package dev.ishaankot.worldarchive.recovery;
 
 import dev.ishaankot.worldarchive.catalog.BackupCatalog;
 import dev.ishaankot.worldarchive.config.WorldIdentityStore;
+import dev.ishaankot.worldarchive.importing.ImportSourceRegistry;
 import dev.ishaankot.worldarchive.core.BackupMaintenanceService;
 import dev.ishaankot.worldarchive.core.BackupOperation;
 import dev.ishaankot.worldarchive.core.DeleteBackupRequest;
@@ -85,7 +86,31 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
             WorldOperationGate operationGate) {
         this(
                 catalog,
-                destinationMap(gitBackend, zipStore, Clock.systemUTC()),
+                destinationMap(gitBackend, zipStore, Optional.empty(), Clock.systemUTC()),
+                identityStore,
+                metadataFinalizer,
+                executor,
+                Clock.systemUTC(),
+                DEFAULT_CONFIRMATION_LIFETIME,
+                operationGate);
+    }
+
+    public BackupRecoveryService(
+            BackupCatalog catalog,
+            Optional<? extends GitSnapshotStore> gitBackend,
+            Optional<? extends ZipBackupStoreResolver> zipStore,
+            ImportSourceRegistry sources,
+            WorldIdentityStore identityStore,
+            RestoredWorldMetadataFinalizer metadataFinalizer,
+            Executor executor,
+            WorldOperationGate operationGate) {
+        this(
+                catalog,
+                destinationMap(
+                        gitBackend,
+                        zipStore,
+                        Optional.of(Objects.requireNonNull(sources, "sources")),
+                        Clock.systemUTC()),
                 identityStore,
                 metadataFinalizer,
                 executor,
@@ -862,15 +887,16 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
     private static Map<DestinationType, RecoveryDestination> destinationMap(
             Optional<? extends GitSnapshotStore> gitBackend,
             Optional<? extends ZipBackupStoreResolver> zipStore,
+            Optional<ImportSourceRegistry> sources,
             Clock clock) {
         Objects.requireNonNull(gitBackend, "gitBackend");
         Objects.requireNonNull(zipStore, "zipStore");
         EnumMap<DestinationType, RecoveryDestination> result =
                 new EnumMap<>(DestinationType.class);
         gitBackend.ifPresent(backend -> result.put(
-                DestinationType.GIT, new GitRecoveryDestination(backend, clock)));
+                DestinationType.GIT, new GitRecoveryDestination(backend, clock, sources)));
         zipStore.ifPresent(store -> result.put(
-                DestinationType.ZIP, new ZipRecoveryDestination(store, clock)));
+                DestinationType.ZIP, new ZipRecoveryDestination(store, clock, sources)));
         return result;
     }
 

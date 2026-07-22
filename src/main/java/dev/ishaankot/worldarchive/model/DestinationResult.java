@@ -10,7 +10,9 @@ public record DestinationResult(
         Optional<String> artifactId,
         Optional<String> message,
         VerificationStatus verificationStatus,
-        SyncStatus syncStatus) {
+        SyncStatus syncStatus,
+        ArtifactOwnership ownership,
+        Optional<ImportSourceId> importSourceId) {
     private static final int MAXIMUM_TEXT_LENGTH = 2_048;
 
     public DestinationResult {
@@ -23,6 +25,9 @@ public record DestinationResult(
         message = validateOptionalText(message, "message").map(SensitiveDataRedactor::redact);
         Objects.requireNonNull(verificationStatus, "verificationStatus");
         Objects.requireNonNull(syncStatus, "syncStatus");
+        Objects.requireNonNull(ownership, "ownership");
+        importSourceId = Objects.requireNonNull(importSourceId, "importSourceId");
+        validateOwnership(ownership, importSourceId);
         if ((status == DestinationStatus.SUCCESS || status == DestinationStatus.PENDING_SYNC)
                 && artifactId.isEmpty()) {
             throw new IllegalArgumentException("A durable destination result must identify its artifact");
@@ -37,6 +42,36 @@ public record DestinationResult(
         }
     }
 
+    private static void validateOwnership(
+            ArtifactOwnership ownership,
+            Optional<ImportSourceId> importSourceId) {
+        if (ownership != ArtifactOwnership.MANAGED && importSourceId.isEmpty()) {
+            throw new IllegalArgumentException("An imported artifact must identify its import source");
+        }
+        if (ownership == ArtifactOwnership.MANAGED && importSourceId.isPresent()) {
+            throw new IllegalArgumentException("A managed artifact must not identify an import source");
+        }
+    }
+
+    /** Compatibility constructor for initial destination implementations. */
+    public DestinationResult(
+            DestinationType destination,
+            DestinationStatus status,
+            Optional<String> artifactId,
+            Optional<String> message,
+            VerificationStatus verificationStatus,
+            SyncStatus syncStatus) {
+        this(
+                destination,
+                status,
+                artifactId,
+                message,
+                verificationStatus,
+                syncStatus,
+                ArtifactOwnership.MANAGED,
+                Optional.empty());
+    }
+
     /** Compatibility constructor for initial destination implementations. */
     public DestinationResult(
             DestinationType destination,
@@ -49,7 +84,9 @@ public record DestinationResult(
                 artifactId,
                 message,
                 VerificationStatus.NOT_VERIFIED,
-                defaultSyncStatus(status));
+                defaultSyncStatus(status),
+                ArtifactOwnership.MANAGED,
+                Optional.empty());
     }
 
     public static DestinationResult success(DestinationType destination, String artifactId) {
@@ -59,7 +96,9 @@ public record DestinationResult(
                 Optional.ofNullable(artifactId),
                 Optional.empty(),
                 VerificationStatus.NOT_VERIFIED,
-                SyncStatus.NOT_CONFIGURED);
+                SyncStatus.NOT_CONFIGURED,
+                ArtifactOwnership.MANAGED,
+                Optional.empty());
     }
 
     public static DestinationResult failed(DestinationType destination, String message) {
@@ -69,7 +108,9 @@ public record DestinationResult(
                 Optional.empty(),
                 Optional.of(message),
                 VerificationStatus.NOT_VERIFIED,
-                SyncStatus.FAILED);
+                SyncStatus.FAILED,
+                ArtifactOwnership.MANAGED,
+                Optional.empty());
     }
 
     /** A durable local backup whose optional remote synchronization must be retried. */
@@ -83,7 +124,9 @@ public record DestinationResult(
                 Optional.of(artifactId),
                 Optional.of(message),
                 VerificationStatus.NOT_VERIFIED,
-                SyncStatus.PENDING);
+                SyncStatus.PENDING,
+                ArtifactOwnership.MANAGED,
+                Optional.empty());
     }
 
     public static DestinationResult skipped(DestinationType destination, String message) {
@@ -93,15 +136,69 @@ public record DestinationResult(
                 Optional.empty(),
                 Optional.ofNullable(message),
                 VerificationStatus.NOT_VERIFIED,
-                SyncStatus.NOT_CONFIGURED);
+                SyncStatus.NOT_CONFIGURED,
+                ArtifactOwnership.MANAGED,
+                Optional.empty());
+    }
+
+    /** A verified or remotely durable artifact that WorldArchive must never mutate. */
+    public static DestinationResult externalSuccess(
+            DestinationType destination,
+            String artifactId,
+            ImportSourceId sourceId,
+            VerificationStatus verification,
+            SyncStatus sync) {
+        return new DestinationResult(
+                destination,
+                DestinationStatus.SUCCESS,
+                Optional.ofNullable(artifactId),
+                Optional.empty(),
+                verification,
+                sync,
+                ArtifactOwnership.EXTERNAL,
+                Optional.of(Objects.requireNonNull(sourceId, "sourceId")));
+    }
+
+    /** A locally owned imported artifact whose original remote must never be mutated. */
+    public static DestinationResult importedSuccess(
+            DestinationType destination,
+            String artifactId,
+            ImportSourceId sourceId,
+            VerificationStatus verification,
+            SyncStatus sync) {
+        return new DestinationResult(
+                destination,
+                DestinationStatus.SUCCESS,
+                Optional.ofNullable(artifactId),
+                Optional.empty(),
+                verification,
+                sync,
+                ArtifactOwnership.IMPORTED_MANAGED,
+                Optional.of(Objects.requireNonNull(sourceId, "sourceId")));
     }
 
     public DestinationResult withVerification(VerificationStatus verification) {
-        return new DestinationResult(destination, status, artifactId, message, verification, syncStatus);
+        return new DestinationResult(
+                destination,
+                status,
+                artifactId,
+                message,
+                verification,
+                syncStatus,
+                ownership,
+                importSourceId);
     }
 
     public DestinationResult withSync(SyncStatus sync) {
-        return new DestinationResult(destination, status, artifactId, message, verificationStatus, sync);
+        return new DestinationResult(
+                destination,
+                status,
+                artifactId,
+                message,
+                verificationStatus,
+                sync,
+                ownership,
+                importSourceId);
     }
 
     private static Optional<String> validateOptionalText(Optional<String> value, String name) {

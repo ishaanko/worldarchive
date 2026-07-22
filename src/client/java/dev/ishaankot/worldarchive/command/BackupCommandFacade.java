@@ -2,6 +2,7 @@ package dev.ishaankot.worldarchive.command;
 
 import dev.ishaankot.worldarchive.core.BackupCoordinator;
 import dev.ishaankot.worldarchive.core.ProgressListener;
+import dev.ishaankot.worldarchive.importing.BackupImportService;
 import dev.ishaankot.worldarchive.model.BackupId;
 import dev.ishaankot.worldarchive.model.BackupResult;
 import dev.ishaankot.worldarchive.model.WorldId;
@@ -11,6 +12,8 @@ import java.util.concurrent.CompletionStage;
 /** Client operations required by the Brigadier adapter. */
 public interface BackupCommandFacade {
     BackupCoordinator backups();
+
+    BackupImportService backupImports();
 
     Optional<WorldId> activeWorldId();
 

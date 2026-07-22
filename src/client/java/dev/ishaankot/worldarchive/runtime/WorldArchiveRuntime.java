@@ -7,11 +7,8 @@ import dev.ishaankot.worldarchive.command.BackupCommandFacade;
 import dev.ishaankot.worldarchive.config.WorldArchiveConfig;
 import dev.ishaankot.worldarchive.config.WorldConfig;
 import dev.ishaankot.worldarchive.config.WorldIdentityStore;
-import dev.ishaankot.worldarchive.core.BackupBackend;
-import dev.ishaankot.worldarchive.core.BackupCaptureGate;
 import dev.ishaankot.worldarchive.core.BackupCoordinator;
 import dev.ishaankot.worldarchive.core.BackupService;
-import dev.ishaankot.worldarchive.core.ConfiguredBackupDestinationSelector;
 import dev.ishaankot.worldarchive.core.CreateBackupRequest;
 import dev.ishaankot.worldarchive.core.FileSystemBackupCaptureFactory;
 import dev.ishaankot.worldarchive.core.FileWorldInventoryStore;
@@ -20,7 +17,7 @@ import dev.ishaankot.worldarchive.core.OperationProgress;
 import dev.ishaankot.worldarchive.core.PreparedBackup;
 import dev.ishaankot.worldarchive.core.ProgressListener;
 import dev.ishaankot.worldarchive.core.RestoreBackupResult;
-import dev.ishaankot.worldarchive.core.SerializedBackupCoordinator;
+import dev.ishaankot.worldarchive.importing.BackupImportService;
 import dev.ishaankot.worldarchive.model.BackupId;
 import dev.ishaankot.worldarchive.model.BackupRecord;
 import dev.ishaankot.worldarchive.model.BackupResult;
@@ -30,17 +27,12 @@ import dev.ishaankot.worldarchive.model.DestinationHealthStatus;
 import dev.ishaankot.worldarchive.model.DestinationType;
 import dev.ishaankot.worldarchive.model.SensitiveDataRedactor;
 import dev.ishaankot.worldarchive.model.WorldId;
-import dev.ishaankot.worldarchive.recovery.BackupRecoveryService;
 import dev.ishaankot.worldarchive.settings.ClientSettingsAccess;
 import dev.ishaankot.worldarchive.settings.SettingsDefaults;
 import dev.ishaankot.worldarchive.settings.WorldFolderDiscovery;
-import dev.ishaankot.worldarchive.storage.git.GitBackendSettings;
-import dev.ishaankot.worldarchive.storage.git.SystemGitCommandRunner;
-import dev.ishaankot.worldarchive.storage.git.WorldGitSnapshotStore;
-import dev.ishaankot.worldarchive.storage.zip.ZipBackupBackend;
-import dev.ishaankot.worldarchive.storage.zip.ZipBackupStoreResolver;
 import dev.ishaankot.worldarchive.ui.BackupClientFacade;
 import dev.ishaankot.worldarchive.ui.BackupWorldContext;
+import dev.ishaankot.worldarchive.ui.BackupWorldEntry;
 import dev.ishaankot.worldarchive.ui.BackupWorldSelection;
 import dev.ishaankot.worldarchive.ui.model.BackupBrowserCapabilities;
 import dev.ishaankot.worldarchive.ui.model.BackupRow;
@@ -129,6 +121,8 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
     private final Set<CompletableFuture<BackupResult>> exitWork = ConcurrentHashMap.newKeySet();
 
     private final BackupCoordinator coordinatorView = new RuntimeBackupCoordinator(this);
+
+    private final BackupImportService importsView = new RuntimeBackupImportService(this);
 
     private final RuntimeNavigation navigation = new RuntimeNavigation(this);
 
@@ -352,6 +346,11 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         return coordinatorView;
     }
 
+    @Override
+    public BackupImportService backupImports() {
+        return importsView;
+    }
+
     RuntimeConfigurationGate configurationGate() {
         return configurationGate;
     }
@@ -376,6 +375,38 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         return workerExecutor;
     }
 
+    Path storageRoot() {
+        return storageRoot;
+    }
+
+    BackupCatalog catalog() {
+        return catalog;
+    }
+
+    FileWorldInventoryStore inventoryStore() {
+        return inventoryStore;
+    }
+
+    FileSystemBackupCaptureFactory captureFactory() {
+        return captureFactory;
+    }
+
+    WorldIdentityStore identityStore() {
+        return identityStore;
+    }
+
+    LockingWorldOperationGate captureMutex() {
+        return captureMutex;
+    }
+
+    LockingWorldOperationGate operationGate() {
+        return operationGate;
+    }
+
+    Clock clock() {
+        return clock;
+    }
+
     RuntimeActionContextRegistry actionContexts() {
         return actionContexts;
     }
@@ -391,6 +422,19 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
     @Override
     public BackupService backupService() {
         return coordinatorView;
+    }
+
+    @Override
+    public BackupImportService importService() {
+        return importsView;
+    }
+
+    @Override
+    public CompletionStage<List<BackupWorldEntry>> backupWorlds() {
+        if (unavailable()) {
+            return failedStage("WorldArchive is still loading");
+        }
+        return submit(() -> new RuntimeBackupWorlds(this, catalog).list());
     }
 
     @Override
@@ -545,61 +589,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
     }
 
     private RuntimeState buildState(WorldArchiveConfig config) {
-        RuntimeStoragePaths storagePaths = RuntimeStoragePaths.from(config, storageRoot);
-        Path gitRepository = storagePaths.gitRepository();
-        WorldGitSnapshotStore gitBackend = new WorldGitSnapshotStore(
-                GitBackendSettings.from(config.git(), gitRepository),
-                GitBackendSettings.legacyFrom(config.git()),
-                config.worlds().stream()
-                        .filter(world -> world.remoteUrl().isPresent())
-                        .collect(java.util.stream.Collectors.toUnmodifiableMap(
-                                WorldConfig::worldId,
-                                world -> world.remoteUrl().orElseThrow())),
-                new SystemGitCommandRunner(),
-                workerExecutor);
-        ZipBackupStoreResolver zipStores = new RuntimeZipBackupStores(storagePaths);
-        ZipBackupBackend zipBackend = new ZipBackupBackend(zipStores, workerExecutor);
-        List<BackupBackend> backends = List.of(gitBackend, zipBackend);
-        ConfiguredBackupDestinationSelector selector =
-                new ConfiguredBackupDestinationSelector(() -> config, backends);
-        RuntimeDestinationSelector runtimeSelector = new RuntimeDestinationSelector(selector);
-        BackupRecoveryService recovery = new BackupRecoveryService(
-                catalog,
-                Optional.of(gitBackend),
-                Optional.of(zipStores),
-                identityStore,
-                new MinecraftRestoredWorldMetadataFinalizer(),
-                workerExecutor,
-                operationGate);
-        SerializedBackupCoordinator coordinator = new SerializedBackupCoordinator(
-                catalog,
-                captureFactory,
-                inventoryStore,
-                runtimeSelector,
-                recovery,
-                BackupCaptureGate.DIRECT,
-                captureMutex,
-                operationGate,
-                workerExecutor,
-                clock);
-        RuntimeState state = new RuntimeState(
-                config,
-                storagePaths,
-                gitBackend,
-                runtimeSelector,
-                coordinator);
-        if (config.git().enabled()) {
-            gitBackend.probeTools().whenComplete((health, throwable) -> {
-                if (throwable != null || health == null) {
-                    runtimeSelector.gitToolProbeFailed();
-                } else {
-                    runtimeSelector.gitToolsAvailable(health.available());
-                }
-            });
-        } else {
-            runtimeSelector.gitDisabled();
-        }
-        return state;
+        return new RuntimeStateFactory(this).build(config);
     }
 
     Optional<BackupWorldContext> resolveWorldBlocking(

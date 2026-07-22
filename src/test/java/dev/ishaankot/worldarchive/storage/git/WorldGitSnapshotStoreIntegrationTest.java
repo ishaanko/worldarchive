@@ -398,6 +398,66 @@ class WorldGitSnapshotStoreIntegrationTest {
         }
     }
 
+    @Test
+    void importsFullAndRemoteBackedHistoriesAndRebuildsMissingSnapshotRefs() throws Exception {
+        WorldId worldId = WorldId.create();
+        BackupId firstBackup = BackupId.create();
+        BackupId secondBackup = BackupId.create();
+        Path world = world("import-source-world", "first");
+        Path region = world.resolve("region").resolve("r.0.0.mca");
+        Files.createDirectories(region.getParent());
+        Files.writeString(region, "lfs-content");
+        Path producerRoot = temporaryDirectory.resolve("import-producer");
+        try (WorldGitSnapshotStore producer = new WorldGitSnapshotStore(
+                settings(producerRoot, Optional.empty()))) {
+            assertEquals(DestinationStatus.SUCCESS, await(producer.createBackup(
+                    capture(world, worldId, firstBackup, Instant.now().minusSeconds(2)),
+                    ProgressListener.NO_OP)).status());
+            Files.writeString(world.resolve("level.dat"), "second");
+            assertEquals(DestinationStatus.SUCCESS, await(producer.createBackup(
+                    capture(world, worldId, secondBackup, Instant.now().minusSeconds(1)),
+                    ProgressListener.NO_OP)).status());
+
+            Path sourceRepository = producer.repositoryFor(worldId);
+            try (WorldGitSnapshotStore full = new WorldGitSnapshotStore(settings(
+                            temporaryDirectory.resolve("import-full"), Optional.empty()));
+                    WorldGitSnapshotStore remoteBacked = new WorldGitSnapshotStore(settings(
+                            temporaryDirectory.resolve("import-remote"), Optional.empty()));
+                    GitPreparedImport prepared = await(full.prepareImport(sourceRepository.toString()))) {
+                assertEquals(2, prepared.candidates().size());
+                assertTrue(prepared.issues().isEmpty());
+                assertEquals(2, await(full.installImport(prepared, true)).size());
+                assertTrue(await(full.verifySnapshot(worldId, firstBackup)).valid());
+                assertTrue(await(full.verifySnapshot(worldId, secondBackup)).valid());
+
+                nativeGit(
+                        "--git-dir=" + full.repositoryFor(worldId),
+                        "update-ref",
+                        "-d",
+                        GitSnapshot.refName(worldId, firstBackup));
+                assertEquals(1, await(full.rebuildSnapshotRefs()));
+                assertEquals(2, await(full.listSnapshots(Optional.of(worldId))).size());
+
+                assertEquals(2, await(remoteBacked.installImport(prepared, false)).size());
+                GitImportCandidate candidate = prepared.candidates().stream()
+                        .filter(value -> value.manifest().backupId().equals(secondBackup))
+                        .findFirst()
+                        .orElseThrow();
+                assertFalse(await(remoteBacked.verifySnapshot(worldId, secondBackup)).valid());
+                assertTrue(await(remoteBacked.hydrateExternalSnapshot(
+                        worldId,
+                        secondBackup,
+                        candidate.manifest(),
+                        candidate.commitId(),
+                        sourceRepository.toString())).valid());
+                assertTrue(await(remoteBacked.deleteLocalSnapshot(worldId, secondBackup)));
+                assertFalse(await(remoteBacked.listSnapshots(Optional.of(worldId))).stream()
+                        .anyMatch(snapshot -> snapshot.backupId().equals(secondBackup)));
+                assertTrue(Files.isDirectory(sourceRepository));
+            }
+        }
+    }
+
     private Path world(String name, String contents) throws IOException {
         Path world = Files.createDirectory(temporaryDirectory.resolve(name));
         Files.writeString(world.resolve("level.dat"), contents, StandardCharsets.UTF_8);

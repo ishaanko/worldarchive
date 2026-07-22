@@ -311,7 +311,7 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
         }
     }
 
-    private static void acquireProcessLock(ReentrantLock lock) throws InterruptedIOException {
+    static void acquireProcessLock(ReentrantLock lock) throws InterruptedIOException {
         try {
             lock.lockInterruptibly();
         } catch (InterruptedException exception) {
@@ -372,6 +372,11 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
         }
         verifyManagedArchive(managed, verification);
         return verification.finish();
+    }
+
+    /** Atomically copies one fully inspected external archive into managed storage. */
+    public ZipBackupArtifact importCopy(ZipImportCandidate candidate) throws IOException {
+        return new ZipImportPublisher(root).importCopy(candidate);
     }
 
     private void verifyManagedArchive(
@@ -695,7 +700,7 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
         return inspection;
     }
 
-    private static Inspection requireValidInspection(
+    static Inspection requireValidInspection(
             Inspection inspection,
             WorldId expectedWorldId,
             BackupId expectedBackupId) throws IOException {
@@ -772,7 +777,7 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
         }
     }
 
-    private static void writeChecksum(
+    static void writeChecksum(
             ManagedDirectoryAccess destination,
             String partialName,
             String sha256,
@@ -790,7 +795,7 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
         }
     }
 
-    private static void atomicPublish(
+    static void atomicPublish(
             ManagedDirectoryAccess destination,
             String partialName,
             String publishedName) throws IOException {
@@ -801,7 +806,7 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
         }
     }
 
-    private static void cleanupFailure(
+    static void cleanupFailure(
             Throwable failure,
             ManagedDirectoryAccess destination,
             String... names) {
@@ -890,7 +895,7 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
                 parent.resolve(archive.getFileName().toString() + ".sha256"));
     }
 
-    private static String readChecksum(
+    static String readChecksum(
             ManagedDirectoryAccess directory,
             String checksumName,
             String archiveName) throws IOException {
@@ -940,7 +945,7 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
                 attributes.creationTime());
     }
 
-    private static void requireNotInterrupted() throws InterruptedIOException {
+    static void requireNotInterrupted() throws InterruptedIOException {
         if (Thread.currentThread().isInterrupted()) {
             throw new InterruptedIOException("ZIP operation was interrupted");
         }
