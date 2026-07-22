@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.2.0 (2026-07-21)
+
+### Changed
+
+- Add compact WorldArchive icon shortcuts beside Mod Menu on the title screen
+  and beside the lower mod-icon row on the pause screen.
+- Give remote backup branches readable UTC date/time names and automatically
+  migrate matching legacy UUID-style branches during synchronization.
+- Synchronize every newly created Git commit immediately when its world has a
+  remote configured.
+- Configure an ordinary Git remote URL independently for each world instead of
+  using a global `{worldId}` template.
+- Show automatic six-character world codes while retaining full internal UUIDs
+  for collision-safe backup compatibility.
+- Replace the mod icon with crisp 16-by-16-grid Minecraft-style artwork.
+- Restore the visible Git remote-name field, simplify setup guidance, and use
+  concise backup progress and completion notices.
+
+### Fixed
+
+- Keep remote setup guidance wrapped inside the settings layout instead of
+  allowing long hint text to spill over the panorama.
+- Remove cramped cloud-folder and automatic-world-code explanatory copy.
+- Center the entire pause-menu mod-icon row after adding WorldArchive, including
+  layouts with one or no existing lower-row icons.
+- Remove integrity and changed-file controls from the backup browser, simplify
+  each backup row, and warn that large worlds may take a while to back up.
+- Tell players to keep Minecraft open while a backup runs and explicitly
+  confirm when it is safe to quit after Save & Quit.
+
 ## 0.1.3 (2026-07-21)
 
 ### Fixed
