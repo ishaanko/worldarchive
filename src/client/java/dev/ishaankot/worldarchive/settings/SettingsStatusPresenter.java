@@ -79,6 +79,10 @@ final class SettingsStatusPresenter {
             return Tooltip.create(Component.translatable(
                     "screen.worldarchive.settings.world_remote_steps"));
         }
+        if (field == SettingsField.WORLD_ZIP_DESTINATION) {
+            return Tooltip.create(Component.translatable(
+                    "screen.worldarchive.settings.world_zip_tooltip"));
+        }
         if (field == SettingsField.GIT_REMOTE_NAME) {
             return Tooltip.create(Component.translatable(
                     "screen.worldarchive.settings.remote_name_tooltip"));
@@ -106,6 +110,7 @@ final class SettingsStatusPresenter {
                     SettingsField.DESTINATIONS);
             case WORLDS -> List.of(
                     SettingsField.WORLD_REMOTE_URL,
+                    SettingsField.WORLD_ZIP_DESTINATION,
                     SettingsField.DESTINATIONS);
         };
         for (SettingsField field : pageFields) {

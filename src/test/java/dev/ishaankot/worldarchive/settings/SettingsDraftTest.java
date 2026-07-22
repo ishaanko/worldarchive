@@ -261,6 +261,31 @@ class SettingsDraftTest {
     }
 
     @Test
+    void validatesAndPreservesPerWorldZipOverride() throws IOException {
+        Path world = Files.createDirectory(temporaryDirectory.resolve("override-world"));
+        Path override = Files.createDirectory(temporaryDirectory.resolve("override-zips"));
+        WorldId worldId = WorldId.create();
+        WorldArchiveConfig defaults = resolvedDefaults();
+        SettingsDraft draft = SettingsDraft.from(new WorldArchiveConfig(
+                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
+                defaults.triggers(),
+                defaults.git(),
+                defaults.zip(),
+                List.of(new WorldConfig(worldId, true, world))));
+
+        draft.setWorldZipDestination(worldId, override.toString());
+
+        WorldConfig validated = draft.validate(List.of(world))
+                .config().orElseThrow().worlds().getFirst();
+        assertEquals(override.toRealPath(), validated.zipDestination().orElseThrow());
+        assertEquals(
+                validated.zipDestination(),
+                SettingsDraft.defaultsKeepingWorlds(
+                                draft.validate(List.of(world)).config().orElseThrow())
+                        .base().worlds().getFirst().zipDestination());
+    }
+
+    @Test
     void preservesHiddenLegacyGitStorageAcrossValidationAndDefaults() throws IOException {
         Path legacyRepository = Files.createDirectory(temporaryDirectory.resolve("legacy-shared.git"));
         WorldArchiveConfig resolved = resolvedDefaults();

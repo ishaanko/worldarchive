@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Replace the one-world-at-a-time settings page with a visible world list and
+  selected-world editor.
+- Allow each world to override the default ZIP folder while keeping the ZIP tab
+  as the inherited default for existing and newly discovered worlds.
+- Capitalize destination health labels and states in the settings footer.
+- Simplify the `/backup` dashboard and chat formatting, add dedicated command
+  help, expose per-backup actions directly from list rows, and add managed-folder
+  access so the command surface matches the backup GUI more closely.
+
+### Fixed
+
+- Keep the inherited ZIP-folder hint inside its field and make the per-world
+  toggle positive: selected enables a separate folder, while unselected inherits
+  the ZIP-tab default.
+- Clarify that the Git folder is a parent for isolated per-world repositories and
+  that configured remotes synchronize automatically after each new Git backup.
+
 ## 0.2.0 (2026-07-21)
 
 ### Changed

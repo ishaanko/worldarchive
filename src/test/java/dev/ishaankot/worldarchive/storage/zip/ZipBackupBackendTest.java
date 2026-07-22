@@ -72,12 +72,39 @@ class ZipBackupBackendTest {
         }
     }
 
+    @Test
+    void resolverRoutesEachWorldToItsConfiguredZipRoot() throws Exception {
+        Path world = Files.createDirectory(temporaryDirectory.resolve("routed-world"));
+        byte[] contents = "routed world data".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        Files.write(world.resolve("level.dat"), contents);
+        WorldId worldId = WorldId.create();
+        Path defaultRoot = temporaryDirectory.resolve("default-archives");
+        Path overrideRoot = temporaryDirectory.resolve("override-archives");
+        ZipBackupStoreResolver stores = candidate -> new ZipBackupStore(
+                candidate.equals(worldId) ? overrideRoot : defaultRoot);
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            ZipBackupBackend backend = new ZipBackupBackend(stores, executor);
+
+            var result = backend.createBackup(
+                    new BackupCapture(world, manifest(contents, worldId)),
+                    ignored -> {}).toCompletableFuture().get(10, TimeUnit.SECONDS);
+
+            assertEquals(DestinationStatus.SUCCESS, result.status());
+            assertTrue(Files.isDirectory(overrideRoot.resolve(worldId.toString())));
+            assertFalse(Files.exists(defaultRoot));
+        }
+    }
+
     private static BackupManifest manifest(byte[] contents) {
+        return manifest(contents, WorldId.create());
+    }
+
+    private static BackupManifest manifest(byte[] contents, WorldId worldId) {
         ZipInventory inventory = ZipInventory.create(List.of(new ZipInventoryEntry(
                 "level.dat", contents.length, sha256(contents))));
         return BackupManifest.create(
                 BackupId.create(),
-                WorldId.create(),
+                worldId,
                 "Test World",
                 Optional.empty(),
                 Instant.parse("2026-07-17T20:15:30.123Z"),

@@ -41,7 +41,7 @@ import java.util.regex.Pattern;
  * shared capture manifest, binding a published archive to the exact source tree prepared for every
  * enabled destination.</p>
  */
-public final class ZipBackupStore {
+public final class ZipBackupStore implements ZipBackupStoreResolver {
     private static final String OPERATION_LOCK_NAME = ".worldarchive.lock";
 
     private static final ConcurrentMap<Path, ReentrantLock> PROCESS_LOCKS =
@@ -80,6 +80,17 @@ public final class ZipBackupStore {
 
     public Path root() {
         return root;
+    }
+
+    @Override
+    public ZipBackupStore store(WorldId worldId) {
+        Objects.requireNonNull(worldId, "worldId");
+        return this;
+    }
+
+    @Override
+    public ZipBackupStore defaultStore() {
+        return this;
     }
 
     /** Creates and publishes one complete archive/checksum pair. */

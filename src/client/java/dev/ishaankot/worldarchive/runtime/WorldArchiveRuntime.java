@@ -22,11 +22,11 @@ import dev.ishaankot.worldarchive.core.ProgressListener;
 import dev.ishaankot.worldarchive.core.RestoreBackupResult;
 import dev.ishaankot.worldarchive.core.SerializedBackupCoordinator;
 import dev.ishaankot.worldarchive.model.BackupId;
+import dev.ishaankot.worldarchive.model.BackupRecord;
 import dev.ishaankot.worldarchive.model.BackupResult;
 import dev.ishaankot.worldarchive.model.BackupTrigger;
 import dev.ishaankot.worldarchive.model.DestinationHealth;
 import dev.ishaankot.worldarchive.model.DestinationHealthStatus;
-import dev.ishaankot.worldarchive.model.DestinationResult;
 import dev.ishaankot.worldarchive.model.DestinationType;
 import dev.ishaankot.worldarchive.model.SensitiveDataRedactor;
 import dev.ishaankot.worldarchive.model.WorldId;
@@ -38,7 +38,7 @@ import dev.ishaankot.worldarchive.storage.git.GitBackendSettings;
 import dev.ishaankot.worldarchive.storage.git.SystemGitCommandRunner;
 import dev.ishaankot.worldarchive.storage.git.WorldGitSnapshotStore;
 import dev.ishaankot.worldarchive.storage.zip.ZipBackupBackend;
-import dev.ishaankot.worldarchive.storage.zip.ZipBackupStore;
+import dev.ishaankot.worldarchive.storage.zip.ZipBackupStoreResolver;
 import dev.ishaankot.worldarchive.ui.BackupClientFacade;
 import dev.ishaankot.worldarchive.ui.BackupWorldContext;
 import dev.ishaankot.worldarchive.ui.BackupWorldSelection;
@@ -229,20 +229,16 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
             if (current.storagePaths().equals(replacement)) {
                 return;
             }
-            List<DestinationResult> destinations;
+            List<BackupRecord> records;
             try {
-                destinations = catalog.listAll().stream()
-                        .flatMap(record -> record.result().destinations().stream())
-                        .toList();
+                records = catalog.listAll();
             } catch (IOException exception) {
                 throw new IllegalStateException(
                         "Destination paths cannot be validated against the backup catalog",
                         exception);
             }
-            RuntimeDestinationPathGuard.requireAllowed(
-                    current.storagePaths(),
-                    replacement,
-                    destinations);
+            RuntimeDestinationPathGuard.requireCatalogAllowed(
+                    current.storagePaths(), replacement, records);
         }
     }
 
@@ -539,6 +535,11 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
     }
 
     @Override
+    public CompletionStage<Void> openBackupFolder(Optional<BackupId> backupId) {
+        return navigation.openManagedFolder(backupId);
+    }
+
+    @Override
     public void openSettings() {
         navigation.openSettings(new PauseScreen(true));
     }
@@ -546,7 +547,6 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
     private RuntimeState buildState(WorldArchiveConfig config) {
         RuntimeStoragePaths storagePaths = RuntimeStoragePaths.from(config, storageRoot);
         Path gitRepository = storagePaths.gitRepository();
-        Path zipDirectory = storagePaths.zipDirectory();
         WorldGitSnapshotStore gitBackend = new WorldGitSnapshotStore(
                 GitBackendSettings.from(config.git(), gitRepository),
                 GitBackendSettings.legacyFrom(config.git()),
@@ -557,8 +557,8 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
                                 world -> world.remoteUrl().orElseThrow())),
                 new SystemGitCommandRunner(),
                 workerExecutor);
-        ZipBackupStore zipStore = new ZipBackupStore(zipDirectory);
-        ZipBackupBackend zipBackend = new ZipBackupBackend(zipStore, workerExecutor);
+        ZipBackupStoreResolver zipStores = new RuntimeZipBackupStores(storagePaths);
+        ZipBackupBackend zipBackend = new ZipBackupBackend(zipStores, workerExecutor);
         List<BackupBackend> backends = List.of(gitBackend, zipBackend);
         ConfiguredBackupDestinationSelector selector =
                 new ConfiguredBackupDestinationSelector(() -> config, backends);
@@ -566,7 +566,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         BackupRecoveryService recovery = new BackupRecoveryService(
                 catalog,
                 Optional.of(gitBackend),
-                Optional.of(zipStore),
+                Optional.of(zipStores),
                 identityStore,
                 new MinecraftRestoredWorldMetadataFinalizer(),
                 workerExecutor,

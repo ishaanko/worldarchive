@@ -54,7 +54,8 @@ public final class WorldConfigReconciler {
                     worldId,
                     enabled,
                     path,
-                    stored == null ? Optional.empty() : stored.remoteUrl()));
+                    stored == null ? Optional.empty() : stored.remoteUrl(),
+                    stored == null ? Optional.empty() : stored.zipDestination()));
             usedIds.add(worldId);
             usedPaths.add(path);
         }

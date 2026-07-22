@@ -118,6 +118,9 @@ public final class WorldArchiveConfigStore {
             } else if (schemaVersion == 4) {
                 parsed = migrateVersionFour(root);
                 migrated = true;
+            } else if (schemaVersion == 5) {
+                parsed = parseCurrent(root);
+                migrated = true;
             } else {
                 parsed = parseCurrent(root);
                 migrated = false;
@@ -371,6 +374,8 @@ public final class WorldArchiveConfigStore {
             world.addProperty("enabled", worldConfig.enabled());
             world.addProperty("path", worldConfig.path().toString());
             worldConfig.remoteUrl().ifPresent(url -> world.addProperty("remoteUrl", url));
+            worldConfig.zipDestination()
+                    .ifPresent(path -> world.addProperty("zipDestination", path.toString()));
             worlds.add(world);
         }
         root.add("worlds", worlds);
@@ -556,7 +561,8 @@ public final class WorldArchiveConfigStore {
                     WorldId.parse(requiredString(world, "worldId")),
                     requiredBoolean(world, "enabled"),
                     requiredPath(world, "path"),
-                    optionalString(world, "remoteUrl")));
+                    optionalString(world, "remoteUrl"),
+                    optionalPath(world, "zipDestination")));
         }
         return worlds;
     }

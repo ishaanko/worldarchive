@@ -102,6 +102,34 @@ final class RuntimeNavigation {
         openBrowserForBackup(backupId, CommandAction.DELETE);
     }
 
+    CompletionStage<Void> openManagedFolder(Optional<BackupId> backupId) {
+        Objects.requireNonNull(backupId, "backupId");
+        RuntimeState state = runtime.states().currentOrNull();
+        if (state == null || runtime.isClosed()) {
+            return WorldArchiveRuntime.failedStage("WorldArchive is still loading");
+        }
+        if (backupId.isEmpty()) {
+            BackupWorldContext active = runtime.currentLiveWorld();
+            if (active == null) {
+                return WorldArchiveRuntime.failedStage(
+                        "Open a world or provide a backup ID before opening its folder");
+            }
+            openManagedFolder(active, Optional.empty());
+            return CompletableFuture.completedFuture(null);
+        }
+        return state.coordinator().findBackup(backupId.orElseThrow())
+                .thenCompose(record -> record
+                        .<CompletionStage<BackupRecord>>map(CompletableFuture::completedFuture)
+                        .orElseGet(() -> WorldArchiveRuntime.failedStage("Backup was not found")))
+                .thenCompose(record -> contextForRecord(state, record)
+                        .thenApply(context -> new FolderTarget(record, context)))
+                .thenAccept(target -> {
+                    BackupWorldContext context = target.context().orElseThrow(() ->
+                            new IllegalStateException("Backup world could not be resolved"));
+                    openManagedFolder(context, Optional.of(BackupRow.from(target.record())));
+                });
+    }
+
     boolean sourceDirectoryAvailable(BackupWorldContext world) {
         if (!runtime.actionContexts().sourceActionsAllowed(world)) {
             return false;
@@ -260,13 +288,17 @@ final class RuntimeNavigation {
             BackupWorldContext world,
             Optional<BackupRow> selected) {
         if (selected.isPresent() && selected.orElseThrow().zip().durable()) {
-            return state.storagePaths().zipDirectory().resolve(world.worldId().toString());
+            return state.storagePaths()
+                    .zipDirectory(world.worldId())
+                    .resolve(world.worldId().toString());
         }
         if (selected.isPresent() && selected.orElseThrow().git().durable()) {
             return state.gitBackend().repositoryFor(world.worldId());
         }
         if (state.config().zip().enabled()) {
-            return state.storagePaths().zipDirectory();
+            return state.storagePaths()
+                    .zipDirectory(world.worldId())
+                    .resolve(world.worldId().toString());
         }
         return state.gitBackend().repositoryFor(world.worldId());
     }
@@ -382,5 +414,14 @@ final class RuntimeNavigation {
     private enum CommandAction {
         RESTORE,
         DELETE
+    }
+
+    private record FolderTarget(
+            BackupRecord record,
+            Optional<BackupWorldContext> context) {
+        private FolderTarget {
+            Objects.requireNonNull(record, "record");
+            Objects.requireNonNull(context, "context");
+        }
     }
 }

@@ -86,9 +86,9 @@ class SettingsHealthSnapshotTest {
                 new SettingsHealthItem(SettingsHealthStatus.HEALTHY, "archive folder is ready"));
 
         assertEquals(
-                "Git ready | LFS missing | repository ready | remote not configured",
+                "Git Ready | LFS Missing | Repository Ready | Remote Not Configured",
                 snapshot.gitDisplaySummary());
-        assertEquals("ZIP folder ready", snapshot.zipDisplaySummary());
+        assertEquals("ZIP Folder Ready", snapshot.zipDisplaySummary());
         assertEquals(
                 "Git git version 2.55.0.windows.3 | LFS Git LFS is not installed"
                         + " | repository repository is ready | remote not configured",

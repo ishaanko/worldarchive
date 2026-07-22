@@ -58,9 +58,10 @@ class CommandViewsTest {
     void standardHelpCoversThePlannedSurface() {
         CommandHelpView help = CommandHelpView.standard();
 
-        assertEquals(10, help.entries().size());
+        assertEquals(12, help.entries().size());
         assertTrue(help.entries().stream().anyMatch(entry -> entry.usage().equals("/backup create [label]")));
         assertTrue(help.entries().stream().anyMatch(entry -> entry.usage().equals("/backup restore <id>")));
+        assertTrue(help.entries().stream().anyMatch(entry -> entry.usage().equals("/backup folder [id]")));
         assertTrue(help.entries().stream().anyMatch(entry -> entry.usage().equals("/backup config")));
     }
 

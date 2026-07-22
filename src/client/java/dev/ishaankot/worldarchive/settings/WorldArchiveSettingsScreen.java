@@ -1,7 +1,6 @@
 package dev.ishaankot.worldarchive.settings;
 
 import dev.ishaankot.worldarchive.config.WorldArchiveConfig;
-import dev.ishaankot.worldarchive.config.WorldConfig;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.EnumMap;
@@ -33,6 +32,8 @@ public final class WorldArchiveSettingsScreen extends Screen {
 
     private final SettingsScreenState screenState = new SettingsScreenState();
 
+    private final WorldSettingsPage worldsPage = new WorldSettingsPage(this);
+
     private final SettingsFolderPicker gitFolderPicker;
 
     private final SettingsFolderPicker zipFolderPicker;
@@ -51,8 +52,6 @@ public final class WorldArchiveSettingsScreen extends Screen {
     private SettingsLayout layout = SettingsLayout.forHeight(240);
 
     private SettingsPage page = SettingsPage.GIT;
-
-    private int worldPage;
 
     private int gitSection;
 
@@ -119,7 +118,7 @@ public final class WorldArchiveSettingsScreen extends Screen {
     @Override
     protected void init() {
         layout = SettingsLayout.forHeight(Math.max(height, 120));
-        int contentWidth = Math.min(430, Math.max(180, width - 20));
+        int contentWidth = Math.min(640, Math.max(180, width - 20));
         boolean pagedDestinations = layout.compact() || contentWidth < 300;
         gitSection = Math.min(gitSection, pagedDestinations ? 2 : 0);
         zipSection = Math.min(zipSection, pagedDestinations ? 1 : 0);
@@ -467,115 +466,40 @@ public final class WorldArchiveSettingsScreen extends Screen {
     }
 
     private void addWorldsPage(int x, int contentWidth) {
-        List<WorldConfig> worlds = draft.base().worlds();
-        if (worlds.isEmpty()) {
-            addRenderableOnly(SettingsWidgets.wrappedText(
-                    font,
-                    x,
-                    72,
-                    contentWidth,
-                    Component.translatable("screen.worldarchive.settings.no_worlds")
-                            .withStyle(ChatFormatting.WHITE),
-                    3));
-            return;
-        }
-        int pageSize = 1;
-        int pageCount = Math.max(1, (worlds.size() + pageSize - 1) / pageSize);
-        worldPage = Math.min(worldPage, pageCount - 1);
-        Button previous = Button.builder(
-                        Component.translatable("screen.worldarchive.settings.previous"),
-                        ignored -> {
-                            worldPage--;
-                            rebuildWidgets();
-                        })
-                .bounds(x, 53, 80, 20)
-                .build();
-        previous.active = worldPage > 0 && !controlsLocked();
-        addRenderableWidget(previous);
-        addRenderableOnly(new StringWidget(
-                x + 84,
-                53,
-                contentWidth - 168,
-                20,
-                Component.translatable(
-                        "screen.worldarchive.settings.page",
-                        worldPage + 1,
-                        pageCount),
-                font));
-        Button next = Button.builder(
-                        Component.translatable("screen.worldarchive.settings.next"),
-                        ignored -> {
-                            worldPage++;
-                            rebuildWidgets();
-                        })
-                .bounds(x + contentWidth - 80, 53, 80, 20)
-                .build();
-        next.active = worldPage + 1 < pageCount && !controlsLocked();
-        addRenderableWidget(next);
-
-        addWorldSettingsEntry(worlds.get(worldPage * pageSize), x, 77, contentWidth);
+        worldsPage.add(x, contentWidth, layout.worldPageSize());
     }
 
-    private void addWorldSettingsEntry(
-            WorldConfig world,
-            int x,
-            int y,
-            int contentWidth) {
-        String folderName = world.path().getFileName() == null
-                ? world.path().toString()
-                : world.path().getFileName().toString();
-        String code = world.worldId().displayCode();
-        Component worldLabel = layout.compact()
-                ? Component.literal(folderName + " [" + code + "]")
-                : Component.literal(folderName);
-        Checkbox checkbox = addCheckbox(
-                worldLabel,
-                draft.worldEnabled(world.worldId()),
-                x,
-                y,
-                contentWidth,
-                enabled -> {
-                    draft.setWorldEnabled(world.worldId(), enabled);
-                    refreshValidation();
-                });
-        checkbox.setTooltip(Tooltip.create(Component.literal(
-                world.path() + "\nWorld code: " + code)));
-        if (!layout.compact()) {
-            addRenderableOnly(new StringWidget(
-                    x,
-                    y + ROW_HEIGHT,
-                    contentWidth,
-                    20,
-                    Component.translatable("screen.worldarchive.settings.world_code", code),
-                    font));
-        }
-        int remoteY = y + (layout.compact() ? ROW_HEIGHT : ROW_HEIGHT * 2);
-        EditBox remoteUrl = addTextRow(
-                "screen.worldarchive.settings.world_remote_url",
-                draft.worldRemoteUrl(world.worldId()),
-                SettingsField.WORLD_REMOTE_URL,
-                x,
-                remoteY,
-                contentWidth,
-                2048,
-                value -> {
-                    draft.setWorldRemoteUrl(world.worldId(), value);
-                    requestHealthProbe();
-                });
-        remoteUrl.setHint(Component.translatable(
-                "screen.worldarchive.settings.world_remote_hint"));
-        remoteUrl.setTooltip(Tooltip.create(Component.translatable(
-                "screen.worldarchive.settings.world_remote_steps")));
-        if (!layout.compact()) {
-            addRenderableOnly(SettingsWidgets.wrappedText(
-                    font,
-                    x,
-                    remoteY + ROW_HEIGHT,
-                    contentWidth,
-                    Component.translatable("screen.worldarchive.settings.world_remote_help")
-                            .withStyle(ChatFormatting.WHITE),
-                    2));
-        }
+    SettingsDraft draft() {
+        return draft;
+    }
+
+    net.minecraft.client.gui.Font settingsFont() {
+        return font;
+    }
+
+    void addSettingsButton(Button button) {
+        addRenderableWidget(button);
+    }
+
+    void addSettingsText(StringWidget text) {
+        addRenderableOnly(text);
+    }
+
+    void addSettingsText(MultiLineTextWidget text) {
+        addRenderableOnly(text);
+    }
+
+    void setWorldZipBrowseButton(Button button) {
+        zipBrowseButton = button;
+        addRenderableWidget(button);
+    }
+
+    void clearWorldStatus() {
+        transientStatus = Component.empty();
+    }
+
+    void rebuildWorldWidgets() {
+        rebuildWidgets();
     }
 
     private void addFooter(int x, int contentWidth) {
@@ -615,7 +539,7 @@ public final class WorldArchiveSettingsScreen extends Screen {
         addRenderableWidget(saveButton);
     }
 
-    private Checkbox addCheckbox(
+    Checkbox addCheckbox(
             String translationKey,
             boolean selected,
             int x,
@@ -631,7 +555,7 @@ public final class WorldArchiveSettingsScreen extends Screen {
                 responder);
     }
 
-    private Checkbox addCheckbox(
+    Checkbox addCheckbox(
             Component label,
             boolean selected,
             int x,
@@ -712,7 +636,7 @@ public final class WorldArchiveSettingsScreen extends Screen {
         addRenderableWidget(interval);
     }
 
-    private EditBox addTextRow(
+    EditBox addTextRow(
             String labelKey,
             String value,
             SettingsField field,
@@ -749,6 +673,13 @@ public final class WorldArchiveSettingsScreen extends Screen {
 
     private void chooseZipFolder() {
         chooseFolder(zipFolderPicker, draft::zipDestination, draft::setZipDestination);
+    }
+
+    void chooseWorldZipFolder(dev.ishaankot.worldarchive.model.WorldId worldId) {
+        chooseFolder(
+                zipFolderPicker,
+                () -> draft.worldZipDestination(worldId),
+                value -> draft.setWorldZipDestination(worldId, value));
     }
 
     private void chooseFolder(
@@ -851,7 +782,7 @@ public final class WorldArchiveSettingsScreen extends Screen {
         refreshControls();
     }
 
-    private void requestHealthProbe() {
+    void requestHealthProbe() {
         if (loadingSettings || closing) {
             return;
         }
@@ -924,7 +855,7 @@ public final class WorldArchiveSettingsScreen extends Screen {
                 : Tooltip.create(detail));
     }
 
-    private boolean controlsLocked() {
+    boolean controlsLocked() {
         return loadingSettings
                 || screenState.saving()
                 || gitFolderPicker.choosing()

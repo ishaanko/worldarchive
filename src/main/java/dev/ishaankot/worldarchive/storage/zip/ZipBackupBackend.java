@@ -21,12 +21,16 @@ import java.util.concurrent.Executor;
 
 /** Asynchronous ZIP destination adapter over the synchronous, worker-safe store. */
 public final class ZipBackupBackend implements BackupBackend {
-    private final ZipBackupStore store;
+    private final ZipBackupStoreResolver stores;
 
     private final Executor executor;
 
     public ZipBackupBackend(ZipBackupStore store, Executor executor) {
-        this.store = Objects.requireNonNull(store, "store");
+        this((ZipBackupStoreResolver) store, executor);
+    }
+
+    public ZipBackupBackend(ZipBackupStoreResolver stores, Executor executor) {
+        this.stores = Objects.requireNonNull(stores, "stores");
         this.executor = Objects.requireNonNull(executor, "executor");
     }
 
@@ -35,7 +39,10 @@ public final class ZipBackupBackend implements BackupBackend {
     }
 
     public ZipBackupStore store() {
-        return store;
+        if (stores instanceof ZipBackupStore store) {
+            return store;
+        }
+        throw new IllegalStateException("This ZIP backend uses per-world stores");
     }
 
     @Override
@@ -56,6 +63,7 @@ public final class ZipBackupBackend implements BackupBackend {
                     operationId, capture, OperationPhase.PREPARING, 0, totalBytes,
                     "Preparing ZIP backup"));
             try {
+                ZipBackupStore store = stores.store(capture.manifest().worldId());
                 ZipBackupArtifact artifact = store.create(capture, completed -> report(
                         progressListener,
                         progress(operationId, capture, OperationPhase.WRITING,

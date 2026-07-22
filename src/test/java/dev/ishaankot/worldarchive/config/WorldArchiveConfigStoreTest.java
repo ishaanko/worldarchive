@@ -48,6 +48,7 @@ final class WorldArchiveConfigStoreTest {
         Path zipDestination = Files.createDirectory(temporaryDirectory.resolve("zip-é"));
         Path legacyGitRepository = Files.createDirectory(temporaryDirectory.resolve("legacy-git"));
         Path world = Files.createDirectory(temporaryDirectory.resolve("forever-world"));
+        Path worldZip = Files.createDirectory(temporaryDirectory.resolve("forever-world-zips"));
         Path file = temporaryDirectory.resolve("worldarchive.json");
         WorldArchiveConfigStore store = new WorldArchiveConfigStore(file);
         WorldArchiveConfig expected = new WorldArchiveConfig(
@@ -69,7 +70,8 @@ final class WorldArchiveConfigStoreTest {
                         dev.ishaankot.worldarchive.model.WorldId.create(),
                         true,
                         world,
-                        Optional.of("ssh://example.invalid/forever-world.git"))));
+                        Optional.of("ssh://example.invalid/forever-world.git"),
+                        Optional.of(worldZip))));
 
         store.save(expected, java.util.List.of(world));
         WorldArchiveConfig canonicalExpected = expected.validateDestinations(java.util.List.of(world));
@@ -80,6 +82,7 @@ final class WorldArchiveConfigStoreTest {
         assertTrue(serialized.contains("\"repositoryRoot\""));
         assertFalse(serialized.contains("\"remoteUrlTemplate\""));
         assertTrue(serialized.contains("\"remoteUrl\": \"ssh://example.invalid/forever-world.git\""));
+        assertTrue(serialized.contains("\"zipDestination\": \""));
         assertTrue(serialized.contains("\"legacySharedRepository\""));
         assertTrue(serialized.contains("\"legacyRemoteUrl\""));
         assertFalse(serialized.contains("\"repository\":"));
@@ -103,7 +106,7 @@ final class WorldArchiveConfigStoreTest {
                         world)));
         store.save(current, java.util.List.of(world));
         String invalid = Files.readString(file, StandardCharsets.UTF_8)
-                .replace("\"schemaVersion\": 5", "\"schemaVersion\": 4")
+                .replace("\"schemaVersion\": 6", "\"schemaVersion\": 4")
                 .replace(
                         "\"remoteName\": \"origin\",",
                         "\"remoteName\": \"origin\",\n      \"remoteUrlTemplate\": \"https://example.invalid/shared.git\",");
@@ -132,7 +135,7 @@ final class WorldArchiveConfigStoreTest {
         WorldArchiveConfigStore store = new WorldArchiveConfigStore(file);
         store.save(current, java.util.List.of(world));
         String schemaFour = Files.readString(file, StandardCharsets.UTF_8)
-                .replace("\"schemaVersion\": 5", "\"schemaVersion\": 4")
+                .replace("\"schemaVersion\": 6", "\"schemaVersion\": 4")
                 .replace(
                         "\"remoteName\": \"origin\",",
                         "\"remoteName\": \"origin\",\n"
@@ -147,7 +150,7 @@ final class WorldArchiveConfigStoreTest {
                 "https://example.invalid/world-" + worldId + ".git",
                 migrated.worlds().getFirst().remoteUrl().orElseThrow());
         String persisted = Files.readString(file, StandardCharsets.UTF_8);
-        assertTrue(persisted.contains("\"schemaVersion\": 5"));
+        assertTrue(persisted.contains("\"schemaVersion\": 6"));
         assertFalse(persisted.contains("remoteUrlTemplate"));
     }
 
@@ -196,7 +199,7 @@ final class WorldArchiveConfigStoreTest {
         assertEquals(60, migrated.triggers().scheduleIntervalMinutes());
         assertFalse(migrated.git().enabled());
         assertEquals(zipDestination.toRealPath(), migrated.zip().destination().orElseThrow());
-        assertTrue(Files.readString(file, StandardCharsets.UTF_8).contains("\"schemaVersion\": 5"));
+        assertTrue(Files.readString(file, StandardCharsets.UTF_8).contains("\"schemaVersion\": 6"));
     }
 
     @Test
@@ -265,7 +268,7 @@ final class WorldArchiveConfigStoreTest {
                 migrated.git().health());
         assertTrue(Files.isDirectory(legacyGit));
         String persisted = Files.readString(file, StandardCharsets.UTF_8);
-        assertTrue(persisted.contains("\"schemaVersion\": 5"));
+        assertTrue(persisted.contains("\"schemaVersion\": 6"));
         assertTrue(persisted.contains("\"legacySharedRepository\""));
         assertFalse(persisted.contains("\"repository\":"));
     }
