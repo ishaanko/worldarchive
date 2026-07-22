@@ -114,11 +114,12 @@ class SettingsDraftTest {
     void acceptsOrdinaryExternalAndDesktopSyncedFolders() throws IOException {
         Path world = Files.createDirectory(temporaryDirectory.resolve("world"));
         Path syncedFolder = Files.createDirectory(temporaryDirectory.resolve("OneDrive"));
-        SettingsDraft draft = SettingsDraft.from(resolvedDefaults());
+        SettingsDraft draft = draftWithWorld(world);
+        WorldId worldId = draft.base().worlds().getFirst().worldId();
         draft.setGitRepository(syncedFolder.resolve("git-store").toString());
         draft.setZipDestination(syncedFolder.resolve("archives").toString());
         draft.setGitRemoteName("backup-origin");
-        draft.setGitRemoteUrl("https://example.com/user/worlds-{worldId}.git");
+        draft.setWorldRemoteUrl(worldId, "https://example.com/user/forever-world.git");
         draft.setGitLfsPatterns("*.mca, *.dat, *.nbt");
 
         SettingsValidation validation = draft.validate(List.of(world));
@@ -129,28 +130,30 @@ class SettingsDraftTest {
 
     @Test
     void rejectsCredentialBearingRemoteAndInvalidSchedule() {
-        SettingsDraft draft = SettingsDraft.from(resolvedDefaults());
-        draft.setGitRemoteUrl("https://user:password@example.com/worlds.git");
+        SettingsDraft draft = draftWithWorld(temporaryDirectory.resolve("credential-world"));
+        WorldId worldId = draft.base().worlds().getFirst().worldId();
+        draft.setWorldRemoteUrl(worldId, "https://user:password@example.com/worlds.git");
         draft.setScheduleInterval("0");
 
         SettingsValidation validation = draft.validate(List.of());
 
         assertFalse(validation.isValid());
-        assertTrue(validation.issue(SettingsField.GIT_REMOTE_URL).isPresent());
+        assertTrue(validation.issue(SettingsField.WORLD_REMOTE_URL).isPresent());
         assertTrue(validation.issue(SettingsField.SCHEDULE_INTERVAL).isPresent());
     }
 
     @Test
-    void rejectsPlainRemoteForNewPerWorldRepositories() {
-        SettingsDraft draft = SettingsDraft.from(resolvedDefaults());
-        draft.setGitRemoteUrl("https://example.com/user/shared.git");
+    void acceptsPlainRemoteForOneWorld() {
+        SettingsDraft draft = draftWithWorld(temporaryDirectory.resolve("plain-remote-world"));
+        WorldId worldId = draft.base().worlds().getFirst().worldId();
+        draft.setWorldRemoteUrl(worldId, "https://example.com/user/forever-world.git");
 
         SettingsValidation validation = draft.validate(List.of());
 
-        assertFalse(validation.isValid());
+        assertTrue(validation.isValid(), () -> validation.issues().toString());
         assertEquals(
-                "Include {worldId} so every world uses a different remote repository",
-                validation.issue(SettingsField.GIT_REMOTE_URL).orElseThrow());
+                "https://example.com/user/forever-world.git",
+                validation.config().orElseThrow().worlds().getFirst().remoteUrl().orElseThrow());
     }
 
     @Test
@@ -194,6 +197,8 @@ class SettingsDraftTest {
                 DestinationHealthStatus.HEALTHY,
                 "ZIP folder is ready",
                 checkedAt);
+        Path worldPath = temporaryDirectory.resolve("health-world");
+        WorldId worldId = WorldId.create();
         WorldArchiveConfig checked = new WorldArchiveConfig(
                 WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
                 base.triggers(),
@@ -210,10 +215,10 @@ class SettingsDraftTest {
                         base.zip().destination(),
                         base.zip().triggers(),
                         healthyZip),
-                List.of());
+                List.of(new WorldConfig(worldId, true, worldPath)));
         SettingsDraft draft = SettingsDraft.from(checked);
 
-        draft.setGitRemoteUrl("https://example.com/worlds-{worldId}.git");
+        draft.setWorldRemoteUrl(worldId, "https://example.com/health-world.git");
 
         assertEquals(DestinationHealthStatus.UNCONFIGURED, draft.gitHealth().status());
         assertEquals(DestinationHealthStatus.HEALTHY, draft.zipHealth().status());
@@ -304,5 +309,15 @@ class SettingsDraftTest {
         } catch (IOException exception) {
             throw new AssertionError(exception);
         }
+    }
+
+    private SettingsDraft draftWithWorld(Path world) {
+        WorldArchiveConfig defaults = resolvedDefaults();
+        return SettingsDraft.from(new WorldArchiveConfig(
+                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
+                defaults.triggers(),
+                defaults.git(),
+                defaults.zip(),
+                List.of(new WorldConfig(WorldId.create(), true, world))));
     }
 }

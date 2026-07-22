@@ -30,6 +30,8 @@ public final class SettingsDraft {
 
     private final Map<WorldId, Boolean> worldEnabled;
 
+    private final Map<WorldId, String> worldRemoteUrls;
+
     private String scheduleInterval;
 
     private boolean gitEnabled;
@@ -37,8 +39,6 @@ public final class SettingsDraft {
     private String gitRepository;
 
     private String gitRemoteName;
-
-    private String gitRemoteUrl;
 
     private boolean gitManualEnabled;
 
@@ -68,7 +68,6 @@ public final class SettingsDraft {
         gitEnabled = config.git().enabled();
         gitRepository = config.git().repository().map(Path::toString).orElse("");
         gitRemoteName = config.git().remoteName();
-        gitRemoteUrl = config.git().remoteUrl().orElse("");
         gitManualEnabled = config.triggers().manualEnabled()
                 && config.git().triggers().manualEnabled();
         gitWorldExitEnabled = config.triggers().worldExitEnabled()
@@ -87,17 +86,21 @@ public final class SettingsDraft {
         gitHealth = config.git().health();
         zipHealth = config.zip().health();
         worldEnabled = new LinkedHashMap<>();
-        config.worlds().forEach(world -> worldEnabled.put(world.worldId(), world.enabled()));
+        worldRemoteUrls = new LinkedHashMap<>();
+        config.worlds().forEach(world -> {
+            worldEnabled.put(world.worldId(), world.enabled());
+            worldRemoteUrls.put(world.worldId(), world.remoteUrl().orElse(""));
+        });
     }
 
     private SettingsDraft(SettingsDraft source) {
         base = source.base;
         worldEnabled = new LinkedHashMap<>(source.worldEnabled);
+        worldRemoteUrls = new LinkedHashMap<>(source.worldRemoteUrls);
         scheduleInterval = source.scheduleInterval;
         gitEnabled = source.gitEnabled;
         gitRepository = source.gitRepository;
         gitRemoteName = source.gitRemoteName;
-        gitRemoteUrl = source.gitRemoteUrl;
         gitManualEnabled = source.gitManualEnabled;
         gitWorldExitEnabled = source.gitWorldExitEnabled;
         gitScheduledEnabled = source.gitScheduledEnabled;
@@ -124,7 +127,8 @@ public final class SettingsDraft {
         Objects.requireNonNull(current, "current");
         WorldArchiveConfig defaults = WorldArchiveConfig.defaults();
         List<WorldConfig> worlds = current.worlds().stream()
-                .map(world -> new WorldConfig(world.worldId(), true, world.path()))
+                .map(world -> new WorldConfig(
+                        world.worldId(), true, world.path(), world.remoteUrl()))
                 .toList();
         return new SettingsDraft(new WorldArchiveConfig(
                 WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
@@ -153,7 +157,8 @@ public final class SettingsDraft {
         Objects.requireNonNull(current, "current");
         Objects.requireNonNull(defaults, "defaults");
         List<WorldConfig> worlds = current.worlds().stream()
-                .map(world -> new WorldConfig(world.worldId(), true, world.path()))
+                .map(world -> new WorldConfig(
+                        world.worldId(), true, world.path(), world.remoteUrl()))
                 .toList();
         WorldArchiveConfig reset = defaults.defaultsKeepingWorlds(worlds);
         GitDestinationConfig git = reset.git();
@@ -195,6 +200,7 @@ public final class SettingsDraft {
                 sourceWorlds,
                 issues);
         List<String> patterns = parseLfsPatterns(issues);
+        List<WorldConfig> worlds = updatedWorlds(issues);
 
         GitDestinationConfig git = null;
         if (!issues.containsKey(SettingsField.GIT_REPOSITORY)
@@ -222,7 +228,7 @@ public final class SettingsDraft {
                         interval),
                 git,
                 zip,
-                updatedWorlds());
+                worlds);
         try {
             return new SettingsValidation(
                     Optional.of(candidate.validateDestinations(sourceWorlds)),
@@ -238,22 +244,12 @@ public final class SettingsDraft {
             List<String> patterns,
             Map<SettingsField, String> issues) {
         String remoteName = gitRemoteName;
-        Optional<String> remoteUrl = gitRemoteUrl.isBlank()
-                ? Optional.empty()
-                : Optional.of(gitRemoteUrl);
-        if (remoteUrl.isPresent()
-                && !GitDestinationConfig.isPerWorldRemoteTemplate(remoteUrl.orElseThrow())) {
-            issues.put(
-                    SettingsField.GIT_REMOTE_URL,
-                    "Include {worldId} so every world uses a different remote repository");
-            return null;
-        }
         try {
             return new GitDestinationConfig(
                     gitEnabled,
                     repository,
                     remoteName,
-                    remoteUrl,
+                    Optional.empty(),
                     new DestinationTriggerConfig(
                             gitManualEnabled,
                             gitWorldExitEnabled,
@@ -265,7 +261,7 @@ public final class SettingsDraft {
         } catch (IllegalArgumentException exception) {
             SettingsField field = exception.getMessage().contains("remote name")
                     ? SettingsField.GIT_REMOTE_NAME
-                    : SettingsField.GIT_REMOTE_URL;
+                    : SettingsField.GIT_LFS_PATTERNS;
             issues.put(field, exception.getMessage());
             return null;
         }
@@ -367,13 +363,25 @@ public final class SettingsDraft {
         }
     }
 
-    private List<WorldConfig> updatedWorlds() {
-        return base.worlds().stream()
-                .map(world -> new WorldConfig(
+    private List<WorldConfig> updatedWorlds(Map<SettingsField, String> issues) {
+        List<WorldConfig> worlds = new ArrayList<>(base.worlds().size());
+        for (WorldConfig world : base.worlds()) {
+            String remoteUrl = worldRemoteUrls.getOrDefault(world.worldId(), "");
+            try {
+                worlds.add(new WorldConfig(
                         world.worldId(),
                         worldEnabled.getOrDefault(world.worldId(), world.enabled()),
-                        world.path()))
-                .toList();
+                        world.path(),
+                        remoteUrl.isBlank() ? Optional.empty() : Optional.of(remoteUrl)));
+            } catch (IllegalArgumentException exception) {
+                issues.put(
+                        SettingsField.WORLD_REMOTE_URL,
+                        "Git remote for world " + world.worldId().displayCode()
+                                + " is invalid: " + exception.getMessage());
+                worlds.add(world);
+            }
+        }
+        return List.copyOf(worlds);
     }
 
     private static String safePathMessage(IOException exception) {
@@ -431,18 +439,6 @@ public final class SettingsDraft {
         String next = Objects.requireNonNull(value, "value");
         if (!gitRemoteName.equals(next)) {
             gitRemoteName = next;
-            resetGitHealth();
-        }
-    }
-
-    public String gitRemoteUrl() {
-        return gitRemoteUrl;
-    }
-
-    public void setGitRemoteUrl(String value) {
-        String next = Objects.requireNonNull(value, "value");
-        if (!gitRemoteUrl.equals(next)) {
-            gitRemoteUrl = next;
             resetGitHealth();
         }
     }
@@ -541,12 +537,32 @@ public final class SettingsDraft {
         worldEnabled.put(worldId, enabled);
     }
 
+    public String worldRemoteUrl(WorldId worldId) {
+        String value = worldRemoteUrls.get(Objects.requireNonNull(worldId, "worldId"));
+        if (value == null) {
+            throw new IllegalArgumentException("Unknown world configuration: " + worldId);
+        }
+        return value;
+    }
+
+    public void setWorldRemoteUrl(WorldId worldId, String remoteUrl) {
+        WorldId id = Objects.requireNonNull(worldId, "worldId");
+        if (!worldRemoteUrls.containsKey(id)) {
+            throw new IllegalArgumentException("Unknown world configuration: " + id);
+        }
+        String next = Objects.requireNonNull(remoteUrl, "remoteUrl");
+        if (!worldRemoteUrls.get(id).equals(next)) {
+            worldRemoteUrls.put(id, next);
+            resetGitHealth();
+        }
+    }
+
     public SettingsProbeRequest probeRequest() {
         return new SettingsProbeRequest(
                 gitEnabled,
                 "git",
                 parseAbsolutePath(gitRepository),
-                !gitRemoteUrl.isBlank(),
+                worldRemoteUrls.values().stream().anyMatch(value -> !value.isBlank()),
                 zipEnabled,
                 parseAbsolutePath(zipDestination));
     }

@@ -550,6 +550,11 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         WorldGitSnapshotStore gitBackend = new WorldGitSnapshotStore(
                 GitBackendSettings.from(config.git(), gitRepository),
                 GitBackendSettings.legacyFrom(config.git()),
+                config.worlds().stream()
+                        .filter(world -> world.remoteUrl().isPresent())
+                        .collect(java.util.stream.Collectors.toUnmodifiableMap(
+                                WorldConfig::worldId,
+                                world -> world.remoteUrl().orElseThrow())),
                 new SystemGitCommandRunner(),
                 workerExecutor);
         ZipBackupStore zipStore = new ZipBackupStore(zipDirectory);

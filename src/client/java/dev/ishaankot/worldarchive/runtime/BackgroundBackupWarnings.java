@@ -26,23 +26,23 @@ final class BackgroundBackupWarnings {
         }
         return switch (Objects.requireNonNull(result.status(), "status")) {
             case SUCCESS -> new ExitNotice(
-                    "World saved and backup completed",
+                    "Backup finished. You can safely quit Minecraft.",
                     NoticeSeverity.SUCCESS);
             case PARTIAL_SUCCESS -> new ExitNotice(
-                    "World saved; backup completed with warnings",
+                    "Backup created with warnings",
                     NoticeSeverity.WARNING);
             case FAILED -> new ExitNotice(
-                    "World saved; backup failed",
+                    "Backup failed; world was saved",
                     NoticeSeverity.ERROR);
             case SKIPPED -> new ExitNotice(
-                    "World saved; backup skipped",
+                    "Backup skipped; world was saved",
                     NoticeSeverity.WARNING);
         };
     }
 
     static ExitNotice worldExitStartedNotice() {
         return new ExitNotice(
-                "World saved; backup is running",
+                "Creating backup... Keep Minecraft open until it finishes.",
                 NoticeSeverity.SUCCESS);
     }
 

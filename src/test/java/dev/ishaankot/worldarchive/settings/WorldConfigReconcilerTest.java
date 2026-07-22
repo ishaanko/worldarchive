@@ -9,13 +9,18 @@ import dev.ishaankot.worldarchive.model.SensitiveDataRedactor;
 import dev.ishaankot.worldarchive.model.WorldId;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 class WorldConfigReconcilerTest {
     @Test
     void preservesEnablementWhenStableWorldMoves() {
         WorldId worldId = WorldId.create();
-        WorldConfig existing = new WorldConfig(worldId, false, Path.of("old-save"));
+        WorldConfig existing = new WorldConfig(
+                worldId,
+                false,
+                Path.of("old-save"),
+                Optional.of("https://example.invalid/forever-world.git"));
         Path moved = Path.of("moved-save");
 
         WorldReconciliation reconciliation = WorldConfigReconciler.reconcile(
@@ -26,6 +31,7 @@ class WorldConfigReconcilerTest {
         assertEquals(1, reconciliation.worlds().size());
         assertEquals(moved.toAbsolutePath().normalize(), reconciliation.worlds().getFirst().path());
         assertFalse(reconciliation.worlds().getFirst().enabled());
+        assertEquals(existing.remoteUrl(), reconciliation.worlds().getFirst().remoteUrl());
     }
 
     @Test

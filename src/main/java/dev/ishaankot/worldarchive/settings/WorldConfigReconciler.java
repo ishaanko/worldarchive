@@ -9,6 +9,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 
 /** Preserves world enablement while merging newly discovered stable identities. */
@@ -49,7 +50,11 @@ public final class WorldConfigReconciler {
             }
             WorldConfig stored = existingById.getOrDefault(worldId, existingByPath.get(path));
             boolean enabled = stored == null || stored.enabled();
-            result.add(new WorldConfig(worldId, enabled, path));
+            result.add(new WorldConfig(
+                    worldId,
+                    enabled,
+                    path,
+                    stored == null ? Optional.empty() : stored.remoteUrl()));
             usedIds.add(worldId);
             usedPaths.add(path);
         }

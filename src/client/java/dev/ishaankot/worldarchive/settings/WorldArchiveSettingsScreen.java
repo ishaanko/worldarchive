@@ -216,23 +216,11 @@ public final class WorldArchiveSettingsScreen extends Screen {
                     requestHealthProbe();
                 });
         addGitRepositoryRow(x, firstRow + 22, contentWidth);
-        addTextRow(
-                "screen.worldarchive.settings.remote_name",
-                draft.gitRemoteName(),
-                SettingsField.GIT_REMOTE_NAME,
-                x,
-                firstRow + 44,
-                contentWidth,
-                64,
-                value -> {
-                    draft.setGitRemoteName(value);
-                    requestHealthProbe();
-                });
-        addGitRemoteUrlRow(x, firstRow + 66, contentWidth);
-        addGitPatternsRow(x, firstRow + 88, contentWidth);
+        addGitRemoteNameRow(x, firstRow + 44, contentWidth);
+        addGitPatternsRow(x, firstRow + 66, contentWidth);
         addTriggerRow(
                 x,
-                firstRow + 111,
+                firstRow + 89,
                 contentWidth,
                 draft.gitManualEnabled(),
                 draft.gitWorldExitEnabled(),
@@ -259,18 +247,6 @@ public final class WorldArchiveSettingsScreen extends Screen {
                 "screen.worldarchive.settings.more",
                 1);
         addGitRepositoryRow(x, firstRow, contentWidth);
-        addTextRow(
-                "screen.worldarchive.settings.remote_name",
-                draft.gitRemoteName(),
-                SettingsField.GIT_REMOTE_NAME,
-                x,
-                firstRow + 22,
-                contentWidth,
-                64,
-                value -> {
-                    draft.setGitRemoteName(value);
-                    requestHealthProbe();
-                });
     }
 
     private void addCompactGitRemotePage(int x, int contentWidth, int firstRow) {
@@ -280,7 +256,7 @@ public final class WorldArchiveSettingsScreen extends Screen {
                 54,
                 "screen.worldarchive.settings.timing",
                 2);
-        addGitRemoteUrlRow(x, firstRow, contentWidth);
+        addGitRemoteNameRow(x, firstRow, contentWidth);
         addGitPatternsRow(x, firstRow + 22, contentWidth);
     }
 
@@ -335,22 +311,6 @@ public final class WorldArchiveSettingsScreen extends Screen {
         addRenderableWidget(gitBrowseButton);
     }
 
-    private void addGitRemoteUrlRow(int x, int y, int contentWidth) {
-        EditBox remoteUrl = addTextRow(
-                "screen.worldarchive.settings.remote_url",
-                draft.gitRemoteUrl(),
-                SettingsField.GIT_REMOTE_URL,
-                x,
-                y,
-                contentWidth,
-                2048,
-                value -> {
-                    draft.setGitRemoteUrl(value);
-                    requestHealthProbe();
-                });
-        remoteUrl.setHint(Component.translatable("screen.worldarchive.settings.remote_hint"));
-    }
-
     private void addGitPatternsRow(int x, int y, int contentWidth) {
         EditBox patterns = addTextRow(
                 "screen.worldarchive.settings.lfs_patterns",
@@ -365,6 +325,23 @@ public final class WorldArchiveSettingsScreen extends Screen {
                     requestHealthProbe();
                 });
         patterns.setHint(Component.translatable("screen.worldarchive.settings.lfs_hint"));
+    }
+
+    private void addGitRemoteNameRow(int x, int y, int contentWidth) {
+        EditBox remoteName = addTextRow(
+                "screen.worldarchive.settings.remote_name",
+                draft.gitRemoteName(),
+                SettingsField.GIT_REMOTE_NAME,
+                x,
+                y,
+                contentWidth,
+                64,
+                value -> {
+                    draft.setGitRemoteName(value);
+                    requestHealthProbe();
+                });
+        remoteName.setHint(Component.translatable(
+                "screen.worldarchive.settings.remote_name_hint"));
     }
 
     private void addZipPage(int x, int contentWidth) {
@@ -421,16 +398,6 @@ public final class WorldArchiveSettingsScreen extends Screen {
                 draft::setZipManualEnabled,
                 draft::setZipWorldExitEnabled,
                 draft::setZipScheduledEnabled);
-        if (!layout.compact()) {
-            addRenderableOnly(SettingsWidgets.wrappedText(
-                    font,
-                    x,
-                    129,
-                    contentWidth,
-                    Component.translatable("screen.worldarchive.settings.synced_folder_help")
-                            .withStyle(ChatFormatting.WHITE),
-                    3));
-        }
     }
 
     private void addCompactZipLocationPage(int x, int contentWidth) {
@@ -512,7 +479,7 @@ public final class WorldArchiveSettingsScreen extends Screen {
                     3));
             return;
         }
-        int pageSize = layout.worldPageSize();
+        int pageSize = 1;
         int pageCount = Math.max(1, (worlds.size() + pageSize - 1) / pageSize);
         worldPage = Math.min(worldPage, pageCount - 1);
         Button previous = Button.builder(
@@ -546,26 +513,68 @@ public final class WorldArchiveSettingsScreen extends Screen {
         next.active = worldPage + 1 < pageCount && !controlsLocked();
         addRenderableWidget(next);
 
-        int first = worldPage * pageSize;
-        int limit = Math.min(worlds.size(), first + pageSize);
-        int y = 77;
-        for (int index = first; index < limit; index++) {
-            WorldConfig world = worlds.get(index);
-            String folderName = world.path().getFileName() == null
-                    ? world.path().toString()
-                    : world.path().getFileName().toString();
-            Checkbox checkbox = addCheckbox(
-                    Component.literal(folderName),
-                    draft.worldEnabled(world.worldId()),
+        addWorldSettingsEntry(worlds.get(worldPage * pageSize), x, 77, contentWidth);
+    }
+
+    private void addWorldSettingsEntry(
+            WorldConfig world,
+            int x,
+            int y,
+            int contentWidth) {
+        String folderName = world.path().getFileName() == null
+                ? world.path().toString()
+                : world.path().getFileName().toString();
+        String code = world.worldId().displayCode();
+        Component worldLabel = layout.compact()
+                ? Component.literal(folderName + " [" + code + "]")
+                : Component.literal(folderName);
+        Checkbox checkbox = addCheckbox(
+                worldLabel,
+                draft.worldEnabled(world.worldId()),
+                x,
+                y,
+                contentWidth,
+                enabled -> {
+                    draft.setWorldEnabled(world.worldId(), enabled);
+                    refreshValidation();
+                });
+        checkbox.setTooltip(Tooltip.create(Component.literal(
+                world.path() + "\nWorld code: " + code)));
+        if (!layout.compact()) {
+            addRenderableOnly(new StringWidget(
                     x,
-                    y,
+                    y + ROW_HEIGHT,
                     contentWidth,
-                    enabled -> {
-                        draft.setWorldEnabled(world.worldId(), enabled);
-                        refreshValidation();
-                    });
-            checkbox.setTooltip(Tooltip.create(Component.literal(world.path().toString())));
-            y += ROW_HEIGHT;
+                    20,
+                    Component.translatable("screen.worldarchive.settings.world_code", code),
+                    font));
+        }
+        int remoteY = y + (layout.compact() ? ROW_HEIGHT : ROW_HEIGHT * 2);
+        EditBox remoteUrl = addTextRow(
+                "screen.worldarchive.settings.world_remote_url",
+                draft.worldRemoteUrl(world.worldId()),
+                SettingsField.WORLD_REMOTE_URL,
+                x,
+                remoteY,
+                contentWidth,
+                2048,
+                value -> {
+                    draft.setWorldRemoteUrl(world.worldId(), value);
+                    requestHealthProbe();
+                });
+        remoteUrl.setHint(Component.translatable(
+                "screen.worldarchive.settings.world_remote_hint"));
+        remoteUrl.setTooltip(Tooltip.create(Component.translatable(
+                "screen.worldarchive.settings.world_remote_steps")));
+        if (!layout.compact()) {
+            addRenderableOnly(SettingsWidgets.wrappedText(
+                    font,
+                    x,
+                    remoteY + ROW_HEIGHT,
+                    contentWidth,
+                    Component.translatable("screen.worldarchive.settings.world_remote_help")
+                            .withStyle(ChatFormatting.WHITE),
+                    2));
         }
     }
 

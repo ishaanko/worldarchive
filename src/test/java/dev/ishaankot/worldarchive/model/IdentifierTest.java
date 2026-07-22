@@ -33,4 +33,12 @@ final class IdentifierTest {
         assertThrows(IllegalArgumentException.class, () -> new WorldId(nil));
         assertThrows(IllegalArgumentException.class, () -> new BackupId(nil));
     }
+
+    @Test
+    void exposesSixCharacterDisplayCodeWithoutChangingDurableIdentity() {
+        WorldId worldId = WorldId.parse("12345678-1234-1234-1234-123456789abc");
+
+        assertEquals("123456", worldId.displayCode());
+        assertEquals("12345678-1234-1234-1234-123456789abc", worldId.toString());
+    }
 }

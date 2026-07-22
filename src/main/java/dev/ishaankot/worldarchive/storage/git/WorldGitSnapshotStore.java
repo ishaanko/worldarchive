@@ -45,6 +45,8 @@ public final class WorldGitSnapshotStore implements GitSnapshotStore {
 
     private final Optional<GitBackupBackend> legacyBackend;
 
+    private final Map<WorldId, String> worldRemoteUrls;
+
     private final GitBackupBackend probeBackend;
 
     private final GitCommandRunner runner;
@@ -59,6 +61,7 @@ public final class WorldGitSnapshotStore implements GitSnapshotStore {
         this(
                 currentSettings,
                 Optional.empty(),
+                Map.of(),
                 new SystemGitCommandRunner(),
                 Executors.newThreadPerTaskExecutor(
                         Thread.ofVirtual().name("worldarchive-world-git-", 0).factory()),
@@ -70,12 +73,22 @@ public final class WorldGitSnapshotStore implements GitSnapshotStore {
             Optional<GitBackendSettings> legacySettings,
             GitCommandRunner runner,
             ExecutorService executor) {
-        this(currentSettings, legacySettings, runner, executor, false);
+        this(currentSettings, legacySettings, Map.of(), runner, executor, false);
+    }
+
+    public WorldGitSnapshotStore(
+            GitBackendSettings currentSettings,
+            Optional<GitBackendSettings> legacySettings,
+            Map<WorldId, String> worldRemoteUrls,
+            GitCommandRunner runner,
+            ExecutorService executor) {
+        this(currentSettings, legacySettings, worldRemoteUrls, runner, executor, false);
     }
 
     private WorldGitSnapshotStore(
             GitBackendSettings configuredSettings,
             Optional<GitBackendSettings> configuredLegacySettings,
+            Map<WorldId, String> configuredWorldRemoteUrls,
             GitCommandRunner runner,
             ExecutorService executor,
             boolean ownsExecutor) {
@@ -83,6 +96,9 @@ public final class WorldGitSnapshotStore implements GitSnapshotStore {
         this.runner = Objects.requireNonNull(runner, "runner");
         this.executor = Objects.requireNonNull(executor, "executor");
         this.ownsExecutor = ownsExecutor;
+        this.worldRemoteUrls = Map.copyOf(Objects.requireNonNull(
+                configuredWorldRemoteUrls,
+                "worldRemoteUrls"));
 
         Optional<String> suppliedRemote = supplied.remoteUrl();
         Optional<String> currentTemplate = suppliedRemote
@@ -288,7 +304,7 @@ public final class WorldGitSnapshotStore implements GitSnapshotStore {
 
     public boolean remoteConfigured(WorldId worldId) {
         Objects.requireNonNull(worldId, "worldId");
-        return currentSettings.remoteUrl().isPresent()
+        return currentRemote(worldId).isPresent()
                 || legacySettings.flatMap(GitBackendSettings::remoteUrl).isPresent();
     }
 
@@ -323,8 +339,7 @@ public final class WorldGitSnapshotStore implements GitSnapshotStore {
                         currentSettings.forWorld(
                                 repositoryFor(selected),
                                 selected,
-                                currentSettings.remoteUrl().map(template ->
-                                        GitBackendSettings.resolveWorldRemote(template, selected))),
+                                currentRemote(selected)),
                         runner,
                         executor));
     }
@@ -378,7 +393,7 @@ public final class WorldGitSnapshotStore implements GitSnapshotStore {
             if (location == SnapshotLocation.LEGACY) {
                 return operation.apply(legacyBackend.orElseThrow());
             }
-            boolean childRemote = currentSettings.remoteUrl().isPresent();
+            boolean childRemote = currentRemote(worldId).isPresent();
             boolean legacyRemote = legacySettings.flatMap(GitBackendSettings::remoteUrl).isPresent();
             if (childRemote && legacyRemote) {
                 return CompletableFuture.failedFuture(new GitStorageException(
@@ -389,6 +404,15 @@ public final class WorldGitSnapshotStore implements GitSnapshotStore {
             }
             return operation.apply(child(worldId));
         });
+    }
+
+    private Optional<String> currentRemote(WorldId worldId) {
+        String configured = worldRemoteUrls.get(Objects.requireNonNull(worldId, "worldId"));
+        if (configured != null) {
+            return Optional.of(configured);
+        }
+        return currentSettings.remoteUrl().map(template ->
+                GitBackendSettings.resolveWorldRemote(template, worldId));
     }
 
     private Set<WorldId> discoverWorlds() throws IOException {
