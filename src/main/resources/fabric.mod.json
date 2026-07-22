@@ -9,8 +9,8 @@
         "Ishaan Kothari"
     ],
     "contact": {
-        "sources": "https://github.com/ishaankot/worldarchive",
-        "issues": "https://github.com/ishaankot/worldarchive/issues"
+        "sources": "https://github.com/ishaanko/worldarchive",
+        "issues": "https://github.com/ishaanko/worldarchive/issues"
     },
     "license": "Apache-2.0",
     "environment": "client",
