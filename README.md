@@ -17,6 +17,10 @@ always restores backups as new worlds without modifying the original.
 - Optional per-world ZIP folder overrides
 - Per-world and per-destination settings
 - Backup labels, verification, remote sync, and deletion
+- Previewed recovery of existing WorldArchive Git histories
+- Copy or read-only link import for folders of WorldArchive ZIP archives
+- Offline catalog and Git-ref rebuilding from managed backup storage
+- Recovery-only access to backups for worlds whose save folders are gone
 - Partial-success reporting when one destination fails
 - Safe, copy-only restores to a new world
 
@@ -76,6 +80,32 @@ a separate ZIP root, such as a different drive or synced folder.
 Restoring a backup verifies it and creates a new, uniquely named world. The
 original world is never overwritten or modified.
 
+### Recover existing backups
+
+Choose **World Backups**, then **Import**, to recover backup history after a
+reinstall, profile move, catalog loss, remote rename, or computer migration.
+Every import is scanned first and shown as a confirmation preview. Identical
+records merge safely; a conflicting backup identity is reported and never
+overwrites the existing catalog or artifact.
+
+For Git histories, paste any supported credential-free HTTPS, SSH, Git, file,
+or absolute local repository location. **Full download** copies and verifies all
+Git and Git LFS objects into WorldArchive's managed storage. **Remote-backed**
+keeps only pinned local metadata and downloads required Git LFS objects from the
+source when verifying or restoring. The optional **Connect** setting applies the
+remote to future backups only for matching live, configured worlds; otherwise
+the imported history is recovery-only. WorldArchive never contacts imported
+remotes automatically at startup.
+
+For ZIP folders, **Copy** publishes verified archives into managed storage.
+**Link read-only** leaves archives where they are and records a pinned checksum
+and relative path. Deleting a linked backup only removes WorldArchive's catalog
+link—the source ZIP is untouched.
+
+Use **Rebuild Catalog from Managed Storage** (or `/backup rebuild`) to recover
+catalog entries and missing Git snapshot refs from local managed Git histories
+and ZIP archives. This rebuild is local-only and does not fetch from a network.
+
 ### Commands
 
 ```text
@@ -89,6 +119,10 @@ original world is never overwritten or modified.
 /backup verify [id]
 /backup status
 /backup folder [id]
+/backup import
+/backup import git <full|remote> <recovery|connect> <remote>
+/backup import zip <copy|link> <folder>
+/backup rebuild
 /backup help
 /backup config
 ```
@@ -107,6 +141,7 @@ Paths are relative to the Minecraft instance directory, normally `.minecraft`.
 | Per-world Git repositories | `worldarchive/git/<world-id>.git` |
 | ZIP archives | `worldarchive/archives/` |
 | Backup catalog | `worldarchive/catalog.json` |
+| Import source registry | `worldarchive/import-sources.json` |
 | Change inventories | `worldarchive/inventories/` |
 | Temporary captures | `worldarchive/capture-temp/` |
 | World identity | `saves/<world>/.worldarchive/world.json` |

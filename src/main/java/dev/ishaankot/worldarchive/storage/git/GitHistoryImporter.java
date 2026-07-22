@@ -140,9 +140,14 @@ final class GitHistoryImporter {
         if (!encoded.successful() || encoded.standardOutputTruncated()) {
             return java.util.Optional.empty();
         }
+        BackupManifest manifest;
         try {
-            BackupManifest manifest = GitSnapshotManifestCodec.decode(
+            manifest = GitSnapshotManifestCodec.decode(
                     encoded.standardOutput().getBytes(StandardCharsets.UTF_8)).manifest();
+        } catch (IOException | IllegalArgumentException exception) {
+            return java.util.Optional.empty();
+        }
+        try {
             GitSnapshot snapshot = new GitSnapshot(
                     manifest.worldId(),
                     manifest.backupId(),

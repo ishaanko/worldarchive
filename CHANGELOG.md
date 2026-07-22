@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.0 (2026-07-21)
+
+### Added
+
+- Recover complete WorldArchive Git histories from any supported Git remote or
+  absolute local repository, with full-download and remote-backed modes.
+- Import folders of WorldArchive ZIP archives either by copying them into
+  managed storage or linking them read-only in their existing location.
+- Preview every recovery operation before it changes the catalog, show exact
+  additions, merges, unchanged records, conflicts, and rejected artifacts, and
+  never overwrite conflicting backup identities.
+- Rebuild the local backup catalog and missing Git snapshot refs from managed
+  storage without contacting a network.
+- Show archived worlds that no longer have a live save folder in the World
+  Backups screen, so their recovered histories remain restorable.
+- Add recovery workflows to the backup UI and the `/backup import` and
+  `/backup rebuild` commands.
+
+### Changed
+
+- Track managed, imported-managed, and external artifact ownership plus durable
+  import-source provenance in catalog schema 3.
+- Deleting a linked ZIP or remote-backed Git backup now removes only
+  WorldArchive's local reference; the source archive or remote is never deleted.
+- Git imports can optionally connect existing live worlds to the imported remote
+  for future backups, while archived worlds remain recovery-only.
+
 ## 0.2.1 (2026-07-21)
 
 ### Changed
