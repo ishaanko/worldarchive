@@ -28,9 +28,7 @@ final class BackupRowButton extends AbstractButton {
 
     private static final int PRIMARY_TEXT_COLOR = 0xFFFFFFFF;
 
-    private static final int SECONDARY_TEXT_COLOR = 0xFFE0E0E0;
-
-    private static final int TEXT_BACKGROUND_COLOR = 0xB0000000;
+    private static final int SECONDARY_TEXT_COLOR = 0xFFA0A0A0;
 
     private static final int TOOLTIP_MARGIN = 4;
 
@@ -82,12 +80,6 @@ final class BackupRowButton extends AbstractButton {
             int mouseY,
             float partialTick) {
         extractDefaultSprite(graphics);
-        graphics.fill(
-                getX() + 2,
-                getY() + 2,
-                getRight() - 2,
-                getBottom() - 2,
-                TEXT_BACKGROUND_COLOR);
         int textWidth = Math.max(1, getWidth() - 10);
         graphics.text(
                 font,

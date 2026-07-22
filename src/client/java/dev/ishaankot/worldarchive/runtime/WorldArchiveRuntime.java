@@ -604,6 +604,9 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
 
     Optional<BackupWorldContext> resolveWorldBlocking(
             BackupWorldSelection selection) throws IOException {
+        if (!acceptsLiveWorld(selection)) {
+            return Optional.empty();
+        }
         Path realWorld = selection.worldDirectory().toRealPath();
         if (!realWorld.equals(selection.worldDirectory())) {
             return Optional.empty();
@@ -617,6 +620,12 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
             return Optional.empty();
         }
         return Optional.of(new BackupWorldContext(worldId, selection));
+    }
+
+    boolean acceptsLiveWorld(BackupWorldSelection selection) {
+        return WorldFolderDiscovery.isDirectChild(
+                minecraft.gameDirectory.toPath().resolve("saves"),
+                selection.worldDirectory());
     }
 
     boolean busyAcrossStates(WorldId worldId) {

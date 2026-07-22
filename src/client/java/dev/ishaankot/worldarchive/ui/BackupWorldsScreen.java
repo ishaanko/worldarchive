@@ -2,6 +2,8 @@ package dev.ishaankot.worldarchive.ui;
 
 import dev.ishaankot.worldarchive.config.WorldConfig;
 import dev.ishaankot.worldarchive.settings.ClientSettingsAccess;
+import dev.ishaankot.worldarchive.settings.WorldFolderDiscovery;
+import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Objects;
@@ -41,7 +43,7 @@ public final class BackupWorldsScreen extends Screen {
                 title.copy().withStyle(ChatFormatting.BOLD),
                 font));
 
-        List<WorldConfig> worlds = ClientSettingsAccess.snapshot().worlds();
+        List<WorldConfig> worlds = availableWorlds();
         int pageSize = Math.max(1, Math.min(8, (height - 104) / ROW_HEIGHT));
         int pageCount = Math.max(1, (worlds.size() + pageSize - 1) / pageSize);
         page = Math.min(page, pageCount - 1);
@@ -57,6 +59,17 @@ public final class BackupWorldsScreen extends Screen {
             addWorldButtons(worlds, pageSize, x, contentWidth);
         }
         addFooter(x, contentWidth, pageCount);
+    }
+
+    private List<WorldConfig> availableWorlds() {
+        Path savesDirectory = minecraft.gameDirectory.toPath().resolve("saves");
+        try {
+            return WorldFolderDiscovery.availableConfigured(
+                    savesDirectory,
+                    ClientSettingsAccess.snapshot().worlds());
+        } catch (IOException exception) {
+            return List.of();
+        }
     }
 
     private void addWorldButtons(

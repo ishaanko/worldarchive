@@ -4,7 +4,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.ishaankot.worldarchive.config.WorldConfig;
 import dev.ishaankot.worldarchive.config.WorldIdentityStore;
+import dev.ishaankot.worldarchive.model.WorldId;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -57,5 +59,31 @@ class WorldFolderDiscoveryTest {
 
         assertTrue(discovered.isEmpty());
         assertFalse(Files.exists(outsideWorld.resolve(".worldarchive")));
+    }
+
+    @Test
+    void availableConfiguredWorldsOmitDeletedSaves() throws IOException {
+        Path saves = Files.createDirectory(temporaryDirectory.resolve("saves"));
+        Path available = Files.createDirectory(saves.resolve("available"));
+        Files.writeString(available.resolve("level.dat"), "level data");
+        Path deleted = saves.resolve("deleted");
+        WorldConfig availableConfig = new WorldConfig(WorldId.create(), true, available);
+        WorldConfig deletedConfig = new WorldConfig(WorldId.create(), true, deleted);
+
+        assertEquals(
+                List.of(availableConfig),
+                WorldFolderDiscovery.availableConfigured(
+                        saves,
+                        List.of(availableConfig, deletedConfig)));
+    }
+
+    @Test
+    void temporaryReplayWorldIsNotAChildOfTheMinecraftSavesFolder() {
+        Path minecraft = temporaryDirectory.resolve("minecraft");
+        Path saves = minecraft.resolve("saves");
+        Path replay = minecraft.resolve("flashback/temp/server/id/saves/replay");
+
+        assertTrue(WorldFolderDiscovery.isDirectChild(saves, saves.resolve("world")));
+        assertFalse(WorldFolderDiscovery.isDirectChild(saves, replay));
     }
 }
