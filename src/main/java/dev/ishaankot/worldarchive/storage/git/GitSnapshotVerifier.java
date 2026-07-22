@@ -34,6 +34,23 @@ final class GitSnapshotVerifier {
     VerifiedSnapshot verify(GitSnapshot snapshot)
             throws IOException, InterruptedException, GitStorageException {
         String commit = snapshot.commitId();
+        MetadataSnapshot metadata = verifyMetadata(snapshot);
+        GitSnapshotManifest snapshotManifest = metadata.manifest();
+        List<GitTreeEntry> treeEntries = metadata.treeEntries();
+        commands.checked(
+                List.of("--git-dir=" + settings.repository(), "fsck", "--strict", "--no-dangling", commit),
+                settings.repository(),
+                Map.of(),
+                new byte[0]);
+        List<GitLfsPointer> pointers = findAndVerifySnapshotFiles(
+                treeEntries,
+                snapshotManifest.manifest());
+        return new VerifiedSnapshot(snapshotManifest, pointers);
+    }
+
+    MetadataSnapshot verifyMetadata(GitSnapshot snapshot)
+            throws IOException, InterruptedException, GitStorageException {
+        String commit = snapshot.commitId();
         commands.checked(
                 List.of("--git-dir=" + settings.repository(), "cat-file", "-e", commit + "^{commit}"),
                 settings.repository(),
@@ -42,16 +59,8 @@ final class GitSnapshotVerifier {
         GitSnapshotManifest snapshotManifest = readSnapshotManifest(commit);
         verifyAncestry(snapshot, commit, snapshotManifest);
         List<GitTreeEntry> treeEntries = readTreeEntries(commit);
-        commands.checked(
-                List.of("--git-dir=" + settings.repository(), "fsck", "--strict", "--no-dangling", commit),
-                settings.repository(),
-                Map.of(),
-                new byte[0]);
         requireSnapshotIdentity(snapshot, snapshotManifest, commit);
-        List<GitLfsPointer> pointers = findAndVerifySnapshotFiles(
-                treeEntries,
-                snapshotManifest.manifest());
-        return new VerifiedSnapshot(snapshotManifest, pointers);
+        return new MetadataSnapshot(snapshotManifest, treeEntries);
     }
 
     void verifyTreeModes(String treeish)
@@ -300,6 +309,15 @@ final class GitSnapshotVerifier {
             Objects.requireNonNull(manifest, "manifest");
             lfsPointers = List.copyOf(
                     Objects.requireNonNull(lfsPointers, "lfsPointers"));
+        }
+    }
+
+    record MetadataSnapshot(
+            GitSnapshotManifest manifest,
+            List<GitTreeEntry> treeEntries) {
+        MetadataSnapshot {
+            Objects.requireNonNull(manifest, "manifest");
+            treeEntries = List.copyOf(Objects.requireNonNull(treeEntries, "treeEntries"));
         }
     }
 }

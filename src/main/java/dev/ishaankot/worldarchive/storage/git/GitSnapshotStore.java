@@ -18,6 +18,8 @@ public interface GitSnapshotStore extends BackupBackend, AutoCloseable {
 
     CompletionStage<GitVerification> verifySnapshot(WorldId worldId, BackupId backupId);
 
+    CompletionStage<BackupManifest> readManifest(WorldId worldId, BackupId backupId);
+
     CompletionStage<GitVerification> verifyRestorableSnapshot(
             WorldId worldId,
             BackupId backupId,
@@ -38,6 +40,15 @@ public interface GitSnapshotStore extends BackupBackend, AutoCloseable {
             Path emptyStaging);
 
     CompletionStage<Boolean> deleteSnapshot(WorldId worldId, BackupId backupId);
+
+    CompletionStage<Boolean> deleteLocalSnapshot(WorldId worldId, BackupId backupId);
+
+    CompletionStage<GitVerification> hydrateExternalSnapshot(
+            WorldId worldId,
+            BackupId backupId,
+            BackupManifest expectedManifest,
+            String expectedCommit,
+            String remoteUrl);
 
     CompletionStage<DestinationResult> syncSnapshot(WorldId worldId, BackupId backupId);
 

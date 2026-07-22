@@ -11,7 +11,9 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -216,6 +218,47 @@ public final class ClientSettingsAccess {
     public static Screen createScreen(Screen parent) {
         initialize();
         return new WorldArchiveSettingsScreen(parent, FOLDER_CHOOSER);
+    }
+
+    public static CancellableRequest<FolderSelectionResult> chooseFolder(
+            String title,
+            Optional<Path> initialDirectory) {
+        initialize();
+        return FOLDER_CHOOSER.chooseFolder(
+                Objects.requireNonNull(title, "title"),
+                Objects.requireNonNull(initialDirectory, "initialDirectory"));
+    }
+
+    /** Applies imported remotes only to already configured live worlds. */
+    public static CompletionStage<WorldArchiveConfig> connectWorldRemotes(
+            Map<WorldId, String> connections) {
+        Map<WorldId, String> requested = Map.copyOf(
+                Objects.requireNonNull(connections, "connections"));
+        if (requested.isEmpty()) {
+            return CompletableFuture.completedFuture(snapshot());
+        }
+        return ready().thenCompose(ignored -> {
+            WorldArchiveConfig current = snapshot();
+            List<WorldConfig> worlds = current.worlds().stream()
+                    .map(world -> requested.containsKey(world.worldId())
+                            ? new WorldConfig(
+                                    world.worldId(),
+                                    world.enabled(),
+                                    world.path(),
+                                    Optional.of(requested.get(world.worldId())),
+                                    world.zipDestination())
+                            : world)
+                    .toList();
+            WorldArchiveConfig connected = new WorldArchiveConfig(
+                    WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
+                    current.triggers(),
+                    current.git(),
+                    current.zip(),
+                    worlds);
+            return connected.equals(current)
+                    ? CompletableFuture.completedFuture(current)
+                    : save(connected);
+        });
     }
 
     public static List<Path> knownWorldPaths() {

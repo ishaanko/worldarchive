@@ -10,8 +10,10 @@ import dev.ishaankot.worldarchive.model.BackupManifest;
 import dev.ishaankot.worldarchive.model.BackupRecord;
 import dev.ishaankot.worldarchive.model.BackupResult;
 import dev.ishaankot.worldarchive.model.BackupTrigger;
+import dev.ishaankot.worldarchive.model.ArtifactOwnership;
 import dev.ishaankot.worldarchive.model.DestinationResult;
 import dev.ishaankot.worldarchive.model.DestinationType;
+import dev.ishaankot.worldarchive.model.ImportSourceId;
 import dev.ishaankot.worldarchive.model.SyncStatus;
 import dev.ishaankot.worldarchive.model.VerificationStatus;
 import dev.ishaankot.worldarchive.model.WorldId;
@@ -156,6 +158,79 @@ final class FileBackupCatalogTest {
                 .destinations()
                 .getFirst()
                 .syncStatus());
+    }
+
+    @Test
+    void mergesIdenticalArtifactsWithoutOverwritingConflicts() throws IOException {
+        FileBackupCatalog catalog = new FileBackupCatalog(temporaryDirectory.resolve("merge.json"));
+        BackupRecord original = record(WorldId.create(), "2026-07-17T10:00:00Z");
+        catalog.add(original);
+        DestinationResult git = DestinationResult.success(
+                DestinationType.GIT,
+                "refs/heads/worldarchive/" + original.manifest().worldId()
+                        + "/" + original.manifest().backupId());
+        BackupRecord discovered = new BackupRecord(
+                original.manifest(),
+                BackupResult.aggregate(
+                        original.manifest().backupId(),
+                        original.manifest().worldId(),
+                        List.of(git),
+                        original.result().completedAt()));
+
+        assertEquals(CatalogMergeStatus.MERGED, catalog.merge(discovered).status());
+        assertEquals(2, catalog.find(original.manifest().backupId()).orElseThrow()
+                .result().destinations().size());
+        DestinationResult observedAgain = git.withVerification(VerificationStatus.VERIFIED);
+        BackupRecord healthOnlyDifference = new BackupRecord(
+                original.manifest(),
+                BackupResult.aggregate(
+                        original.manifest().backupId(),
+                        original.manifest().worldId(),
+                        List.of(observedAgain),
+                        original.result().completedAt()));
+        assertEquals(CatalogMergeStatus.UNCHANGED, catalog.merge(healthOnlyDifference).status());
+
+        BackupRecord conflict = new BackupRecord(
+                original.manifest(),
+                BackupResult.aggregate(
+                        original.manifest().backupId(),
+                        original.manifest().worldId(),
+                        List.of(DestinationResult.success(DestinationType.GIT, "another-ref")),
+                        original.result().completedAt()));
+        assertEquals(CatalogMergeStatus.CONFLICT, catalog.merge(conflict).status());
+        assertEquals(git.artifactId(), catalog.find(original.manifest().backupId()).orElseThrow()
+                .result().destinations().stream()
+                .filter(destination -> destination.destination() == DestinationType.GIT)
+                .findFirst().orElseThrow().artifactId());
+    }
+
+    @Test
+    void persistsExternalArtifactProvenanceInSchemaThree() throws IOException {
+        Path file = temporaryDirectory.resolve("external.json");
+        FileBackupCatalog catalog = new FileBackupCatalog(file);
+        BackupRecord base = record(WorldId.create(), "2026-07-17T10:00:00Z");
+        ImportSourceId sourceId = ImportSourceId.derived("linked folder");
+        DestinationResult external = DestinationResult.externalSuccess(
+                DestinationType.ZIP,
+                base.manifest().worldId() + "/archive.zip",
+                sourceId,
+                VerificationStatus.VERIFIED,
+                SyncStatus.NOT_CONFIGURED);
+        BackupRecord linked = new BackupRecord(
+                base.manifest(),
+                BackupResult.aggregate(
+                        base.manifest().backupId(),
+                        base.manifest().worldId(),
+                        List.of(external),
+                        base.result().completedAt()));
+
+        catalog.add(linked);
+
+        DestinationResult restored = new FileBackupCatalog(file).listAll().getFirst()
+                .result().destinations().getFirst();
+        assertEquals(ArtifactOwnership.EXTERNAL, restored.ownership());
+        assertEquals(sourceId, restored.importSourceId().orElseThrow());
+        assertTrue(Files.readString(file).contains("\"schemaVersion\": 3"));
     }
 
     @Test

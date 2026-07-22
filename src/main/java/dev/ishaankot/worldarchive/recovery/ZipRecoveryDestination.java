@@ -1,5 +1,10 @@
 package dev.ishaankot.worldarchive.recovery;
 
+import dev.ishaankot.worldarchive.importing.ImportArtifactBinding;
+import dev.ishaankot.worldarchive.importing.ImportSource;
+import dev.ishaankot.worldarchive.importing.ImportSourceMode;
+import dev.ishaankot.worldarchive.importing.ImportSourceRegistry;
+import dev.ishaankot.worldarchive.model.ArtifactOwnership;
 import dev.ishaankot.worldarchive.model.BackupManifest;
 import dev.ishaankot.worldarchive.model.BackupRecord;
 import dev.ishaankot.worldarchive.model.DestinationHealth;
@@ -11,6 +16,7 @@ import dev.ishaankot.worldarchive.model.WorldId;
 import dev.ishaankot.worldarchive.storage.zip.ZipBackupStore;
 import dev.ishaankot.worldarchive.storage.zip.ZipBackupStoreResolver;
 import dev.ishaankot.worldarchive.storage.zip.ZipVerification;
+import dev.ishaankot.worldarchive.storage.zip.LinkedZipArtifactAccess;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.Objects;
@@ -22,13 +28,25 @@ final class ZipRecoveryDestination implements RecoveryDestination {
 
     private final Clock clock;
 
+    private final Optional<ImportSourceRegistry> sources;
+
+    private final LinkedZipArtifactAccess linkedAccess = new LinkedZipArtifactAccess();
+
     ZipRecoveryDestination(ZipBackupStore store, Clock clock) {
         this((ZipBackupStoreResolver) store, clock);
     }
 
     ZipRecoveryDestination(ZipBackupStoreResolver stores, Clock clock) {
+        this(stores, clock, Optional.empty());
+    }
+
+    ZipRecoveryDestination(
+            ZipBackupStoreResolver stores,
+            Clock clock,
+            Optional<ImportSourceRegistry> sources) {
         this.stores = Objects.requireNonNull(stores, "stores");
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.sources = Objects.requireNonNull(sources, "sources");
     }
 
     @Override
@@ -38,6 +56,16 @@ final class ZipRecoveryDestination implements RecoveryDestination {
 
     @Override
     public VerificationOutcome verify(BackupRecord record, DestinationResult destination) {
+        if (destination.ownership() == ArtifactOwnership.EXTERNAL) {
+            LinkedArtifact linked = linked(record, destination);
+            ZipVerification verification = linkedAccess.verify(
+                    linked.source(), linked.binding(), record.manifest());
+            return verification.valid()
+                    ? VerificationOutcome.verified("Linked ZIP archive verified")
+                    : VerificationOutcome.failed(verification.problems().isEmpty()
+                            ? "Linked ZIP verification failed"
+                            : verification.problems().getFirst());
+        }
         Path archive = archivePath(record, destination);
         ZipBackupStore store = store(record);
         ZipVerification verification = store.verify(archive);
@@ -58,6 +86,12 @@ final class ZipRecoveryDestination implements RecoveryDestination {
             BackupRecord record,
             DestinationResult destination,
             Path emptyTarget) throws Exception {
+        if (destination.ownership() == ArtifactOwnership.EXTERNAL) {
+            LinkedArtifact linked = linked(record, destination);
+            linkedAccess.materialize(
+                    linked.source(), linked.binding(), record.manifest(), emptyTarget);
+            return Materialization.preserved(emptyTarget);
+        }
         Path archive = archivePath(record, destination);
         ZipBackupStore store = store(record);
         store.materialize(archive, emptyTarget);
@@ -71,6 +105,13 @@ final class ZipRecoveryDestination implements RecoveryDestination {
 
     @Override
     public boolean delete(BackupRecord record, DestinationResult destination) throws Exception {
+        if (destination.ownership() == ArtifactOwnership.EXTERNAL) {
+            linked(record, destination);
+            sources.orElseThrow(() -> new BackupRecoveryException(
+                    "Linked ZIP source registry is unavailable"))
+                    .unlink(destination.importSourceId().orElseThrow(), record.manifest().backupId());
+            return true;
+        }
         store(record).delete(archivePath(record, destination));
         // Successful exact-path inspection also reconciles an already-absent archive and sidecar.
         return true;
@@ -78,6 +119,10 @@ final class ZipRecoveryDestination implements RecoveryDestination {
 
     @Override
     public DestinationResult sync(BackupRecord record, DestinationResult destination) {
+        if (destination.ownership() == ArtifactOwnership.EXTERNAL) {
+            linked(record, destination);
+            return destination;
+        }
         archivePath(record, destination);
         return destination.withSync(SyncStatus.NOT_CONFIGURED);
     }
@@ -129,5 +174,36 @@ final class ZipRecoveryDestination implements RecoveryDestination {
 
     private ZipBackupStore store(BackupRecord record) {
         return stores.store(record.manifest().worldId());
+    }
+
+    private LinkedArtifact linked(BackupRecord record, DestinationResult destination) {
+        Objects.requireNonNull(record, "record");
+        Objects.requireNonNull(destination, "destination");
+        if (destination.destination() != DestinationType.ZIP
+                || destination.importSourceId().isEmpty()) {
+            throw new BackupRecoveryException("Linked ZIP artifact identity is missing");
+        }
+        try {
+            ImportSource source = sources.orElseThrow(() -> new BackupRecoveryException(
+                    "Linked ZIP source registry is unavailable"))
+                    .find(destination.importSourceId().orElseThrow())
+                    .orElseThrow(() -> new BackupRecoveryException(
+                            "Linked ZIP source is no longer available"));
+            if (source.mode() != ImportSourceMode.ZIP_LINK) {
+                throw new BackupRecoveryException("Linked ZIP source mode is invalid");
+            }
+            ImportArtifactBinding binding = source.artifact(record.manifest().backupId())
+                    .orElseThrow(() -> new BackupRecoveryException(
+                            "Linked ZIP artifact binding is missing"));
+            if (!binding.worldId().equals(record.manifest().worldId())) {
+                throw new BackupRecoveryException("Linked ZIP world identity does not match");
+            }
+            return new LinkedArtifact(source, binding);
+        } catch (java.io.IOException exception) {
+            throw new BackupRecoveryException("Linked ZIP source registry could not be read", exception);
+        }
+    }
+
+    private record LinkedArtifact(ImportSource source, ImportArtifactBinding binding) {
     }
 }

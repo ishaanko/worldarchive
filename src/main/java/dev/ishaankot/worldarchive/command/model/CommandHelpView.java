@@ -26,6 +26,8 @@ public record CommandHelpView(String heading, List<CommandHelpEntry> entries) {
                         new CommandHelpEntry("/backup sync [id]", "Synchronize Git backups"),
                         new CommandHelpEntry("/backup verify [id]", "Verify backup integrity"),
                         new CommandHelpEntry("/backup folder [id]", "Open managed backup files"),
+                        new CommandHelpEntry("/backup import", "Import Git histories or ZIP folders"),
+                        new CommandHelpEntry("/backup rebuild", "Rebuild the local backup catalog"),
                         new CommandHelpEntry("/backup status", "Show current backup status"),
                         new CommandHelpEntry("/backup help", "Show all commands"),
                         new CommandHelpEntry("/backup config", "Open settings")));

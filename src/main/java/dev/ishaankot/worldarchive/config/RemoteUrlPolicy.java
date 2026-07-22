@@ -14,7 +14,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /** Strictly whitelists credential-free URL, SCP, and absolute local Git remote forms. */
-final class RemoteUrlPolicy {
+public final class RemoteUrlPolicy {
     static final String WORLD_ID_PLACEHOLDER = "{worldId}";
 
     private static final UUID VALIDATION_WORLD_ID = UUID.fromString(
@@ -47,7 +47,7 @@ final class RemoteUrlPolicy {
         return remoteUrl;
     }
 
-    static String validatePlain(String remoteUrl) {
+    public static String validatePlain(String remoteUrl) {
         Objects.requireNonNull(remoteUrl, "remoteUrl");
         if (countWorldIdPlaceholders(remoteUrl) != 0) {
             throw new IllegalArgumentException("Legacy Git remote URL must not contain {worldId}");

@@ -214,6 +214,14 @@ public final class WorldGitSnapshotStore implements GitSnapshotStore {
     }
 
     @Override
+    public CompletionStage<BackupManifest> readManifest(WorldId worldId, BackupId backupId) {
+        return withLocatedLocal(
+                worldId,
+                backupId,
+                backend -> backend.readManifest(worldId, backupId));
+    }
+
+    @Override
     public CompletionStage<GitVerification> verifyRestorableSnapshot(
             WorldId worldId,
             BackupId backupId,
@@ -285,6 +293,28 @@ public final class WorldGitSnapshotStore implements GitSnapshotStore {
     }
 
     @Override
+    public CompletionStage<Boolean> deleteLocalSnapshot(WorldId worldId, BackupId backupId) {
+        return withLocatedLocal(
+                worldId,
+                backupId,
+                backend -> backend.deleteLocalSnapshot(worldId, backupId));
+    }
+
+    @Override
+    public CompletionStage<GitVerification> hydrateExternalSnapshot(
+            WorldId worldId,
+            BackupId backupId,
+            BackupManifest expectedManifest,
+            String expectedCommit,
+            String remoteUrl) {
+        return withLocatedLocal(
+                worldId,
+                backupId,
+                backend -> backend.hydrateExternalSnapshot(
+                        worldId, backupId, expectedManifest, expectedCommit, remoteUrl));
+    }
+
+    @Override
     public CompletionStage<DestinationResult> syncSnapshot(WorldId worldId, BackupId backupId) {
         return withLocatedLocal(
                 worldId,
@@ -306,6 +336,65 @@ public final class WorldGitSnapshotStore implements GitSnapshotStore {
         Objects.requireNonNull(worldId, "worldId");
         return currentRemote(worldId).isPresent()
                 || legacySettings.flatMap(GitBackendSettings::remoteUrl).isPresent();
+    }
+
+    /** Fetches remote refs into a private repository without installing or downloading LFS data. */
+    public CompletionStage<GitPreparedImport> prepareImport(String remoteUrl) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                return new GitHistoryImporter(currentSettings, runner).prepare(remoteUrl);
+            } catch (IOException | InterruptedException | GitStorageException exception) {
+                if (exception instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                }
+                throw new CompletionException(exception);
+            }
+        }, executor);
+    }
+
+    /** Installs only the exact commits retained by a prepared preview. */
+    public CompletionStage<Map<BackupId, GitImportInstallStatus>> installImport(
+            GitPreparedImport prepared,
+            boolean fullDownload) {
+        Objects.requireNonNull(prepared, "prepared");
+        Map<WorldId, List<GitImportCandidate>> byWorld = prepared.candidates().stream()
+                .collect(java.util.stream.Collectors.groupingBy(
+                        candidate -> candidate.manifest().worldId()));
+        List<CompletionStage<Map<BackupId, GitImportInstallStatus>>> installations = byWorld
+                .entrySet().stream()
+                .map(entry -> child(entry.getKey()).installImportedSnapshots(
+                        prepared.repository(),
+                        entry.getValue(),
+                        prepared.remote(),
+                        fullDownload))
+                .toList();
+        CompletableFuture<?>[] futures = installations.stream()
+                .map(CompletionStage::toCompletableFuture)
+                .toArray(CompletableFuture[]::new);
+        return CompletableFuture.allOf(futures).thenApply(ignored -> {
+            Map<BackupId, GitImportInstallStatus> results = new HashMap<>();
+            installations.forEach(stage -> results.putAll(stage.toCompletableFuture().join()));
+            return Map.copyOf(results);
+        });
+    }
+
+    /** Recreates missing durable snapshot refs from local managed history refs only. */
+    public CompletionStage<Integer> rebuildSnapshotRefs() {
+        List<CompletionStage<Integer>> rebuilds = new ArrayList<>();
+        try {
+            for (WorldId worldId : discoverWorlds()) {
+                rebuilds.add(child(worldId).rebuildSnapshotRefs());
+            }
+        } catch (IOException exception) {
+            return CompletableFuture.failedFuture(exception);
+        }
+        legacyBackend.ifPresent(backend -> rebuilds.add(backend.rebuildSnapshotRefs()));
+        CompletableFuture<?>[] futures = rebuilds.stream()
+                .map(CompletionStage::toCompletableFuture)
+                .toArray(CompletableFuture[]::new);
+        return CompletableFuture.allOf(futures).thenApply(ignored -> rebuilds.stream()
+                .mapToInt(stage -> stage.toCompletableFuture().join())
+                .sum());
     }
 
     @Override

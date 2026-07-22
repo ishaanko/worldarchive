@@ -34,9 +34,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -47,8 +44,7 @@ public final class GitBackupBackend implements GitSnapshotStore {
 
     private static final String ZERO_OBJECT_ID = "0000000000000000000000000000000000000000";
 
-    private static final Pattern SNAPSHOT_REF = Pattern.compile(
-            "refs/heads/worldarchive/([0-9a-f-]{36})/([0-9a-f-]{36})");
+    private static final Pattern SNAPSHOT_REF = Pattern.compile("refs/heads/worldarchive/([0-9a-f-]{36})/([0-9a-f-]{36})");
 
     private final GitBackendSettings settings;
 
@@ -64,9 +60,7 @@ public final class GitBackupBackend implements GitSnapshotStore {
 
     private final GitSnapshotCreator snapshotCreator;
 
-    private final ExecutorService executor;
-
-    private final boolean ownsExecutor;
+    private final GitAsyncExecutor async;
 
     private final ReentrantLock processLock = new ReentrantLock(true);
 
@@ -84,13 +78,6 @@ public final class GitBackupBackend implements GitSnapshotStore {
                     directoryIdentityMarker, "directoryIdentityMarker");
             publicationProblem = Objects.requireNonNull(
                     publicationProblem, "publicationProblem");
-        }
-    }
-
-    private record RemoteSnapshotRef(String refName, String commitId) {
-        private RemoteSnapshotRef {
-            Objects.requireNonNull(refName, "refName");
-            Objects.requireNonNull(commitId, "commitId");
         }
     }
 
@@ -126,8 +113,7 @@ public final class GitBackupBackend implements GitSnapshotStore {
                 repository,
                 refs,
                 verifier);
-        this.executor = Objects.requireNonNull(executor, "executor");
-        this.ownsExecutor = ownsExecutor;
+        this.async = new GitAsyncExecutor(executor, ownsExecutor);
     }
 
     @Override
@@ -157,6 +143,18 @@ public final class GitBackupBackend implements GitSnapshotStore {
         Objects.requireNonNull(worldId, "worldId");
         Objects.requireNonNull(backupId, "backupId");
         return submit(() -> withRepositoryLock(() -> verifySnapshotBlocking(worldId, backupId)));
+    }
+
+    @Override
+    public CompletionStage<BackupManifest> readManifest(WorldId worldId, BackupId backupId) {
+        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(backupId, "backupId");
+        return submit(() -> withRepositoryLock(() -> {
+            repository.requireWorld(worldId);
+            repository.requireBare();
+            GitSnapshot snapshot = refs.resolveSnapshot(worldId, backupId);
+            return verifier.verifyMetadata(snapshot).manifest().manifest();
+        }));
     }
 
     /** Verifies a local snapshot or safely fetches and installs its configured remote copy. */
@@ -221,6 +219,51 @@ public final class GitBackupBackend implements GitSnapshotStore {
         Objects.requireNonNull(worldId, "worldId");
         Objects.requireNonNull(backupId, "backupId");
         return submit(() -> withRepositoryLock(() -> deleteSnapshotBlocking(worldId, backupId)));
+    }
+
+    @Override
+    public CompletionStage<Boolean> deleteLocalSnapshot(WorldId worldId, BackupId backupId) {
+        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(backupId, "backupId");
+        return submit(() -> withRepositoryLock(() -> deleteLocalSnapshotBlocking(worldId, backupId)));
+    }
+
+    @Override
+    public CompletionStage<GitVerification> hydrateExternalSnapshot(
+            WorldId worldId,
+            BackupId backupId,
+            BackupManifest expectedManifest,
+            String expectedCommit,
+            String remoteUrl) {
+        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(backupId, "backupId");
+        Objects.requireNonNull(expectedManifest, "expectedManifest");
+        String commit = GitImportValidation.objectId(expectedCommit);
+        String remote = dev.ishaankot.worldarchive.config.RemoteUrlPolicy.validatePlain(remoteUrl);
+        requireManifestIdentity(worldId, backupId, expectedManifest);
+        return submit(() -> withRepositoryLock(() -> importRepository().hydrateExternalSnapshot(
+                worldId, backupId, expectedManifest, commit, remote)));
+    }
+
+    CompletionStage<Map<BackupId, GitImportInstallStatus>> installImportedSnapshots(
+            Path sourceRepository,
+            List<GitImportCandidate> candidates,
+            String remoteUrl,
+            boolean fullDownload) {
+        Path source = Objects.requireNonNull(sourceRepository, "sourceRepository")
+                .toAbsolutePath().normalize();
+        List<GitImportCandidate> immutable = List.copyOf(candidates);
+        String remote = dev.ishaankot.worldarchive.config.RemoteUrlPolicy.validatePlain(remoteUrl);
+        return submit(() -> withRepositoryLock(() -> importRepository().installSnapshots(
+                source, immutable, remote, fullDownload)));
+    }
+
+    CompletionStage<Integer> rebuildSnapshotRefs() {
+        return submit(() -> withRepositoryLock(() -> importRepository().rebuildSnapshotRefs()));
+    }
+
+    private GitImportRepository importRepository() {
+        return new GitImportRepository(settings, commands, repository, refs, verifier);
     }
 
     public CompletionStage<DestinationResult> syncSnapshot(WorldId worldId, BackupId backupId) {
@@ -636,6 +679,19 @@ public final class GitBackupBackend implements GitSnapshotStore {
         return true;
     }
 
+    private boolean deleteLocalSnapshotBlocking(WorldId worldId, BackupId backupId)
+            throws IOException, InterruptedException, GitStorageException {
+        repository.requireWorld(worldId);
+        repository.requireBare();
+        String refName = GitSnapshot.refName(worldId, backupId);
+        Optional<String> current = refs.resolve(refName);
+        if (current.isEmpty()) {
+            return false;
+        }
+        refs.deleteExact(refName, current.orElseThrow());
+        return true;
+    }
+
     private void deleteRemoteSnapshotRefs(
             List<RemoteSnapshotRef> remoteRefs,
             String expectedCommit)
@@ -920,47 +976,12 @@ public final class GitBackupBackend implements GitSnapshotStore {
     }
 
     private <T> CompletableFuture<T> submit(InterruptibleOperation<T> operation) {
-        CompletableFuture<T> result = new CompletableFuture<>();
-        AtomicReference<Future<?>> taskReference = new AtomicReference<>();
-        Future<?> task = executor.submit(() -> {
-            if (result.isCancelled()) {
-                return;
-            }
-            try {
-                result.complete(operation.run());
-            } catch (Throwable throwable) {
-                result.completeExceptionally(throwable);
-            }
-        });
-        taskReference.set(task);
-        result.whenComplete((ignored, throwable) -> {
-            if (result.isCancelled()) {
-                Future<?> submitted = taskReference.get();
-                if (submitted != null) {
-                    submitted.cancel(true);
-                }
-            }
-        });
-        return result;
+        return async.submit(operation::run);
     }
 
     @Override
     public void close() {
-        if (ownsExecutor) {
-            executor.shutdownNow();
-            boolean interrupted = false;
-            while (!executor.isTerminated()) {
-                try {
-                    executor.awaitTermination(1L, TimeUnit.DAYS);
-                } catch (InterruptedException exception) {
-                    interrupted = true;
-                    executor.shutdownNow();
-                }
-            }
-            if (interrupted) {
-                Thread.currentThread().interrupt();
-            }
-        }
+        async.close();
     }
 
     @FunctionalInterface

@@ -12,6 +12,20 @@ import java.util.function.UnaryOperator;
 public interface BackupCatalog {
     void add(BackupRecord record) throws IOException;
 
+    /** Idempotently adds or augments a record without overwriting conflicting metadata. */
+    default CatalogMergeResult merge(BackupRecord discovered) throws IOException {
+        Optional<BackupRecord> existing = find(discovered.manifest().backupId());
+        if (existing.isEmpty()) {
+            add(discovered);
+            return new CatalogMergeResult(CatalogMergeStatus.ADDED, discovered);
+        }
+        CatalogMergeResult merged = BackupRecordMerger.merge(existing.orElseThrow(), discovered);
+        if (merged.status() == CatalogMergeStatus.MERGED) {
+            update(discovered.manifest().backupId(), ignored -> merged.record());
+        }
+        return merged;
+    }
+
     Optional<BackupRecord> find(BackupId backupId) throws IOException;
 
     List<BackupRecord> listAll() throws IOException;
