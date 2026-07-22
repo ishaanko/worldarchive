@@ -3,6 +3,7 @@ package dev.ishaankot.worldarchive.runtime;
 import dev.ishaankot.worldarchive.model.DestinationResult;
 import dev.ishaankot.worldarchive.model.DestinationStatus;
 import dev.ishaankot.worldarchive.model.DestinationType;
+import dev.ishaankot.worldarchive.model.BackupRecord;
 import java.util.List;
 import java.util.Objects;
 
@@ -29,6 +30,38 @@ final class RuntimeDestinationPathGuard {
             throw new IllegalArgumentException(
                     "The ZIP destination cannot change while the catalog contains ZIP backups");
         }
+    }
+
+    static void requireWorldZipOverridesAllowed(
+            RuntimeStoragePaths current,
+            RuntimeStoragePaths replacement,
+            List<BackupRecord> catalogRecords) {
+        Objects.requireNonNull(current, "current");
+        Objects.requireNonNull(replacement, "replacement");
+        for (BackupRecord record : List.copyOf(
+                Objects.requireNonNull(catalogRecords, "catalogRecords"))) {
+            if (!current.zipDirectory(record.manifest().worldId()).equals(
+                            replacement.zipDirectory(record.manifest().worldId()))
+                    && dependsOn(record.result().destinations(), DestinationType.ZIP)) {
+                throw new IllegalArgumentException(
+                        "A world's ZIP destination cannot change while its catalog contains ZIP backups");
+            }
+        }
+    }
+
+    static void requireCatalogAllowed(
+            RuntimeStoragePaths current,
+            RuntimeStoragePaths replacement,
+            List<BackupRecord> catalogRecords) {
+        List<BackupRecord> records = List.copyOf(
+                Objects.requireNonNull(catalogRecords, "catalogRecords"));
+        requireAllowed(
+                current,
+                replacement,
+                records.stream()
+                        .flatMap(record -> record.result().destinations().stream())
+                        .toList());
+        requireWorldZipOverridesAllowed(current, replacement, records);
     }
 
     private static boolean dependsOn(

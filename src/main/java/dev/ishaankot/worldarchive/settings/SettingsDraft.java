@@ -32,6 +32,8 @@ public final class SettingsDraft {
 
     private final Map<WorldId, String> worldRemoteUrls;
 
+    private final Map<WorldId, String> worldZipDestinations;
+
     private String scheduleInterval;
 
     private boolean gitEnabled;
@@ -87,9 +89,13 @@ public final class SettingsDraft {
         zipHealth = config.zip().health();
         worldEnabled = new LinkedHashMap<>();
         worldRemoteUrls = new LinkedHashMap<>();
+        worldZipDestinations = new LinkedHashMap<>();
         config.worlds().forEach(world -> {
             worldEnabled.put(world.worldId(), world.enabled());
             worldRemoteUrls.put(world.worldId(), world.remoteUrl().orElse(""));
+            worldZipDestinations.put(
+                    world.worldId(),
+                    world.zipDestination().map(Path::toString).orElse(""));
         });
     }
 
@@ -97,6 +103,7 @@ public final class SettingsDraft {
         base = source.base;
         worldEnabled = new LinkedHashMap<>(source.worldEnabled);
         worldRemoteUrls = new LinkedHashMap<>(source.worldRemoteUrls);
+        worldZipDestinations = new LinkedHashMap<>(source.worldZipDestinations);
         scheduleInterval = source.scheduleInterval;
         gitEnabled = source.gitEnabled;
         gitRepository = source.gitRepository;
@@ -128,7 +135,11 @@ public final class SettingsDraft {
         WorldArchiveConfig defaults = WorldArchiveConfig.defaults();
         List<WorldConfig> worlds = current.worlds().stream()
                 .map(world -> new WorldConfig(
-                        world.worldId(), true, world.path(), world.remoteUrl()))
+                        world.worldId(),
+                        true,
+                        world.path(),
+                        world.remoteUrl(),
+                        world.zipDestination()))
                 .toList();
         return new SettingsDraft(new WorldArchiveConfig(
                 WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
@@ -158,7 +169,11 @@ public final class SettingsDraft {
         Objects.requireNonNull(defaults, "defaults");
         List<WorldConfig> worlds = current.worlds().stream()
                 .map(world -> new WorldConfig(
-                        world.worldId(), true, world.path(), world.remoteUrl()))
+                        world.worldId(),
+                        true,
+                        world.path(),
+                        world.remoteUrl(),
+                        world.zipDestination()))
                 .toList();
         WorldArchiveConfig reset = defaults.defaultsKeepingWorlds(worlds);
         GitDestinationConfig git = reset.git();
@@ -200,7 +215,7 @@ public final class SettingsDraft {
                 sourceWorlds,
                 issues);
         List<String> patterns = parseLfsPatterns(issues);
-        List<WorldConfig> worlds = updatedWorlds(issues);
+        List<WorldConfig> worlds = updatedWorlds(sourceWorlds, issues);
 
         GitDestinationConfig git = null;
         if (!issues.containsKey(SettingsField.GIT_REPOSITORY)
@@ -363,16 +378,27 @@ public final class SettingsDraft {
         }
     }
 
-    private List<WorldConfig> updatedWorlds(Map<SettingsField, String> issues) {
+    private List<WorldConfig> updatedWorlds(
+            Collection<Path> sourceWorlds,
+            Map<SettingsField, String> issues) {
         List<WorldConfig> worlds = new ArrayList<>(base.worlds().size());
         for (WorldConfig world : base.worlds()) {
             String remoteUrl = worldRemoteUrls.getOrDefault(world.worldId(), "");
+            String zipDestination = worldZipDestinations.getOrDefault(world.worldId(), "");
+            Optional<Path> archiveDirectory = validatePath(
+                    zipDestination,
+                    false,
+                    "ZIP override for world " + world.worldId().displayCode(),
+                    SettingsField.WORLD_ZIP_DESTINATION,
+                    sourceWorlds,
+                    issues);
             try {
                 worlds.add(new WorldConfig(
                         world.worldId(),
                         worldEnabled.getOrDefault(world.worldId(), world.enabled()),
                         world.path(),
-                        remoteUrl.isBlank() ? Optional.empty() : Optional.of(remoteUrl)));
+                        remoteUrl.isBlank() ? Optional.empty() : Optional.of(remoteUrl),
+                        archiveDirectory));
             } catch (IllegalArgumentException exception) {
                 issues.put(
                         SettingsField.WORLD_REMOTE_URL,
@@ -555,6 +581,22 @@ public final class SettingsDraft {
             worldRemoteUrls.put(id, next);
             resetGitHealth();
         }
+    }
+
+    public String worldZipDestination(WorldId worldId) {
+        String value = worldZipDestinations.get(Objects.requireNonNull(worldId, "worldId"));
+        if (value == null) {
+            throw new IllegalArgumentException("Unknown world configuration: " + worldId);
+        }
+        return value;
+    }
+
+    public void setWorldZipDestination(WorldId worldId, String destination) {
+        WorldId id = Objects.requireNonNull(worldId, "worldId");
+        if (!worldZipDestinations.containsKey(id)) {
+            throw new IllegalArgumentException("Unknown world configuration: " + id);
+        }
+        worldZipDestinations.put(id, Objects.requireNonNull(destination, "destination"));
     }
 
     public SettingsProbeRequest probeRequest() {

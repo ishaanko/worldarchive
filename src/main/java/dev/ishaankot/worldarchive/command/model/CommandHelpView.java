@@ -25,7 +25,9 @@ public record CommandHelpView(String heading, List<CommandHelpEntry> entries) {
                         new CommandHelpEntry("/backup delete <id>", "Prepare a confirmed deletion"),
                         new CommandHelpEntry("/backup sync [id]", "Synchronize Git backups"),
                         new CommandHelpEntry("/backup verify [id]", "Verify backup integrity"),
+                        new CommandHelpEntry("/backup folder [id]", "Open managed backup files"),
                         new CommandHelpEntry("/backup status", "Show current backup status"),
+                        new CommandHelpEntry("/backup help", "Show all commands"),
                         new CommandHelpEntry("/backup config", "Open settings")));
     }
 }

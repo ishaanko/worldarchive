@@ -15,6 +15,8 @@ import dev.ishaankot.worldarchive.command.model.BackupIdResolutionStatus;
 import dev.ishaankot.worldarchive.command.model.BackupIdResolver;
 import dev.ishaankot.worldarchive.command.model.CommandBackupEntry;
 import dev.ishaankot.worldarchive.command.model.CommandBackupListPage;
+import dev.ishaankot.worldarchive.command.model.CommandHelpEntry;
+import dev.ishaankot.worldarchive.command.model.CommandHelpView;
 import dev.ishaankot.worldarchive.command.model.CommandOutcomeView;
 import dev.ishaankot.worldarchive.core.OperationProgress;
 import dev.ishaankot.worldarchive.core.ProgressListener;
@@ -48,7 +50,7 @@ import net.minecraft.network.chat.MutableComponent;
 
 /** Registers the complete client-side {@code /backup} command tree. */
 public final class WorldArchiveClientCommands {
-    private static final int LIST_PAGE_SIZE = 8;
+    private static final int LIST_PAGE_SIZE = 5;
 
     private static final int SUGGESTION_LIMIT = 20;
 
@@ -84,6 +86,7 @@ public final class WorldArchiveClientCommands {
                                         facade,
                                         IntegerArgumentType.getInteger(context, "page")))))
                 .then(literal("gui").executes(context -> openGui(context.getSource(), facade)))
+                .then(literal("help").executes(context -> help(context.getSource())))
                 .then(literal("restore")
                         .then(backupIdArgument(facade)
                                 .executes(context -> resolveForScreen(
@@ -114,6 +117,14 @@ public final class WorldArchiveClientCommands {
                                         facade,
                                         Optional.of(StringArgumentType.getString(context, "id")),
                                         Maintenance.VERIFY))))
+                .then(literal("folder")
+                        .executes(context -> openFolder(
+                                context.getSource(), facade, Optional.empty()))
+                        .then(backupIdArgument(facade)
+                                .executes(context -> openFolder(
+                                        context.getSource(),
+                                        facade,
+                                        Optional.of(StringArgumentType.getString(context, "id"))))))
                 .then(literal("status")
                         .executes(context -> status(context.getSource(), facade)))
                 .then(literal("config")
@@ -133,23 +144,34 @@ public final class WorldArchiveClientCommands {
         source.sendFeedback(Component.literal("WorldArchive").withStyle(
                 ChatFormatting.AQUA,
                 ChatFormatting.BOLD));
-        source.sendFeedback(Component.literal("Durable world backups with independent Git and ZIP copies.")
-                .withStyle(ChatFormatting.GRAY));
         source.sendFeedback(Component.empty()
-                .append(action("[Create]", "/backup create", "Create a manual backup"))
+                .append(action("[Create Backup]", "/backup create", "Create a manual backup"))
                 .append(" ")
-                .append(action("[Backups]", "/backup gui", "Open the backup browser"))
+                .append(action("[Browse Backups]", "/backup gui", "Open the backup browser"))
+                .append(" ")
+                .append(action("[Settings]", "/backup config", "Configure WorldArchive")));
+        source.sendFeedback(Component.empty()
+                .append(action("[List]", "/backup list", "List backups in chat"))
                 .append(" ")
                 .append(action("[Status]", "/backup status", "Show destination health"))
                 .append(" ")
-                .append(action("[Settings]", "/backup config", "Configure WorldArchive")));
-        source.sendFeedback(Component.literal(
-                        "/backup create [label]  /backup list [page]  /backup restore <id>")
-                .withStyle(ChatFormatting.DARK_GRAY));
-        source.sendFeedback(Component.literal(
-                        "/backup delete <id>  /backup sync [id]  /backup verify [id]")
-                .withStyle(ChatFormatting.DARK_GRAY));
-        status(source, facade);
+                .append(action("[Open Folder]", "/backup folder", "Open managed backup files"))
+                .append(" ")
+                .append(action("[Help]", "/backup help", "Show every command")));
+        return 1;
+    }
+
+    private static int help(FabricClientCommandSource source) {
+        CommandHelpView view = CommandHelpView.standard();
+        source.sendFeedback(Component.literal(view.heading()).withStyle(
+                ChatFormatting.AQUA,
+                ChatFormatting.BOLD));
+        for (CommandHelpEntry entry : view.entries()) {
+            source.sendFeedback(Component.empty()
+                    .append(suggest(entry.usage(), entry.usage(), entry.description()))
+                    .append(Component.literal("  " + entry.description())
+                            .withStyle(ChatFormatting.GRAY)));
+        }
         return 1;
     }
 
@@ -188,9 +210,9 @@ public final class WorldArchiveClientCommands {
                             records,
                             page,
                             LIST_PAGE_SIZE);
-                    source.sendFeedback(Component.literal("Backups — page "
+                    source.sendFeedback(Component.literal("Backups  "
                                     + view.pageNumber() + "/" + view.pageCount())
-                            .withStyle(ChatFormatting.AQUA));
+                            .withStyle(ChatFormatting.AQUA, ChatFormatting.BOLD));
                     if (view.entries().isEmpty()) {
                         source.sendFeedback(Component.literal("No backups found.")
                                 .withStyle(ChatFormatting.GRAY));
@@ -205,8 +227,8 @@ public final class WorldArchiveClientCommands {
             FabricClientCommandSource source,
             CommandBackupEntry entry) {
         String details = DATE_FORMAT.format(entry.createdAt())
-                + "\nTrigger: " + entry.trigger()
-                + "\nStatus: " + entry.status()
+                + "\nTrigger: " + displayName(entry.trigger())
+                + "\nStatus: " + displayName(entry.status())
                 + entry.label().map(label -> "\nLabel: " + label).orElse("");
         MutableComponent row = Component.empty()
                 .append(action(
@@ -214,15 +236,28 @@ public final class WorldArchiveClientCommands {
                         "/backup restore " + entry.backupId(),
                         details))
                 .append(Component.literal("  " + DATE_FORMAT.format(entry.createdAt()) + "  ")
-                        .withStyle(ChatFormatting.GRAY))
-                .append(Component.literal(entry.label().orElse(entry.trigger().name()))
+                        .withStyle(ChatFormatting.DARK_GRAY))
+                .append(Component.literal(entry.label().orElse(displayName(entry.trigger())))
                         .withStyle(statusColor(entry.status())))
-                .append(" ")
-                .append(action(
-                        "[delete]",
-                        "/backup delete " + entry.backupId(),
-                        "Open deletion confirmation"));
+                .append(Component.literal("  " + displayName(entry.status()))
+                        .withStyle(ChatFormatting.GRAY));
         source.sendFeedback(row);
+        source.sendFeedback(Component.empty()
+                .append("  ")
+                .append(action("[Restore]", "/backup restore " + entry.backupId(),
+                        "Restore as a new world copy"))
+                .append(" ")
+                .append(action("[Delete]", "/backup delete " + entry.backupId(),
+                        "Open deletion confirmation"))
+                .append(" ")
+                .append(action("[Verify]", "/backup verify " + entry.backupId(),
+                        "Check this backup"))
+                .append(" ")
+                .append(action("[Sync]", "/backup sync " + entry.backupId(),
+                        "Synchronize this backup"))
+                .append(" ")
+                .append(action("[Folder]", "/backup folder " + entry.backupId(),
+                        "Open this backup's managed folder")));
     }
 
     private static void sendPageNavigation(
@@ -260,6 +295,27 @@ public final class WorldArchiveClientCommands {
             FabricClientCommandSource source,
             BackupCommandFacade facade) {
         source.getClient().execute(facade::openSettings);
+        return 1;
+    }
+
+    private static int openFolder(
+            FabricClientCommandSource source,
+            BackupCommandFacade facade,
+            Optional<String> input) {
+        CompletionStage<Optional<BackupId>> resolved = input.isPresent()
+                ? resolveOne(source, facade, input.orElseThrow())
+                : CompletableFuture.completedFuture(Optional.empty());
+        resolved.thenCompose(backupId -> {
+                    if (input.isPresent() && backupId.isEmpty()) {
+                        return CompletableFuture.completedFuture(null);
+                    }
+                    return facade.openBackupFolder(backupId);
+                })
+                .whenComplete((ignored, throwable) -> onClient(source, () -> {
+                    if (throwable != null) {
+                        sendFailure(source, "Backup folder could not be opened", throwable);
+                    }
+                }));
         return 1;
     }
 
@@ -385,11 +441,16 @@ public final class WorldArchiveClientCommands {
                         sendFailure(source, "Backup status is unavailable", throwable);
                         return;
                     }
-                    source.sendFeedback(Component.literal(snapshot.records.size()
-                                    + " backup(s) in scope")
-                            .withStyle(ChatFormatting.AQUA));
+                    String scope = worldId.map(id -> "World " + id.displayCode())
+                            .orElse("All Worlds");
+                    source.sendFeedback(Component.literal("WorldArchive Status")
+                            .withStyle(ChatFormatting.AQUA, ChatFormatting.BOLD));
+                    source.sendFeedback(Component.literal(
+                                    scope + "  |  " + snapshot.records.size() + " Backups")
+                            .withStyle(ChatFormatting.GRAY));
                     snapshot.health.forEach(item -> source.sendFeedback(Component.literal(
-                                    item.destination() + ": " + item.status() + " — " + item.message())
+                                    "  " + displayName(item.destination()) + "  "
+                                            + displayName(item.status()) + "  |  " + item.message())
                             .withStyle(healthColor(item.status()))));
                     worldId.flatMap(facade.backups()::currentOperation)
                             .ifPresent(progress -> source.sendFeedback(progressComponent(progress)));
@@ -480,6 +541,28 @@ public final class WorldArchiveClientCommands {
                 .withUnderlined(true)
                 .withClickEvent(new ClickEvent.RunCommand(command))
                 .withHoverEvent(new HoverEvent.ShowText(Component.literal(hover))));
+    }
+
+    private static MutableComponent suggest(
+            String text,
+            String command,
+            String hover) {
+        return Component.literal(text).withStyle(style -> style
+                .withColor(ChatFormatting.AQUA)
+                .withClickEvent(new ClickEvent.SuggestCommand(command))
+                .withHoverEvent(new HoverEvent.ShowText(Component.literal(hover))));
+    }
+
+    private static String displayName(Enum<?> value) {
+        String[] words = value.name().toLowerCase(java.util.Locale.ROOT).split("_");
+        StringBuilder display = new StringBuilder();
+        for (String word : words) {
+            if (!display.isEmpty()) {
+                display.append(' ');
+            }
+            display.append(Character.toUpperCase(word.charAt(0))).append(word.substring(1));
+        }
+        return display.toString();
     }
 
     private static void sendFailure(

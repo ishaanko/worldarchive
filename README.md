@@ -14,6 +14,7 @@ always restores backups as new worlds without modifying the original.
 - Independent Git and ZIP destinations
 - Optional per-world Git remotes over HTTPS, SSH, file, or local paths
 - Support for ZIP folders synced by OneDrive, Google Drive, or similar tools
+- Optional per-world ZIP folder overrides
 - Per-world and per-destination settings
 - Backup labels, verification, remote sync, and deletion
 - Partial-success reporting when one destination fails
@@ -68,6 +69,10 @@ WorldArchive creates a short six-character world code automatically; users do
 not need to find, copy, or add it to the URL. WorldArchive does not create
 server-side repositories or request account credentials.
 
+The **ZIP** tab defines the default archive folder. The **Worlds** tab lists
+multiple worlds at once and lets any selected world inherit that default or use
+a separate ZIP root, such as a different drive or synced folder.
+
 Restoring a backup verifies it and creates a new, uniquely named world. The
 original world is never overwritten or modified.
 
@@ -83,6 +88,8 @@ original world is never overwritten or modified.
 /backup sync [id]
 /backup verify [id]
 /backup status
+/backup folder [id]
+/backup help
 /backup config
 ```
 

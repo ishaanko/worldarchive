@@ -9,6 +9,7 @@ import dev.ishaankot.worldarchive.model.DestinationType;
 import dev.ishaankot.worldarchive.model.SyncStatus;
 import dev.ishaankot.worldarchive.model.WorldId;
 import dev.ishaankot.worldarchive.storage.zip.ZipBackupStore;
+import dev.ishaankot.worldarchive.storage.zip.ZipBackupStoreResolver;
 import dev.ishaankot.worldarchive.storage.zip.ZipVerification;
 import java.nio.file.Path;
 import java.time.Clock;
@@ -17,12 +18,16 @@ import java.util.Optional;
 
 /** Recovery adapter for independently verifiable ZIP archives. */
 final class ZipRecoveryDestination implements RecoveryDestination {
-    private final ZipBackupStore store;
+    private final ZipBackupStoreResolver stores;
 
     private final Clock clock;
 
     ZipRecoveryDestination(ZipBackupStore store, Clock clock) {
-        this.store = Objects.requireNonNull(store, "store");
+        this((ZipBackupStoreResolver) store, clock);
+    }
+
+    ZipRecoveryDestination(ZipBackupStoreResolver stores, Clock clock) {
+        this.stores = Objects.requireNonNull(stores, "stores");
         this.clock = Objects.requireNonNull(clock, "clock");
     }
 
@@ -34,6 +39,7 @@ final class ZipRecoveryDestination implements RecoveryDestination {
     @Override
     public VerificationOutcome verify(BackupRecord record, DestinationResult destination) {
         Path archive = archivePath(record, destination);
+        ZipBackupStore store = store(record);
         ZipVerification verification = store.verify(archive);
         if (!verification.valid()) {
             return VerificationOutcome.failed(verification.problems().isEmpty()
@@ -53,6 +59,7 @@ final class ZipRecoveryDestination implements RecoveryDestination {
             DestinationResult destination,
             Path emptyTarget) throws Exception {
         Path archive = archivePath(record, destination);
+        ZipBackupStore store = store(record);
         store.materialize(archive, emptyTarget);
         VerificationOutcome after = verify(record, destination);
         if (!after.valid()) {
@@ -64,7 +71,7 @@ final class ZipRecoveryDestination implements RecoveryDestination {
 
     @Override
     public boolean delete(BackupRecord record, DestinationResult destination) throws Exception {
-        store.delete(archivePath(record, destination));
+        store(record).delete(archivePath(record, destination));
         // Successful exact-path inspection also reconciles an already-absent archive and sidecar.
         return true;
     }
@@ -78,7 +85,11 @@ final class ZipRecoveryDestination implements RecoveryDestination {
     @Override
     public DestinationHealth health(Optional<WorldId> worldId) throws Exception {
         Objects.requireNonNull(worldId, "worldId");
-        store.listCompleteArchives();
+        if (worldId.isPresent()) {
+            stores.store(worldId.orElseThrow()).listCompleteArchives();
+        } else {
+            stores.defaultStore().listCompleteArchives();
+        }
         return new DestinationHealth(
                 DestinationType.ZIP,
                 DestinationHealthStatus.HEALTHY,
@@ -106,11 +117,17 @@ final class ZipRecoveryDestination implements RecoveryDestination {
                 && !filename.endsWith(" - " + identitySuffix)) {
             throw new BackupRecoveryException("ZIP artifact backup ID does not match the catalog");
         }
-        Path worldDirectory = store.root().resolve(record.manifest().worldId().toString()).normalize();
+        Path worldDirectory = store(record).root()
+                .resolve(record.manifest().worldId().toString())
+                .normalize();
         Path archive = worldDirectory.resolve(filename).normalize();
         if (!archive.getParent().equals(worldDirectory)) {
             throw new BackupRecoveryException("ZIP artifact path escapes its managed world directory");
         }
         return archive;
+    }
+
+    private ZipBackupStore store(BackupRecord record) {
+        return stores.store(record.manifest().worldId());
     }
 }

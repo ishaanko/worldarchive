@@ -129,8 +129,8 @@ public record SettingsHealthSnapshot(
     public String gitDisplaySummary() {
         return "Git " + displayStatus(gitTool)
                 + " | LFS " + displayStatus(lfsTool)
-                + " | repository " + displayStatus(repository)
-                + " | remote " + displayStatus(remote);
+                + " | Repository " + displayStatus(repository)
+                + " | Remote " + displayStatus(remote);
     }
 
     public String zipSummary() {
@@ -139,17 +139,17 @@ public record SettingsHealthSnapshot(
 
     /** Short, stable wording for the constrained in-game settings footer. */
     public String zipDisplaySummary() {
-        return "ZIP folder " + displayStatus(zipDirectory);
+        return "ZIP Folder " + displayStatus(zipDirectory);
     }
 
     private static String displayStatus(SettingsHealthItem item) {
         return switch (item.status()) {
-            case HEALTHY -> "ready";
-            case DISABLED -> "disabled";
-            case UNCHECKED -> "checking";
-            case UNCONFIGURED -> "not configured";
-            case TOOL_MISSING -> "missing";
-            case UNAVAILABLE -> "unavailable";
+            case HEALTHY -> "Ready";
+            case DISABLED -> "Disabled";
+            case UNCHECKED -> "Checking";
+            case UNCONFIGURED -> "Not Configured";
+            case TOOL_MISSING -> "Missing";
+            case UNAVAILABLE -> "Unavailable";
         };
     }
 

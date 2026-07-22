@@ -24,5 +24,7 @@ public interface BackupCommandFacade {
 
     void openDeleteConfirmation(BackupId backupId);
 
+    CompletionStage<Void> openBackupFolder(Optional<BackupId> backupId);
+
     void openSettings();
 }
