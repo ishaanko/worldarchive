@@ -1,26 +1,39 @@
 package dev.ishaankot.worldarchive.runtime;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.atomic.AtomicReference;
 
 /** Atomically routes new work to the latest state while retaining older in-flight states. */
 final class RuntimeStateRegistry<T> {
-    private final AtomicReference<T> current = new AtomicReference<>();
+    private T current;
 
-    private final ConcurrentLinkedQueue<T> retained = new ConcurrentLinkedQueue<>();
+    private final List<T> retained = new ArrayList<>();
 
-    void install(T replacement) {
-        retained.add(Objects.requireNonNull(replacement, "replacement"));
-        current.set(replacement);
+    synchronized void install(T replacement) {
+        T installed = Objects.requireNonNull(replacement, "replacement");
+        retained.add(installed);
+        current = installed;
     }
 
-    T currentOrNull() {
-        return current.get();
+    synchronized T currentOrNull() {
+        return current;
     }
 
-    List<T> retained() {
+    synchronized List<T> retained() {
         return List.copyOf(retained);
+    }
+
+    synchronized List<T> removeRetired() {
+        List<T> removed = new ArrayList<>();
+        java.util.Iterator<T> states = retained.iterator();
+        while (states.hasNext()) {
+            T state = states.next();
+            if (state != current) {
+                removed.add(state);
+                states.remove();
+            }
+        }
+        return List.copyOf(removed);
     }
 }

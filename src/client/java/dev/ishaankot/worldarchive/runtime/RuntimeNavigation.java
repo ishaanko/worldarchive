@@ -1,13 +1,9 @@
 package dev.ishaankot.worldarchive.runtime;
 
-import dev.ishaankot.worldarchive.config.WorldConfig;
 import dev.ishaankot.worldarchive.core.RestoreBackupResult;
-import dev.ishaankot.worldarchive.model.BackupId;
-import dev.ishaankot.worldarchive.model.BackupRecord;
 import dev.ishaankot.worldarchive.settings.ClientSettingsAccess;
 import dev.ishaankot.worldarchive.ui.BackupBrowserScreen;
 import dev.ishaankot.worldarchive.ui.BackupWorldContext;
-import dev.ishaankot.worldarchive.ui.BackupWorldSelection;
 import dev.ishaankot.worldarchive.ui.model.BackupRow;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -15,8 +11,6 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionStage;
 import java.util.concurrent.RejectedExecutionException;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.PauseScreen;
@@ -92,42 +86,6 @@ final class RuntimeNavigation {
                         runtime));
             }
         });
-    }
-
-    void openRestore(BackupId backupId) {
-        openBrowserForBackup(backupId, CommandAction.RESTORE);
-    }
-
-    void openDeleteConfirmation(BackupId backupId) {
-        openBrowserForBackup(backupId, CommandAction.DELETE);
-    }
-
-    CompletionStage<Void> openManagedFolder(Optional<BackupId> backupId) {
-        Objects.requireNonNull(backupId, "backupId");
-        RuntimeState state = runtime.states().currentOrNull();
-        if (state == null || runtime.isClosed()) {
-            return WorldArchiveRuntime.failedStage("WorldArchive is still loading");
-        }
-        if (backupId.isEmpty()) {
-            BackupWorldContext active = runtime.currentLiveWorld();
-            if (active == null) {
-                return WorldArchiveRuntime.failedStage(
-                        "Open a world or provide a backup ID before opening its folder");
-            }
-            openManagedFolder(active, Optional.empty());
-            return CompletableFuture.completedFuture(null);
-        }
-        return state.coordinator().findBackup(backupId.orElseThrow())
-                .thenCompose(record -> record
-                        .<CompletionStage<BackupRecord>>map(CompletableFuture::completedFuture)
-                        .orElseGet(() -> WorldArchiveRuntime.failedStage("Backup was not found")))
-                .thenCompose(record -> contextForRecord(state, record)
-                        .thenApply(context -> new FolderTarget(record, context)))
-                .thenAccept(target -> {
-                    BackupWorldContext context = target.context().orElseThrow(() ->
-                            new IllegalStateException("Backup world could not be resolved"));
-                    openManagedFolder(context, Optional.of(BackupRow.from(target.record())));
-                });
     }
 
     boolean sourceDirectoryAvailable(BackupWorldContext world) {
@@ -303,125 +261,4 @@ final class RuntimeNavigation {
         return state.gitBackend().repositoryFor(world.worldId());
     }
 
-    private void openBrowserForBackup(BackupId backupId, CommandAction action) {
-        Objects.requireNonNull(backupId, "backupId");
-        Objects.requireNonNull(action, "action");
-        RuntimeState state = runtime.states().currentOrNull();
-        if (state == null || runtime.isClosed()) {
-            return;
-        }
-        state.coordinator().findBackup(backupId).whenComplete((record, throwable) -> {
-            if (throwable != null || record == null || record.isEmpty()) {
-                if (throwable != null) {
-                    runtime.logFailure(action + " target could not be loaded", throwable);
-                }
-                return;
-            }
-            openBrowserForRecord(state, record.orElseThrow(), backupId, action);
-        });
-    }
-
-    private void openBrowserForRecord(
-            RuntimeState state,
-            BackupRecord record,
-            BackupId backupId,
-            CommandAction action) {
-        contextForRecord(state, record).whenComplete((context, throwable) -> {
-            if (throwable != null || context == null || context.isEmpty()) {
-                if (throwable != null) {
-                    runtime.logFailure(action + " world could not be resolved", throwable);
-                }
-                return;
-            }
-            runtime.minecraft().execute(() -> showBackupAction(
-                    context.orElseThrow(),
-                    backupId,
-                    action));
-        });
-    }
-
-    private void showBackupAction(
-            BackupWorldContext context,
-            BackupId backupId,
-            CommandAction action) {
-        if (runtime.isClosed()) {
-            return;
-        }
-        PauseScreen parent = new PauseScreen(true);
-        BackupBrowserScreen browser = switch (action) {
-            case RESTORE -> BackupBrowserScreen.forRestore(
-                    parent,
-                    context,
-                    runtime,
-                    backupId);
-            case DELETE -> BackupBrowserScreen.forDelete(
-                    parent,
-                    context,
-                    runtime,
-                    backupId);
-        };
-        runtime.minecraft().setScreenAndShow(browser);
-    }
-
-    private CompletionStage<Optional<BackupWorldContext>> contextForRecord(
-            RuntimeState state,
-            BackupRecord record) {
-        BackupWorldContext missingSource = missingSourceContext(record);
-        BackupWorldContext active = runtime.currentLiveWorld();
-        if (active != null && active.worldId().equals(record.manifest().worldId())) {
-            return CompletableFuture.completedFuture(Optional.of(active));
-        }
-        Optional<WorldConfig> configured = state.config().worlds().stream()
-                .filter(world -> world.worldId().equals(record.manifest().worldId()))
-                .findFirst();
-        if (configured.isEmpty()) {
-            return CompletableFuture.completedFuture(Optional.of(missingSource));
-        }
-        Path path = configured.orElseThrow().path();
-        Path parent = path.getParent();
-        Path fileName = path.getFileName();
-        if (parent == null || fileName == null) {
-            return CompletableFuture.completedFuture(Optional.of(missingSource));
-        }
-        try {
-            return runtime.resolveWorld(new BackupWorldSelection(
-                    path,
-                    parent,
-                    fileName.toString(),
-                    record.manifest().worldName()))
-                    .handle((resolved, throwable) -> resolved != null && resolved.isPresent()
-                            ? resolved
-                            : Optional.of(missingSource));
-        } catch (IllegalArgumentException exception) {
-            return CompletableFuture.completedFuture(Optional.of(missingSource));
-        }
-    }
-
-    private BackupWorldContext missingSourceContext(BackupRecord record) {
-        Path worldsDirectory = runtime.minecraft().getLevelSource().getBaseDir()
-                .toAbsolutePath()
-                .normalize();
-        String storageName = ".worldarchive-missing-" + record.manifest().worldId();
-        BackupWorldContext context = new BackupWorldContext(
-                record.manifest().worldId(),
-                worldsDirectory.resolve(storageName),
-                worldsDirectory,
-                storageName,
-                record.manifest().worldName());
-        return runtime.actionContexts().markActionOnly(context);
-    }
-
-    private enum CommandAction {
-        RESTORE,
-        DELETE
-    }
-
-    private record FolderTarget(
-            BackupRecord record,
-            Optional<BackupWorldContext> context) {
-        private FolderTarget {
-            Objects.requireNonNull(record, "record");
-            Objects.requireNonNull(context, "context");
-        }
-    }
 }

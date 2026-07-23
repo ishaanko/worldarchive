@@ -6,7 +6,7 @@ always restores backups as new worlds without modifying the original.
 
 ## Features
 
-- Manual backups from the backup browser or `/backup create`
+- Manual backups from the backup browser
 - Automatic backups when leaving a world
 - Optional scheduled backups
 - Incremental snapshots using an isolated Git and Git LFS repository per world
@@ -44,22 +44,24 @@ WorldArchive disables the Git destination and leaves ZIP backups available.
 Install Fabric Loader, Fabric API, and Mod Menu, then copy the WorldArchive JAR
 into the Minecraft instance's `mods` folder.
 
-Choose **World Backups** on the title screen, or select a world on the
-**Select World** screen and choose **Backups**. The backup browser can create,
+Open **Mods**, select **WorldArchive**, and choose its configuration button.
+The **World Backups** screen can create,
 restore, delete, sync, and verify backups. It also shows the status, size,
 changed-file count, and available destinations for each backup.
+You can also select a world in **Singleplayer** and choose **Backups** to open
+that world's backup history directly.
 
 Backups can be created in three ways:
 
 | Trigger | Default | Behavior |
 | --- | --- | --- |
-| Manual | Enabled | Create a backup from the browser or with `/backup create [label]`. |
+| Manual | Enabled | Create a backup from the browser. |
 | World exit | Enabled | Create a backup after the world finishes saving and closes. |
 | Scheduled | Disabled | Create a backup every 30 minutes and skip unchanged worlds. |
 
 Triggers can be configured independently for Git and ZIP, and individual worlds
-can be enabled or paused. Open settings through Mod Menu, the backup browser, or
-`/backup config`.
+can be enabled or paused. Open WorldArchive through Mod Menu, then choose
+**Settings** from the backup browser.
 
 Git and ZIP destinations are independent. If one fails while the other
 succeeds, the successful copy is kept and the backup is reported as a partial
@@ -82,54 +84,31 @@ original world is never overwritten or modified.
 
 ### Recover existing backups
 
-Choose **World Backups**, then **Import**, to recover backup history after a
+Open WorldArchive through Mod Menu, then choose **Import**, to recover backup history after a
 reinstall, profile move, catalog loss, remote rename, or computer migration.
-Every import is scanned first and shown as a confirmation preview. Identical
-records merge safely; a conflicting backup identity is reported and never
-overwrites the existing catalog or artifact.
+Every repository, folder, and stored-backup import is scanned first and shown
+as a list where you choose the exact backups to import. Identical records merge
+safely; a conflicting backup
+identity is reported and never overwrites the existing catalog or artifact.
 
-For Git histories, paste any supported credential-free HTTPS, SSH, Git, file,
-or absolute local repository location. **Full download** copies and verifies all
-Git and Git LFS objects into WorldArchive's managed storage. **Remote-backed**
-keeps only pinned local metadata and downloads required Git LFS objects from the
-source when verifying or restoring. The optional **Connect** setting applies the
-remote to future backups only for matching live, configured worlds; otherwise
-the imported history is recovery-only. WorldArchive never contacts imported
-remotes automatically at startup.
+For repository histories, paste any supported credential-free HTTPS, SSH, Git,
+file, or absolute local repository location. **Repository files: Copy to this
+device** copies and verifies the selected Git and Git LFS objects in
+WorldArchive's managed storage. **Repository files: Keep in repository** keeps
+only pinned local metadata and downloads required Git LFS objects from the
+source when verifying or restoring. Imports are recovery-only; configure a
+world's repository separately in Settings for future backups. WorldArchive
+never contacts imported repositories automatically at startup.
 
-For ZIP folders, **Copy** publishes verified archives into managed storage.
-**Link read-only** leaves archives where they are and records a pinned checksum
-and relative path. Deleting a linked backup only removes WorldArchive's catalog
-link—the source ZIP is untouched.
+For backup folders, **Folder files: Copy into WorldArchive** publishes verified
+archives into managed storage. **Folder files: Leave in selected folder** keeps
+archives where they are and records a pinned checksum and relative path.
+Deleting a linked backup only removes WorldArchive's catalog link—the source ZIP
+is untouched.
 
-Use **Rebuild Catalog from Managed Storage** (or `/backup rebuild`) to recover
-catalog entries and missing Git snapshot refs from local managed Git histories
-and ZIP archives. This rebuild is local-only and does not fetch from a network.
-
-### Commands
-
-```text
-/backup
-/backup create [label]
-/backup list [page]
-/backup gui
-/backup restore <id>
-/backup delete <id>
-/backup sync [id]
-/backup verify [id]
-/backup status
-/backup folder [id]
-/backup import
-/backup import git <full|remote> <recovery|connect> <remote>
-/backup import zip <copy|link> <folder>
-/backup rebuild
-/backup help
-/backup config
-```
-
-Backup IDs may be shortened to an unambiguous prefix. Running `sync` or `verify`
-without an ID processes all backups in the current scope. Deletion always
-requires confirmation.
+Use **Find Stored Backups** to recover catalog entries and missing Git snapshot
+refs from local managed repository histories and ZIP archives. This search is
+local-only and does not fetch from a network.
 
 ### Default paths
 
@@ -142,6 +121,7 @@ Paths are relative to the Minecraft instance directory, normally `.minecraft`.
 | ZIP archives | `worldarchive/archives/` |
 | Backup catalog | `worldarchive/catalog.json` |
 | Import source registry | `worldarchive/import-sources.json` |
+| Deleted-backup registry | `worldarchive/deleted-backups.txt` |
 | Change inventories | `worldarchive/inventories/` |
 | Temporary captures | `worldarchive/capture-temp/` |
 | World identity | `saves/<world>/.worldarchive/world.json` |

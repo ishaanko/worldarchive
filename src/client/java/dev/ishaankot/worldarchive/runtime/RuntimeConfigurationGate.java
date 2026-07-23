@@ -5,11 +5,21 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Keeps backup publication and destination-path settings transactions from overlapping. */
 final class RuntimeConfigurationGate {
+    private final Runnable idleCallback;
+
     private int activeBackups;
 
     private boolean configurationChange;
 
     private int waitingConfigurationChanges;
+
+    RuntimeConfigurationGate() {
+        this(() -> { });
+    }
+
+    RuntimeConfigurationGate(Runnable idleCallback) {
+        this.idleCallback = Objects.requireNonNull(idleCallback, "idleCallback");
+    }
 
     synchronized Permit enterBackup() {
         boolean interrupted = false;
@@ -24,6 +34,11 @@ final class RuntimeConfigurationGate {
         if (interrupted) {
             Thread.currentThread().interrupt();
         }
+        return new Permit(this::leaveBackup);
+    }
+
+    synchronized Permit retainStateWork() {
+        activeBackups++;
         return new Permit(this::leaveBackup);
     }
 
@@ -83,12 +98,19 @@ final class RuntimeConfigurationGate {
         }
     }
 
-    private synchronized void leaveBackup() {
-        activeBackups--;
-        if (activeBackups < 0) {
-            throw new IllegalStateException("Backup configuration gate underflow");
+    private void leaveBackup() {
+        boolean idle;
+        synchronized (this) {
+            activeBackups--;
+            if (activeBackups < 0) {
+                throw new IllegalStateException("Backup configuration gate underflow");
+            }
+            idle = activeBackups == 0;
+            notifyAll();
         }
-        notifyAll();
+        if (idle) {
+            idleCallback.run();
+        }
     }
 
     private synchronized void leaveConfigurationChange() {

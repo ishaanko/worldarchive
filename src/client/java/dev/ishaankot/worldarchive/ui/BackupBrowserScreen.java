@@ -52,10 +52,6 @@ public final class BackupBrowserScreen extends Screen {
 
     private final BackupService service;
 
-    private final BackupId initialBackupId;
-
-    private final BackupAction initialAction;
-
     private List<BackupRecord> records = List.of();
 
     private BackupBrowserCapabilities capabilities = new BackupBrowserCapabilities(
@@ -77,8 +73,6 @@ public final class BackupBrowserScreen extends Screen {
 
     private boolean active;
 
-    private boolean initialActionConsumed;
-
     private long lifecycle;
 
     private long requestRevision;
@@ -92,54 +86,11 @@ public final class BackupBrowserScreen extends Screen {
     private EditBox filterWidget;
 
     public BackupBrowserScreen(Screen parent, BackupWorldContext world, BackupClientFacade facade) {
-        this(parent, world, facade, null, null);
-    }
-
-    private BackupBrowserScreen(
-            Screen parent,
-            BackupWorldContext world,
-            BackupClientFacade facade,
-            BackupId initialBackupId,
-            BackupAction initialAction) {
         super(Component.literal("Backups"));
         this.parent = Objects.requireNonNull(parent, "parent");
         this.world = Objects.requireNonNull(world, "world");
         this.facade = Objects.requireNonNull(facade, "facade");
-        this.initialBackupId = initialBackupId;
-        this.initialAction = initialAction;
         service = Objects.requireNonNull(facade.backupService(), "backupService");
-    }
-
-    /** Opens the browser and immediately starts copy-only restore for the requested backup. */
-    public static BackupBrowserScreen forRestore(
-            Screen parent,
-            BackupWorldContext world,
-            BackupClientFacade facade,
-            BackupId backupId) {
-        return forInitialAction(parent, world, facade, backupId, BackupAction.RESTORE);
-    }
-
-    /** Opens the browser and immediately prepares deletion for the requested backup. */
-    public static BackupBrowserScreen forDelete(
-            Screen parent,
-            BackupWorldContext world,
-            BackupClientFacade facade,
-            BackupId backupId) {
-        return forInitialAction(parent, world, facade, backupId, BackupAction.DELETE);
-    }
-
-    private static BackupBrowserScreen forInitialAction(
-            Screen parent,
-            BackupWorldContext world,
-            BackupClientFacade facade,
-            BackupId backupId,
-            BackupAction action) {
-        return new BackupBrowserScreen(
-                parent,
-                world,
-                facade,
-                Objects.requireNonNull(backupId, "backupId"),
-                Objects.requireNonNull(action, "action"));
     }
 
     @Override
@@ -609,24 +560,6 @@ public final class BackupBrowserScreen extends Screen {
                             .filter(record -> record.manifest().worldId().equals(world.worldId()))
                             .toList();
                     capabilities = result.capabilities();
-                    if (!initialActionConsumed && initialAction != null) {
-                        initialActionConsumed = true;
-                        if (records.stream().anyMatch(record -> record.manifest()
-                                .backupId()
-                                .equals(initialBackupId))) {
-                            selectedBackupId = initialBackupId;
-                            status = Component.literal("Opening backup action...")
-                                    .withStyle(ChatFormatting.GRAY);
-                            rebuildIfInitialized();
-                            runAction(initialAction);
-                            return;
-                        }
-                        selectedBackupId = null;
-                        status = Component.literal("Backup not found for this world")
-                                .withStyle(ChatFormatting.RED);
-                        rebuildIfInitialized();
-                        return;
-                    }
                     if (selectedBackupId != null
                             && records.stream().noneMatch(record -> record.manifest()
                                     .backupId()

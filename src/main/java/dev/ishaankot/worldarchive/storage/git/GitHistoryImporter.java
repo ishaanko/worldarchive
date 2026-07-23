@@ -8,14 +8,20 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /** Fetches an arbitrary safe Git remote into a private repository for metadata-only preview. */
 final class GitHistoryImporter {
     private static final String IMPORT_REFS = "refs/worldarchive/import/";
+
+    private static final int MAXIMUM_REFS = 256;
+
+    private static final int MAXIMUM_COMMITS = 10_000;
 
     private final GitBackendSettings baseSettings;
 
@@ -78,6 +84,9 @@ final class GitHistoryImporter {
                 new byte[0]).standardOutput().lines()
                 .filter(line -> line.startsWith(IMPORT_REFS))
                 .toList();
+        if (refs.size() > MAXIMUM_REFS) {
+            throw new GitStorageException("Git import contains too many branches");
+        }
         Map<String, String> commitsToRefs = new LinkedHashMap<>();
         for (String ref : refs) {
             GitCommandResult history = commands.checked(
@@ -86,20 +95,26 @@ final class GitHistoryImporter {
                             "rev-list",
                             "--reverse",
                             "--topo-order",
+                            "--max-count=" + (MAXIMUM_COMMITS + 1),
                             ref),
                     repository,
                     Map.of(),
                     new byte[0]);
             for (String line : history.standardOutput().lines().filter(value -> !value.isBlank()).toList()) {
                 commitsToRefs.putIfAbsent(GitCommands.objectId(line), ref);
+                if (commitsToRefs.size() > MAXIMUM_COMMITS) {
+                    throw new GitStorageException("Git import history is too large to inspect safely");
+                }
             }
         }
         GitSnapshotVerifier verifier = new GitSnapshotVerifier(settings, commands);
         Map<BackupId, GitImportCandidate> candidates = new LinkedHashMap<>();
+        Set<BackupId> rejected = new HashSet<>();
         List<GitImportIssue> issues = new ArrayList<>();
         for (Map.Entry<String, String> entry : commitsToRefs.entrySet()) {
             inspectCommit(entry.getKey(), entry.getValue(), repository, commands, verifier)
-                    .ifPresent(candidate -> mergeCandidate(candidates, issues, candidate));
+                    .ifPresent(candidate -> mergeCandidate(
+                            candidates, rejected, issues, candidate));
         }
         if (candidates.isEmpty()) {
             issues.add(new GitImportIssue("remote", "No valid WorldArchive snapshot commits were found"));
@@ -161,17 +176,23 @@ final class GitHistoryImporter {
         }
     }
 
-    private static void mergeCandidate(
+    static void mergeCandidate(
             Map<BackupId, GitImportCandidate> candidates,
+            Set<BackupId> rejected,
             List<GitImportIssue> issues,
             GitImportCandidate candidate) {
+        BackupId backupId = candidate.manifest().backupId();
+        if (rejected.contains(backupId)) {
+            return;
+        }
         GitImportCandidate existing = candidates.putIfAbsent(
-                candidate.manifest().backupId(), candidate);
+                backupId, candidate);
         if (existing != null && (!existing.manifest().equals(candidate.manifest())
                 || !existing.commitId().equals(candidate.commitId()))) {
-            candidates.remove(candidate.manifest().backupId());
+            candidates.remove(backupId);
+            rejected.add(backupId);
             issues.add(new GitImportIssue(
-                    candidate.manifest().backupId().toString(),
+                    backupId.toString(),
                     "Conflicting commits use the same backup identity"));
         }
     }

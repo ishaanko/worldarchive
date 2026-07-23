@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Keep the title and pause menus unchanged. Open WorldArchive through Mod Menu,
+  or use **Backups** for a selected world in the Singleplayer menu.
+- Simplify backup import labels and actions for nontechnical users, with a
+  single **Import** entry and clear choose, import, and back actions.
+- Let users select the exact backups to import from repository, folder, and
+  stored-backup searches instead of importing every discovered backup.
+- Render all text in selectable backup rows in white for better contrast.
+
+### Fixed
+
+- Keep manually deleted backups deleted across restarts, even when recoverable
+  Git history or managed ZIP storage still exists for catalog repair.
+- Preserve exact repository selections across restart repair, reject duplicate
+  backup identities, and revalidate linked ZIP files when Import is clicked.
+- Release abandoned import previews and superseded runtime storage states, and
+  prevent completed background scans from reopening a screen the user left.
+- Hide deleted worlds after their final backup is removed, and report import
+  failures without claiming that earlier completed items were rolled back.
+- Bound repository history inspection so unexpectedly large remotes fail safely.
+
+### Removed
+
+- Remove the client-side `/backup` command system; all supported operations remain
+  available through the WorldArchive screens.
+- Remove WorldArchive shortcut buttons from Minecraft's title and pause screens.
+
 ## 0.3.0 (2026-07-21)
 
 ### Added

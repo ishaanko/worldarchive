@@ -3,7 +3,6 @@ package dev.ishaankot.worldarchive.runtime;
 import dev.ishaankot.worldarchive.WorldArchiveMetadata;
 import dev.ishaankot.worldarchive.catalog.BackupCatalog;
 import dev.ishaankot.worldarchive.catalog.FileBackupCatalog;
-import dev.ishaankot.worldarchive.command.BackupCommandFacade;
 import dev.ishaankot.worldarchive.config.WorldArchiveConfig;
 import dev.ishaankot.worldarchive.config.WorldConfig;
 import dev.ishaankot.worldarchive.config.WorldIdentityStore;
@@ -18,7 +17,6 @@ import dev.ishaankot.worldarchive.core.PreparedBackup;
 import dev.ishaankot.worldarchive.core.ProgressListener;
 import dev.ishaankot.worldarchive.core.RestoreBackupResult;
 import dev.ishaankot.worldarchive.importing.BackupImportService;
-import dev.ishaankot.worldarchive.model.BackupId;
 import dev.ishaankot.worldarchive.model.BackupRecord;
 import dev.ishaankot.worldarchive.model.BackupResult;
 import dev.ishaankot.worldarchive.model.BackupTrigger;
@@ -64,7 +62,6 @@ import java.util.function.Supplier;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.toasts.SystemToast;
-import net.minecraft.client.gui.screens.PauseScreen;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.network.chat.Component;
@@ -72,7 +69,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /** Client-owned service graph, lifecycle save gate, and native-screen facade. */
-public final class WorldArchiveRuntime implements BackupCommandFacade, BackupClientFacade {
+public final class WorldArchiveRuntime implements BackupClientFacade {
     private static final Logger LOGGER = LoggerFactory.getLogger(WorldArchiveMetadata.MOD_NAME);
 
     private static final Duration CLIENT_SHUTDOWN_WAIT = Duration.ofSeconds(30);
@@ -113,7 +110,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
 
     private final RuntimeStorageSafety storageSafety = new RuntimeStorageSafety();
 
-    private final RuntimeConfigurationGate configurationGate = new RuntimeConfigurationGate();
+    private final RuntimeConfigurationGate configurationGate;
 
     private final RuntimeActionContextRegistry actionContexts =
             new RuntimeActionContextRegistry();
@@ -142,6 +139,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
 
     private WorldArchiveRuntime(Minecraft minecraft) {
         this.minecraft = Objects.requireNonNull(minecraft, "minecraft");
+        this.configurationGate = new RuntimeConfigurationGate(this::retireInactiveStates);
         this.storageRoot = minecraft.gameDirectory.toPath()
                 .toAbsolutePath()
                 .normalize()
@@ -191,6 +189,7 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
     /** Atomically installs a service graph whose paths and selector share one config snapshot. */
     public void reload(WorldArchiveConfig config) {
         Objects.requireNonNull(config, "config");
+        RuntimeState replacement;
         synchronized (stateLock) {
             if (closed.get()) {
                 throw new IllegalStateException("WorldArchive runtime is shut down");
@@ -201,13 +200,32 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
                 clearPersistedWorldSettingsFailures(resolved);
                 return;
             }
-            RuntimeState replacement = buildState(resolved);
+            replacement = buildState(resolved);
             stateRegistry.install(replacement);
             lifecycle.reconcile(replacement);
             refreshStorageSafety(replacement);
             clearPersistedWorldSettingsFailures(resolved);
         }
+        primeState(replacement);
         lifecycle.ensureLiveWorldResolution();
+    }
+
+    private void primeState(RuntimeState state) {
+        RuntimeConfigurationGate.Permit permit = configurationGate.retainStateWork();
+        try {
+            CompletionStage<Void> prime = new RuntimeStateFactory(this).prime(state);
+            prime.whenComplete((ignored, throwable) -> permit.close());
+        } catch (RuntimeException | Error exception) {
+            permit.close();
+            throw exception;
+        }
+    }
+
+    private void retireInactiveStates() {
+        if (closed.get()) {
+            return;
+        }
+        stateRegistry.removeRetired().forEach(RuntimeState::close);
     }
 
     private void validateConfigurationChange(WorldArchiveConfig config) {
@@ -341,16 +359,6 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         ClientSettingsAccess.shutdown();
     }
 
-    @Override
-    public BackupCoordinator backups() {
-        return coordinatorView;
-    }
-
-    @Override
-    public BackupImportService backupImports() {
-        return importsView;
-    }
-
     RuntimeConfigurationGate configurationGate() {
         return configurationGate;
     }
@@ -435,27 +443,6 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
             return failedStage("WorldArchive is still loading");
         }
         return submit(() -> new RuntimeBackupWorlds(this, catalog).list());
-    }
-
-    @Override
-    public Optional<WorldId> activeWorldId() {
-        if (closed.get() || stateRegistry.currentOrNull() == null) {
-            return Optional.empty();
-        }
-        return lifecycle.activeWorldId();
-    }
-
-    @Override
-    public CompletionStage<BackupResult> createManualBackup(
-            Optional<String> label,
-            ProgressListener progressListener) {
-        Objects.requireNonNull(label, "label");
-        Objects.requireNonNull(progressListener, "progressListener");
-        BackupWorldContext world = lifecycle.liveWorld();
-        if (world == null) {
-            return failedStage("No integrated world is ready for backup");
-        }
-        return createManualBackup(world, label, progressListener);
     }
 
     @Override
@@ -563,29 +550,8 @@ public final class WorldArchiveRuntime implements BackupCommandFacade, BackupCli
         navigation.playRestoredWorld(returnTo, result);
     }
 
-    @Override
     public void openBrowser() {
         navigation.openBrowser();
-    }
-
-    @Override
-    public void openRestore(BackupId backupId) {
-        navigation.openRestore(backupId);
-    }
-
-    @Override
-    public void openDeleteConfirmation(BackupId backupId) {
-        navigation.openDeleteConfirmation(backupId);
-    }
-
-    @Override
-    public CompletionStage<Void> openBackupFolder(Optional<BackupId> backupId) {
-        return navigation.openManagedFolder(backupId);
-    }
-
-    @Override
-    public void openSettings() {
-        navigation.openSettings(new PauseScreen(true));
     }
 
     private RuntimeState buildState(WorldArchiveConfig config) {

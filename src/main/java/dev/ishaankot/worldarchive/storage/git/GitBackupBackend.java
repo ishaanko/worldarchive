@@ -249,13 +249,13 @@ public final class GitBackupBackend implements GitSnapshotStore {
             Path sourceRepository,
             List<GitImportCandidate> candidates,
             String remoteUrl,
-            boolean fullDownload) {
-        Path source = Objects.requireNonNull(sourceRepository, "sourceRepository")
-                .toAbsolutePath().normalize();
+            boolean fullDownload,
+            boolean preserveHistory) {
+        Path source = Objects.requireNonNull(sourceRepository, "sourceRepository").toAbsolutePath().normalize();
         List<GitImportCandidate> immutable = List.copyOf(candidates);
         String remote = dev.ishaankot.worldarchive.config.RemoteUrlPolicy.validatePlain(remoteUrl);
         return submit(() -> withRepositoryLock(() -> importRepository().installSnapshots(
-                source, immutable, remote, fullDownload)));
+                source, immutable, remote, fullDownload, preserveHistory)));
     }
 
     CompletionStage<Integer> rebuildSnapshotRefs() {

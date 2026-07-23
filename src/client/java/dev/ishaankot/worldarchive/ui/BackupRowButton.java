@@ -28,7 +28,7 @@ final class BackupRowButton extends AbstractButton {
 
     private static final int PRIMARY_TEXT_COLOR = 0xFFFFFFFF;
 
-    private static final int SECONDARY_TEXT_COLOR = 0xFFA0A0A0;
+    private static final int SECONDARY_TEXT_COLOR = 0xFFFFFFFF;
 
     private static final int TOOLTIP_MARGIN = 4;
 

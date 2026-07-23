@@ -423,9 +423,15 @@ class WorldGitSnapshotStoreIntegrationTest {
                             temporaryDirectory.resolve("import-full"), Optional.empty()));
                     WorldGitSnapshotStore remoteBacked = new WorldGitSnapshotStore(settings(
                             temporaryDirectory.resolve("import-remote"), Optional.empty()));
+                    WorldGitSnapshotStore selective = new WorldGitSnapshotStore(settings(
+                            temporaryDirectory.resolve("import-selective"), Optional.empty()));
                     GitPreparedImport prepared = await(full.prepareImport(sourceRepository.toString()))) {
                 assertEquals(2, prepared.candidates().size());
                 assertTrue(prepared.issues().isEmpty());
+                GitImportCandidate candidate = prepared.candidates().stream()
+                        .filter(value -> value.manifest().backupId().equals(secondBackup))
+                        .findFirst()
+                        .orElseThrow();
                 assertEquals(2, await(full.installImport(prepared, true)).size());
                 assertTrue(await(full.verifySnapshot(worldId, firstBackup)).valid());
                 assertTrue(await(full.verifySnapshot(worldId, secondBackup)).valid());
@@ -439,10 +445,6 @@ class WorldGitSnapshotStoreIntegrationTest {
                 assertEquals(2, await(full.listSnapshots(Optional.of(worldId))).size());
 
                 assertEquals(2, await(remoteBacked.installImport(prepared, false)).size());
-                GitImportCandidate candidate = prepared.candidates().stream()
-                        .filter(value -> value.manifest().backupId().equals(secondBackup))
-                        .findFirst()
-                        .orElseThrow();
                 assertFalse(await(remoteBacked.verifySnapshot(worldId, secondBackup)).valid());
                 assertTrue(await(remoteBacked.hydrateExternalSnapshot(
                         worldId,
@@ -453,6 +455,15 @@ class WorldGitSnapshotStoreIntegrationTest {
                 assertTrue(await(remoteBacked.deleteLocalSnapshot(worldId, secondBackup)));
                 assertFalse(await(remoteBacked.listSnapshots(Optional.of(worldId))).stream()
                         .anyMatch(snapshot -> snapshot.backupId().equals(secondBackup)));
+
+                assertEquals(1, await(selective.installImport(
+                        prepared, List.of(candidate), true)).size());
+                assertEquals(0, await(selective.rebuildSnapshotRefs()));
+                assertEquals(
+                        List.of(secondBackup),
+                        await(selective.listSnapshots(Optional.of(worldId))).stream()
+                                .map(GitSnapshot::backupId)
+                                .toList());
                 assertTrue(Files.isDirectory(sourceRepository));
             }
         }

@@ -1,6 +1,7 @@
 package dev.ishaankot.worldarchive.importing;
 
 import dev.ishaankot.worldarchive.catalog.BackupCatalog;
+import dev.ishaankot.worldarchive.catalog.BackupDeletionRegistry;
 import dev.ishaankot.worldarchive.catalog.CatalogMergeResult;
 import dev.ishaankot.worldarchive.model.BackupId;
 import dev.ishaankot.worldarchive.model.BackupManifest;
@@ -48,6 +49,8 @@ public final class FileBackupImportService implements BackupImportService, AutoC
 
     private final ImportSourceRegistry sources;
 
+    private final BackupDeletionRegistry deletions;
+
     private final WorldGitSnapshotStore git;
 
     private final ZipBackupStoreResolver zipStores;
@@ -65,8 +68,27 @@ public final class FileBackupImportService implements BackupImportService, AutoC
             ZipBackupStoreResolver zipStores,
             Supplier<Set<WorldId>> configuredWorlds,
             Executor executor) {
+        this(
+                catalog,
+                sources,
+                BackupDeletionRegistry.NONE,
+                git,
+                zipStores,
+                configuredWorlds,
+                executor);
+    }
+
+    public FileBackupImportService(
+            BackupCatalog catalog,
+            ImportSourceRegistry sources,
+            BackupDeletionRegistry deletions,
+            WorldGitSnapshotStore git,
+            ZipBackupStoreResolver zipStores,
+            Supplier<Set<WorldId>> configuredWorlds,
+            Executor executor) {
         this.catalog = Objects.requireNonNull(catalog, "catalog");
         this.sources = Objects.requireNonNull(sources, "sources");
+        this.deletions = Objects.requireNonNull(deletions, "deletions");
         this.git = Objects.requireNonNull(git, "git");
         this.zipStores = Objects.requireNonNull(zipStores, "zipStores");
         this.configuredWorlds = Objects.requireNonNull(configuredWorlds, "configuredWorlds");
@@ -113,7 +135,38 @@ public final class FileBackupImportService implements BackupImportService, AutoC
     }
 
     @Override
+    public CompletionStage<ImportPreview> previewLocal() {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                UUID token = UUID.randomUUID();
+                LocalScan scan = scanLocal();
+                LocalPlan plan = new LocalPlan(token, scan.records(), scan.issues());
+                List<ImportPreviewItem> items = new ArrayList<>();
+                for (BackupRecord record : plan.records()) {
+                    items.add(localPreviewItem(record));
+                }
+                ImportPreview preview = new ImportPreview(
+                        token,
+                        ImportKind.LOCAL_REBUILD,
+                        "WorldArchive storage",
+                        items,
+                        java.util.Collections.nCopies(
+                                scan.issues(), "A stored backup could not be read safely"));
+                prepared.put(token, plan);
+                return preview;
+            } catch (Exception exception) {
+                throw new CompletionException(exception);
+            }
+        }, executor);
+    }
+
+    @Override
     public CompletionStage<ImportSummary> execute(UUID token) {
+        return execute(token, null);
+    }
+
+    @Override
+    public CompletionStage<ImportSummary> execute(UUID token, Set<BackupId> selected) {
         Objects.requireNonNull(token, "token");
         PreparedPlan plan = prepared.remove(token);
         if (plan == null) {
@@ -122,14 +175,28 @@ public final class FileBackupImportService implements BackupImportService, AutoC
         }
         return CompletableFuture.supplyAsync(() -> {
             try (plan) {
+                Set<BackupId> chosen = selected == null
+                        ? plan.backupIds()
+                        : validateSelection(plan, selected);
                 return switch (plan) {
-                    case ZipPlan zip -> executeZip(zip);
-                    case GitPlan gitPlan -> executeGit(gitPlan);
+                    case ZipPlan zip -> executeZip(zip, chosen);
+                    case GitPlan gitPlan -> executeGit(gitPlan, chosen);
+                    case LocalPlan local -> executeLocal(local, chosen);
                 };
             } catch (Exception exception) {
                 throw new CompletionException(exception);
             }
         }, executor);
+    }
+
+    @Override
+    public CompletionStage<Void> discard(UUID token) {
+        Objects.requireNonNull(token, "token");
+        PreparedPlan plan = prepared.remove(token);
+        if (plan != null) {
+            plan.close();
+        }
+        return CompletableFuture.completedFuture(null);
     }
 
     @Override
@@ -206,13 +273,51 @@ public final class FileBackupImportService implements BackupImportService, AutoC
             BackupManifest manifest,
             DestinationResult destination) throws IOException {
         ImportDisposition disposition = predict(manifest, destination);
+        return previewItem(manifest, destination.destination(), disposition);
+    }
+
+    private ImportPreviewItem localPreviewItem(BackupRecord record) throws IOException {
+        DestinationResult display = record.result().destinations().getFirst();
+        return previewItem(record.manifest(), display.destination(), predict(record));
+    }
+
+    private static ImportPreviewItem previewItem(
+            BackupManifest manifest,
+            DestinationType destination,
+            ImportDisposition disposition) {
         String detail = switch (disposition) {
             case ADD -> "Add recovered backup";
             case MERGE -> "Attach recovered destination to existing backup";
             case UNCHANGED -> "Already indexed identically";
             case CONFLICT -> "Conflict; existing metadata will not be overwritten";
         };
-        return new ImportPreviewItem(manifest, destination.destination(), disposition, detail);
+        return new ImportPreviewItem(manifest, destination, disposition, detail);
+    }
+
+    private ImportDisposition predict(BackupRecord discovered) throws IOException {
+        Optional<BackupRecord> existing = catalog.find(discovered.manifest().backupId());
+        if (existing.isEmpty()) {
+            return ImportDisposition.ADD;
+        }
+        return predict(existing.orElseThrow(), discovered);
+    }
+
+    static ImportDisposition predict(BackupRecord current, BackupRecord discovered) {
+        if (!current.manifest().equals(discovered.manifest())) {
+            return ImportDisposition.CONFLICT;
+        }
+        boolean merge = false;
+        for (DestinationResult destination : discovered.result().destinations()) {
+            Optional<DestinationResult> same = current.result().destinations().stream()
+                    .filter(value -> value.destination() == destination.destination())
+                    .findFirst();
+            if (same.isEmpty()) {
+                merge = true;
+            } else if (!sameArtifact(same.orElseThrow(), destination)) {
+                return ImportDisposition.CONFLICT;
+            }
+        }
+        return merge ? ImportDisposition.MERGE : ImportDisposition.UNCHANGED;
     }
 
     private ImportDisposition predict(
@@ -233,20 +338,39 @@ public final class FileBackupImportService implements BackupImportService, AutoC
             return ImportDisposition.MERGE;
         }
         DestinationResult current = same.orElseThrow();
-        if (current.artifactId().equals(destination.artifactId())
-                && current.ownership() == destination.ownership()
-                && current.importSourceId().equals(destination.importSourceId())) {
+        if (sameArtifact(current, destination)) {
             return ImportDisposition.UNCHANGED;
         }
         return ImportDisposition.CONFLICT;
     }
 
-    private ImportSummary executeZip(ZipPlan plan) throws IOException {
+    private static boolean sameArtifact(
+            DestinationResult first,
+            DestinationResult second) {
+        return first.artifactId().equals(second.artifactId())
+                && first.ownership() == second.ownership()
+                && first.importSourceId().equals(second.importSourceId());
+    }
+
+    private static Set<BackupId> validateSelection(PreparedPlan plan, Set<BackupId> selected) {
+        Set<BackupId> chosen = Set.copyOf(Objects.requireNonNull(selected, "selected"));
+        if (!plan.backupIds().containsAll(chosen)) {
+            throw new IllegalArgumentException("Selected backups are not part of this preview");
+        }
+        return chosen;
+    }
+
+    private ImportSummary executeZip(ZipPlan plan, Set<BackupId> selected) throws IOException {
         MutableSummary summary = new MutableSummary(ImportKind.ZIP, plan.scan().issues().size());
         ImportSourceId sourceId = zipSourceId(plan.folder());
         Map<BackupId, ImportArtifactBinding> bindings = new LinkedHashMap<>();
+        List<ZipImportCandidate> candidates = selectedZipCandidates(plan, selected);
+        for (ZipImportCandidate candidate : candidates) {
+            dev.ishaankot.worldarchive.storage.zip.ZipBackupStore
+                    .requireUnchangedImportCandidate(candidate);
+        }
         if (plan.mode() == ZipImportMode.LINK) {
-            for (ZipImportCandidate candidate : plan.scan().candidates()) {
+            for (ZipImportCandidate candidate : candidates) {
                 bindings.put(candidate.manifest().backupId(), new ImportArtifactBinding(
                         candidate.manifest().worldId(),
                         candidate.manifest().backupId(),
@@ -255,8 +379,9 @@ public final class FileBackupImportService implements BackupImportService, AutoC
             }
             sources.put(ImportSource.zipLink(sourceId, plan.folder(), bindings));
         }
-        for (ZipImportCandidate candidate : plan.scan().candidates()) {
+        for (ZipImportCandidate candidate : candidates) {
             DestinationResult destination = importZipDestination(plan, sourceId, candidate);
+            deletions.restore(candidate.manifest().backupId());
             merge(summary, record(candidate.manifest(), destination));
         }
         return summary.finish(Map.of());
@@ -280,15 +405,26 @@ public final class FileBackupImportService implements BackupImportService, AutoC
                 SyncStatus.NOT_CONFIGURED);
     }
 
-    private ImportSummary executeGit(GitPlan plan) throws Exception {
+    private static List<ZipImportCandidate> selectedZipCandidates(
+            ZipPlan plan,
+            Set<BackupId> selected) {
+        return plan.scan().candidates().stream()
+                .filter(candidate -> selected.contains(candidate.manifest().backupId()))
+                .toList();
+    }
+
+    private ImportSummary executeGit(GitPlan plan, Set<BackupId> selected) throws Exception {
         boolean fullDownload = plan.hydration() == GitHydrationMode.FULL_DOWNLOAD;
+        List<GitImportCandidate> candidates = plan.fetched().candidates().stream()
+                .filter(candidate -> selected.contains(candidate.manifest().backupId()))
+                .toList();
         Map<BackupId, GitImportInstallStatus> installs = git.installImport(
-                plan.fetched(), fullDownload).toCompletableFuture().get();
+                plan.fetched(), candidates, fullDownload).toCompletableFuture().get();
         MutableSummary summary = new MutableSummary(
                 ImportKind.GIT, plan.fetched().issues().size());
         ImportSourceId sourceId = gitSourceId(plan.fetched().remote(), plan.hydration());
         Map<BackupId, ImportArtifactBinding> bindings = new LinkedHashMap<>();
-        for (GitImportCandidate candidate : plan.fetched().candidates()) {
+        for (GitImportCandidate candidate : candidates) {
             if (installs.get(candidate.manifest().backupId()) != GitImportInstallStatus.CONFLICT) {
                 bindings.put(candidate.manifest().backupId(), new ImportArtifactBinding(
                         candidate.manifest().worldId(),
@@ -299,17 +435,18 @@ public final class FileBackupImportService implements BackupImportService, AutoC
         }
         sources.put(ImportSource.git(
                 sourceId, plan.fetched().remote(), fullDownload, bindings));
-        for (GitImportCandidate candidate : plan.fetched().candidates()) {
+        for (GitImportCandidate candidate : candidates) {
             if (installs.get(candidate.manifest().backupId()) == GitImportInstallStatus.CONFLICT) {
                 summary.conflicts++;
                 summary.worlds.add(candidate.manifest().worldId());
                 continue;
             }
             DestinationResult destination = gitDestination(candidate, sourceId, fullDownload);
+            deletions.restore(candidate.manifest().backupId());
             merge(summary, record(candidate.manifest(), destination));
         }
         Map<WorldId, String> connections = plan.connection() == GitConnectionMode.CONNECT
-                ? plan.fetched().candidates().stream().collect(java.util.stream.Collectors.toMap(
+                ? candidates.stream().collect(java.util.stream.Collectors.toMap(
                         candidate -> candidate.manifest().worldId(),
                         ignored -> plan.fetched().remote(),
                         (first, ignored) -> first))
@@ -339,33 +476,56 @@ public final class FileBackupImportService implements BackupImportService, AutoC
     }
 
     private ImportSummary rebuildLocalBlocking() throws Exception {
-        MutableSummary summary = new MutableSummary(ImportKind.LOCAL_REBUILD, 0);
+        LocalScan scan = scanLocal();
+        return executeLocal(
+                new LocalPlan(UUID.randomUUID(), scan.records(), scan.issues()),
+                scan.records().stream()
+                        .map(record -> record.manifest().backupId())
+                        .collect(java.util.stream.Collectors.toUnmodifiableSet()));
+    }
+
+    private ImportSummary executeLocal(LocalPlan plan, Set<BackupId> selected) throws IOException {
+        MutableSummary summary = new MutableSummary(ImportKind.LOCAL_REBUILD, plan.issues());
+        for (BackupRecord record : plan.records()) {
+            if (selected.contains(record.manifest().backupId())) {
+                deletions.restore(record.manifest().backupId());
+                merge(summary, record);
+            }
+        }
+        return summary.finish(Map.of());
+    }
+
+    private LocalScan scanLocal() throws Exception {
+        LocalScan scan = new LocalScan();
         git.rebuildSnapshotRefs().toCompletableFuture().get();
         List<GitSnapshot> snapshots = git.listSnapshots(Optional.empty()).toCompletableFuture().get();
         List<ImportSource> importSources = sources.list();
         Set<WorldId> worlds = new HashSet<>(configuredWorlds.get());
         for (GitSnapshot snapshot : snapshots) {
+            if (deletions.contains(snapshot.backupId())) {
+                continue;
+            }
             worlds.add(snapshot.worldId());
             try {
                 BackupManifest manifest = git.readManifest(
                         snapshot.worldId(), snapshot.backupId()).toCompletableFuture().get();
                 DestinationResult destination = gitRebuildDestination(snapshot, importSources);
-                merge(summary, record(manifest, destination));
+                scan.add(record(manifest, destination));
             } catch (Exception exception) {
-                summary.issues++;
+                scan.issue();
             }
         }
         catalog.listAll().stream().map(record -> record.manifest().worldId()).forEach(worlds::add);
         Set<Path> scannedZipRoots = new HashSet<>();
         scannedZipRoots.add(zipStores.defaultStore().root());
-        rebuildDefaultZip(summary, worlds);
+        scanDefaultZip(scan, worlds);
         for (WorldId worldId : worlds) {
             dev.ishaankot.worldarchive.storage.zip.ZipBackupStore store = zipStores.store(worldId);
             if (scannedZipRoots.add(store.root())) {
-                rebuildZipStore(summary, store);
+                scanZipStore(scan, store);
             }
         }
-        return summary.finish(Map.of());
+        return scan;
     }
 
     private static DestinationResult gitRebuildDestination(
@@ -399,26 +559,32 @@ public final class FileBackupImportService implements BackupImportService, AutoC
                 .withVerification(VerificationStatus.NOT_VERIFIED);
     }
 
-    private void rebuildDefaultZip(MutableSummary summary, Set<WorldId> worlds) {
+    private void scanDefaultZip(LocalScan scan, Set<WorldId> worlds) {
         try {
             for (ZipBackupArtifact artifact : zipStores.defaultStore().listCompleteArchives()) {
+                if (deletions.contains(artifact.manifest().backupId())) {
+                    continue;
+                }
                 worlds.add(artifact.manifest().worldId());
-                merge(summary, managedZipRecord(artifact));
+                scan.add(managedZipRecord(artifact));
             }
         } catch (IOException exception) {
-            summary.issues++;
+            scan.issue();
         }
     }
 
-    private void rebuildZipStore(
-            MutableSummary summary,
+    private void scanZipStore(
+            LocalScan scan,
             dev.ishaankot.worldarchive.storage.zip.ZipBackupStore store) {
         try {
             for (ZipBackupArtifact artifact : store.listCompleteArchives()) {
-                merge(summary, managedZipRecord(artifact));
+                if (deletions.contains(artifact.manifest().backupId())) {
+                    continue;
+                }
+                scan.add(managedZipRecord(artifact));
             }
         } catch (IOException exception) {
-            summary.issues++;
+            scan.issue();
         }
     }
 
@@ -479,8 +645,10 @@ public final class FileBackupImportService implements BackupImportService, AutoC
         return ImportSourceId.derived(hydration + "\0" + remote);
     }
 
-    private sealed interface PreparedPlan extends AutoCloseable permits ZipPlan, GitPlan {
+    private sealed interface PreparedPlan extends AutoCloseable permits ZipPlan, GitPlan, LocalPlan {
         UUID token();
+
+        Set<BackupId> backupIds();
 
         @Override
         default void close() {
@@ -492,6 +660,12 @@ public final class FileBackupImportService implements BackupImportService, AutoC
             Path folder,
             ZipImportMode mode,
             ZipImportScan scan) implements PreparedPlan {
+        @Override
+        public Set<BackupId> backupIds() {
+            return scan.candidates().stream()
+                    .map(candidate -> candidate.manifest().backupId())
+                    .collect(java.util.stream.Collectors.toUnmodifiableSet());
+        }
     }
 
     private record GitPlan(
@@ -500,8 +674,88 @@ public final class FileBackupImportService implements BackupImportService, AutoC
             GitConnectionMode connection,
             GitPreparedImport fetched) implements PreparedPlan {
         @Override
+        public Set<BackupId> backupIds() {
+            return fetched.candidates().stream()
+                    .map(candidate -> candidate.manifest().backupId())
+                    .collect(java.util.stream.Collectors.toUnmodifiableSet());
+        }
+
+        @Override
         public void close() {
             fetched.close();
+        }
+    }
+
+    private record LocalPlan(
+            UUID token,
+            List<BackupRecord> records,
+            int issues) implements PreparedPlan {
+        private LocalPlan {
+            records = List.copyOf(records);
+        }
+
+        @Override
+        public Set<BackupId> backupIds() {
+            return records.stream()
+                    .map(record -> record.manifest().backupId())
+                    .collect(java.util.stream.Collectors.toUnmodifiableSet());
+        }
+    }
+
+    private static final class LocalScan {
+        private final Map<BackupId, BackupRecord> records = new LinkedHashMap<>();
+
+        private int issues;
+
+        private void add(BackupRecord candidate) {
+            BackupId backupId = candidate.manifest().backupId();
+            BackupRecord existing = records.get(backupId);
+            if (existing == null) {
+                records.put(backupId, candidate);
+                return;
+            }
+            if (!existing.manifest().equals(candidate.manifest())) {
+                issues++;
+                return;
+            }
+            Map<DestinationType, DestinationResult> destinations = new java.util.EnumMap<>(
+                    DestinationType.class);
+            existing.result().destinations().forEach(value ->
+                    destinations.put(value.destination(), value));
+            for (DestinationResult value : candidate.result().destinations()) {
+                DestinationResult current = destinations.putIfAbsent(value.destination(), value);
+                if (current != null && !sameArtifact(current, value)) {
+                    issues++;
+                    return;
+                }
+            }
+            records.put(backupId, new BackupRecord(
+                    existing.manifest(),
+                    BackupResult.aggregate(
+                            backupId,
+                            existing.manifest().worldId(),
+                            List.copyOf(destinations.values()),
+                            existing.result().completedAt())));
+        }
+
+        private void issue() {
+            issues++;
+        }
+
+        private List<BackupRecord> records() {
+            return List.copyOf(records.values());
+        }
+
+        private int issues() {
+            return issues;
+        }
+
+        private static boolean sameArtifact(
+                DestinationResult first,
+                DestinationResult second) {
+            return first.artifactId().equals(second.artifactId())
+                    && first.ownership() == second.ownership()
+                    && first.importSourceId().equals(second.importSourceId());
         }
     }
 

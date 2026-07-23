@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.ishaankot.worldarchive.catalog.BackupDeletionRegistry;
+import dev.ishaankot.worldarchive.catalog.FileBackupDeletionRegistry;
 import dev.ishaankot.worldarchive.core.DeleteBackupRequest;
 import dev.ishaankot.worldarchive.core.DeletePreparation;
 import dev.ishaankot.worldarchive.core.CaptureProgressListener;
@@ -27,6 +29,7 @@ import dev.ishaankot.worldarchive.model.VerificationStatus;
 import dev.ishaankot.worldarchive.model.WorldId;
 import dev.ishaankot.worldarchive.storage.zip.ZipBackupArtifact;
 import dev.ishaankot.worldarchive.storage.zip.ZipBackupStore;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
@@ -42,6 +45,80 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 class BackupRecoveryServiceMaintenanceTest extends BackupRecoveryServiceTestSupport {
+    @Test
+    void deletionIntentMustPersistBeforeDestinationMutation() {
+        Fixture fixture = fixture(DestinationType.ZIP);
+        FakeDestination zip = new FakeDestination(DestinationType.ZIP, fixture.worldId());
+        InMemoryCatalog catalog = new InMemoryCatalog(fixture.record());
+        BackupDeletionRegistry unavailable = new BackupDeletionRegistry() {
+            @Override
+            public boolean contains(BackupId backupId) {
+                return false;
+            }
+
+            @Override
+            public void record(BackupId backupId) throws IOException {
+                throw new IOException("Deletion registry unavailable");
+            }
+
+            @Override
+            public void restore(BackupId backupId) {
+            }
+        };
+        BackupRecoveryService service = new BackupRecoveryService(
+                catalog,
+                Map.of(DestinationType.ZIP, zip),
+                unavailable,
+                new dev.ishaankot.worldarchive.config.WorldIdentityStore(),
+                RestoredWorldMetadataFinalizer.NO_OP,
+                Runnable::run,
+                new MutableClock(CREATED_AT.plusSeconds(2)),
+                BackupRecoveryService.DEFAULT_CONFIRMATION_LIFETIME,
+                new dev.ishaankot.worldarchive.core.LockingWorldOperationGate(),
+                Files::move);
+        DeletePreparation preparation = service.prepareDelete(fixture.backupId())
+                .toCompletableFuture().join();
+
+        assertThrows(java.util.concurrent.CompletionException.class, () -> service.deleteBackup(
+                        new DeleteBackupRequest(
+                                fixture.backupId(), preparation.confirmationToken()),
+                        ProgressListener.NO_OP)
+                .toCompletableFuture().join());
+
+        assertEquals(0, zip.deleteCalls.get());
+        assertTrue(catalog.findUnchecked(fixture.backupId()).isPresent());
+    }
+
+    @Test
+    void failedDeletionRollsBackItsIntentMarker() throws Exception {
+        Fixture fixture = fixture(DestinationType.ZIP);
+        FakeDestination zip = new FakeDestination(DestinationType.ZIP, fixture.worldId());
+        zip.deleteResult = false;
+        InMemoryCatalog catalog = new InMemoryCatalog(fixture.record());
+        FileBackupDeletionRegistry deletions = new FileBackupDeletionRegistry(
+                temporaryDirectory.resolve("failed-delete-intent.txt"));
+        BackupRecoveryService service = new BackupRecoveryService(
+                catalog,
+                Map.of(DestinationType.ZIP, zip),
+                deletions,
+                new dev.ishaankot.worldarchive.config.WorldIdentityStore(),
+                RestoredWorldMetadataFinalizer.NO_OP,
+                Runnable::run,
+                new MutableClock(CREATED_AT.plusSeconds(2)),
+                BackupRecoveryService.DEFAULT_CONFIRMATION_LIFETIME,
+                new dev.ishaankot.worldarchive.core.LockingWorldOperationGate(),
+                Files::move);
+        DeletePreparation preparation = service.prepareDelete(fixture.backupId())
+                .toCompletableFuture().join();
+
+        service.deleteBackup(
+                new DeleteBackupRequest(fixture.backupId(), preparation.confirmationToken()),
+                ProgressListener.NO_OP).toCompletableFuture().join();
+
+        assertFalse(deletions.contains(fixture.backupId()));
+        assertTrue(catalog.findUnchecked(fixture.backupId()).isPresent());
+    }
+
     @Test
     void deleteConfirmationExpiresAndCannotBeReplayed() {
         Fixture fixture = fixture(DestinationType.ZIP);

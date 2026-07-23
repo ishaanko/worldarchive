@@ -81,6 +81,7 @@ abstract class BackupRecoveryServiceTestSupport {
         return new BackupRecoveryService(
                 catalog,
                 destinations,
+                dev.ishaankot.worldarchive.catalog.BackupDeletionRegistry.NONE,
                 new WorldIdentityStore(),
                 RestoredWorldMetadataFinalizer.NO_OP,
                 Runnable::run,

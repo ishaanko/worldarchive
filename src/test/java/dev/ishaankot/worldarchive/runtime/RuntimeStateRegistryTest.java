@@ -41,6 +41,8 @@ final class RuntimeStateRegistryTest {
         assertEquals(oldGit.toAbsolutePath(), inFlight.gitRepository());
         assertEquals(oldZip.toAbsolutePath(), inFlight.zipDirectory());
         assertEquals(List.of(original, reloaded), registry.retained());
+        assertEquals(List.of(original), registry.removeRetired());
+        assertEquals(List.of(reloaded), registry.retained());
     }
 
     private static WorldArchiveConfig config(Path gitRepository, Path zipDirectory) {

@@ -166,18 +166,22 @@ final class RuntimeBackupCoordinator implements BackupCoordinator {
 
     @Override
     public CompletionStage<List<BackupRecord>> listBackups(Optional<WorldId> worldId) {
+        return runtime.withBackupPermit(() -> {
             RuntimeState state = runtime.states().currentOrNull();
-        return state == null || runtime.isClosed()
-                ? failedStage("WorldArchive is still loading")
-                : state.coordinator().listBackups(worldId);
+            return state == null || runtime.isClosed()
+                    ? failedStage("WorldArchive is still loading")
+                    : state.coordinator().listBackups(worldId);
+        });
     }
 
     @Override
     public CompletionStage<Optional<BackupRecord>> findBackup(BackupId backupId) {
+        return runtime.withBackupPermit(() -> {
             RuntimeState state = runtime.states().currentOrNull();
-        return state == null || runtime.isClosed()
-                ? failedStage("WorldArchive is still loading")
-                : state.coordinator().findBackup(backupId);
+            return state == null || runtime.isClosed()
+                    ? failedStage("WorldArchive is still loading")
+                    : state.coordinator().findBackup(backupId);
+        });
     }
 
     @Override
@@ -208,10 +212,12 @@ final class RuntimeBackupCoordinator implements BackupCoordinator {
 
     @Override
     public CompletionStage<DeletePreparation> prepareDelete(BackupId backupId) {
+        return runtime.withBackupPermit(() -> {
             RuntimeState state = runtime.states().currentOrNull();
-        return state == null || runtime.isClosed()
-                ? failedStage("WorldArchive is still loading")
-                : state.coordinator().prepareDelete(backupId);
+            return state == null || runtime.isClosed()
+                    ? failedStage("WorldArchive is still loading")
+                    : state.coordinator().prepareDelete(backupId);
+        });
     }
 
     @Override

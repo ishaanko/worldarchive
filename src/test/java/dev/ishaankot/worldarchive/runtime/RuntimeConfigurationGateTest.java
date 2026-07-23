@@ -17,6 +17,19 @@ import org.junit.jupiter.api.Test;
 
 final class RuntimeConfigurationGateTest {
     @Test
+    void idleCallbackRunsOnlyAfterTheLastRetainedOperationFinishes() {
+        AtomicInteger callbacks = new AtomicInteger();
+        RuntimeConfigurationGate gate = new RuntimeConfigurationGate(callbacks::incrementAndGet);
+        RuntimeConfigurationGate.Permit first = gate.retainStateWork();
+        RuntimeConfigurationGate.Permit second = gate.retainStateWork();
+
+        first.close();
+        assertEquals(0, callbacks.get());
+        second.close();
+        assertEquals(1, callbacks.get());
+    }
+
+    @Test
     void rejectsPathTransactionWhileBackupPublicationIsActive() {
         RuntimeConfigurationGate gate = new RuntimeConfigurationGate();
         RuntimeConfigurationGate.Permit backup = gate.enterBackup();

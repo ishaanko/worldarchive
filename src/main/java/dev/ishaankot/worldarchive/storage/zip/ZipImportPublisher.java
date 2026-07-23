@@ -89,7 +89,7 @@ final class ZipImportPublisher {
         }
     }
 
-    private static void requireCandidate(
+    static void requireCandidate(
             ZipImportCandidate candidate,
             ExactArchiveCopy copy) throws IOException {
         Inspection inspection = ZipBackupStore.requireValidInspection(
