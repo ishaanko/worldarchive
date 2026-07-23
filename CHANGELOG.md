@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1 (2026-07-22)
 
 ### Changed
 
@@ -23,6 +23,7 @@
 - Hide deleted worlds after their final backup is removed, and report import
   failures without claiming that earlier completed items were rolled back.
 - Bound repository history inspection so unexpectedly large remotes fail safely.
+- Reset the import-page guidance after returning from a found-backups preview.
 
 ### Removed
 
