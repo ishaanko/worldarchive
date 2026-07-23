@@ -379,6 +379,21 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
         return new ZipImportPublisher(root).importCopy(candidate);
     }
 
+    /** Reopens a previewed external archive and requires its exact pinned contents. */
+    public static void requireUnchangedImportCandidate(ZipImportCandidate candidate)
+            throws IOException {
+        Objects.requireNonNull(candidate, "candidate");
+        Path parent = candidate.archivePath().getParent();
+        if (parent == null) {
+            throw new ZipBackupException("Imported ZIP has no parent folder");
+        }
+        try (ManagedDirectoryAccess source = ManagedDirectoryAccess.openRoot(parent);
+                ExactArchiveCopy copy = ExactArchiveCopy.capture(
+                        source, candidate.archivePath().getFileName().toString())) {
+            ZipImportPublisher.requireCandidate(candidate, copy);
+        }
+    }
+
     private void verifyManagedArchive(
             ManagedArchive managed,
             ZipVerificationState verification) {

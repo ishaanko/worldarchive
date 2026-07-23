@@ -66,8 +66,7 @@ public final class SelectWorldBackupIntegration {
         if (supplier == null) {
             throw new IllegalStateException("WorldArchive client facade has not been registered");
         }
-        BackupClientFacade facade = Objects.requireNonNull(supplier.get(), "facadeSupplier result");
-        return facade;
+        return Objects.requireNonNull(supplier.get(), "facadeSupplier result");
     }
 
     private static final class ScreenState {
@@ -177,8 +176,7 @@ public final class SelectWorldBackupIntegration {
             resolveSelectedWorld(selectedWorld, selectionRevision);
         }
 
-        private Optional<BackupWorldSelection> selectionFor(
-                WorldSelectionList.WorldListEntry entry) {
+        private Optional<BackupWorldSelection> selectionFor(WorldSelectionList.WorldListEntry entry) {
             try {
                 String storageName = entry.getLevelName();
                 return Optional.of(new BackupWorldSelection(
@@ -192,12 +190,10 @@ public final class SelectWorldBackupIntegration {
         }
 
         private void resolveSelectedWorld(BackupWorldSelection selection, long revision) {
-            BackupClientFacade facade;
             CompletionStage<Optional<BackupWorldContext>> resolution;
             try {
-                facade = currentFacade();
                 resolution = Objects.requireNonNull(
-                        facade.resolveWorld(selection),
+                        currentFacade().resolveWorld(selection),
                         "resolveWorld result");
             } catch (RuntimeException exception) {
                 disable("Backups are not ready");
@@ -274,7 +270,9 @@ public final class SelectWorldBackupIntegration {
             bottomRow.add(bottomRow.size() - 1, backupsButton);
             int availableWidth = Math.max(200, screen.width - 20);
             int totalWidth = Math.min(MAXIMUM_BAR_WIDTH, availableWidth);
-            int buttonWidth = Math.max(32, (totalWidth - GAP * (bottomRow.size() - 1)) / bottomRow.size());
+            int buttonWidth = Math.max(
+                    32,
+                    (totalWidth - GAP * (bottomRow.size() - 1)) / bottomRow.size());
             int usedWidth = buttonWidth * bottomRow.size() + GAP * (bottomRow.size() - 1);
             int x = (screen.width - usedWidth) / 2;
             for (Button button : bottomRow) {

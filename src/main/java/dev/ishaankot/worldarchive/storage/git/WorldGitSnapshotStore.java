@@ -356,17 +356,41 @@ public final class WorldGitSnapshotStore implements GitSnapshotStore {
     public CompletionStage<Map<BackupId, GitImportInstallStatus>> installImport(
             GitPreparedImport prepared,
             boolean fullDownload) {
+        return installImport(prepared, prepared.candidates(), fullDownload);
+    }
+
+    /** Installs a chosen subset of the commits retained by a prepared preview. */
+    public CompletionStage<Map<BackupId, GitImportInstallStatus>> installImport(
+            GitPreparedImport prepared,
+            List<GitImportCandidate> candidates,
+            boolean fullDownload) {
         Objects.requireNonNull(prepared, "prepared");
-        Map<WorldId, List<GitImportCandidate>> byWorld = prepared.candidates().stream()
+        List<GitImportCandidate> selected = List.copyOf(
+                Objects.requireNonNull(candidates, "candidates"));
+        if (!prepared.candidates().containsAll(selected)) {
+            return CompletableFuture.failedFuture(
+                    new IllegalArgumentException("Selected Git imports are not part of this preview"));
+        }
+        Map<WorldId, List<GitImportCandidate>> byWorld = selected.stream()
                 .collect(java.util.stream.Collectors.groupingBy(
                         candidate -> candidate.manifest().worldId()));
+        Map<WorldId, Set<BackupId>> completeWorlds = prepared.candidates().stream()
+                .collect(java.util.stream.Collectors.groupingBy(
+                        candidate -> candidate.manifest().worldId(),
+                        java.util.stream.Collectors.mapping(
+                                candidate -> candidate.manifest().backupId(),
+                                java.util.stream.Collectors.toSet())));
         List<CompletionStage<Map<BackupId, GitImportInstallStatus>>> installations = byWorld
                 .entrySet().stream()
                 .map(entry -> child(entry.getKey()).installImportedSnapshots(
                         prepared.repository(),
                         entry.getValue(),
                         prepared.remote(),
-                        fullDownload))
+                        fullDownload,
+                        entry.getValue().stream()
+                                .map(candidate -> candidate.manifest().backupId())
+                                .collect(java.util.stream.Collectors.toSet())
+                                .equals(completeWorlds.get(entry.getKey()))))
                 .toList();
         CompletableFuture<?>[] futures = installations.stream()
                 .map(CompletionStage::toCompletableFuture)

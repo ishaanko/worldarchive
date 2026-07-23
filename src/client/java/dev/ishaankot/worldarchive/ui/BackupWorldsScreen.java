@@ -146,7 +146,7 @@ public final class BackupWorldsScreen extends Screen {
         next.active = page + 1 < pageCount && !loading;
         addRenderableWidget(Button.builder(
                         Component.literal("Import"),
-                        ignored -> minecraft.setScreenAndShow(new BackupImportScreen(this, facade)))
+                        ignored -> openImport())
                 .bounds(buttonX + (buttonWidth + 4) * 2, y, buttonWidth, 20)
                 .build());
         addRenderableWidget(next);
@@ -160,6 +160,10 @@ public final class BackupWorldsScreen extends Screen {
                         ignored -> onClose())
                 .bounds(buttonX + (buttonWidth + 4) * 4, y, buttonWidth, 20)
                 .build());
+    }
+
+    private void openImport() {
+        minecraft.setScreenAndShow(new BackupImportScreen(this, facade));
     }
 
     @Override

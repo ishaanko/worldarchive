@@ -29,27 +29,34 @@ public final class BackupImportScreen extends Screen {
 
     private GitHydrationMode hydration = GitHydrationMode.FULL_DOWNLOAD;
 
-    private GitConnectionMode connection = GitConnectionMode.RECOVERY_ONLY;
-
     private ZipImportMode zipMode = ZipImportMode.COPY;
 
     private String remote = "";
 
-    private Component status = Component.literal(
-            "Import existing WorldArchive histories or archive folders.")
-            .withStyle(ChatFormatting.GRAY);
+    private Component status = defaultStatus();
 
     private boolean busy;
+
+    private boolean active;
+
+    private long lifecycle;
 
     private CancellableRequest<FolderSelectionResult> picker;
 
     private EditBox remoteBox;
 
     public BackupImportScreen(Screen parent, BackupClientFacade facade) {
-        super(Component.literal("Recover Backups"));
+        super(Component.literal("Import Backups"));
         this.parent = Objects.requireNonNull(parent, "parent");
         this.facade = Objects.requireNonNull(facade, "facade");
         imports = Objects.requireNonNull(facade.importService(), "importService");
+    }
+
+    @Override
+    public void added() {
+        super.added();
+        active = true;
+        lifecycle++;
     }
 
     @Override
@@ -60,66 +67,70 @@ public final class BackupImportScreen extends Screen {
                 x, 12, contentWidth, 20,
                 title.copy().withStyle(ChatFormatting.BOLD), font));
         addRenderableOnly(new StringWidget(
-                x, 38, contentWidth, 16, Component.literal("Git remote URL"), font));
+                x, 34, contentWidth, 14, Component.literal("From a repository"), font));
+        addRenderableOnly(new StringWidget(
+                x, 48, contentWidth, 14, Component.literal("Repository address"), font));
         remoteBox = new EditBox(
-                font, x, 54, contentWidth, 20, Component.literal("Git remote URL"));
+                font, x, 62, contentWidth, 20, Component.literal("Repository address"));
         remoteBox.setMaxLength(2048);
         remoteBox.setValue(remote);
         remoteBox.setResponder(value -> remote = value);
         remoteBox.active = !busy;
         addRenderableWidget(remoteBox);
-        int half = (contentWidth - 4) / 2;
-        addRenderableWidget(Button.builder(
+        Button repositoryStorage = Button.builder(
                         Component.literal(hydration == GitHydrationMode.FULL_DOWNLOAD
-                                ? "Git: Full download" : "Git: Remote-backed"),
+                                ? "Repository files: Copy to this device"
+                                : "Repository files: Keep in repository"),
                         ignored -> {
                             hydration = hydration == GitHydrationMode.FULL_DOWNLOAD
                                     ? GitHydrationMode.REMOTE_BACKED
                                     : GitHydrationMode.FULL_DOWNLOAD;
                             rebuildWidgets();
                         })
-                .bounds(x, 80, half, 20).build());
-        addRenderableWidget(Button.builder(
-                        Component.literal(connection == GitConnectionMode.CONNECT
-                                ? "Future backups: Connect" : "Recovery only"),
-                        ignored -> {
-                            connection = connection == GitConnectionMode.CONNECT
-                                    ? GitConnectionMode.RECOVERY_ONLY
-                                    : GitConnectionMode.CONNECT;
-                            rebuildWidgets();
-                        })
-                .bounds(x + half + 4, 80, half, 20).build());
+                .bounds(x, 86, contentWidth, 20).build();
+        repositoryStorage.active = !busy;
+        addRenderableWidget(repositoryStorage);
         Button gitPreview = Button.builder(
-                        Component.literal("Preview Git History"),
-                        ignored -> preview(imports.previewGit(remote, hydration, connection)))
-                .bounds(x, 104, contentWidth, 20).build();
+                        Component.literal("Find Backups from Repository"),
+                        ignored -> preview(imports.previewGit(
+                                remote,
+                                hydration,
+                                GitConnectionMode.RECOVERY_ONLY)))
+                .bounds(x, 110, contentWidth, 20).build();
         gitPreview.active = !busy && !remote.isBlank();
         addRenderableWidget(gitPreview);
-        addRenderableWidget(Button.builder(
+        addRenderableOnly(new StringWidget(
+                x, 138, contentWidth, 14, Component.literal("From a backup folder"), font));
+        Button folderStorage = Button.builder(
                         Component.literal(zipMode == ZipImportMode.COPY
-                                ? "ZIP folder: Copy into managed storage"
-                                : "ZIP folder: Link read-only"),
+                                ? "Folder files: Copy into WorldArchive"
+                                : "Folder files: Leave in selected folder"),
                         ignored -> {
                             zipMode = zipMode == ZipImportMode.COPY
                                     ? ZipImportMode.LINK : ZipImportMode.COPY;
                             rebuildWidgets();
                         })
-                .bounds(x, 138, contentWidth, 20).build());
+                .bounds(x, 152, contentWidth, 20).build();
+        folderStorage.active = !busy;
+        addRenderableWidget(folderStorage);
         Button chooseZip = Button.builder(
-                        Component.literal("Choose WorldArchive ZIP Folder"),
+                        Component.literal("Choose Backup Folder"),
                         ignored -> chooseZipFolder())
-                .bounds(x, 162, contentWidth, 20).build();
+                .bounds(x, 176, contentWidth, 20).build();
         chooseZip.active = !busy;
         addRenderableWidget(chooseZip);
+        addRenderableOnly(new StringWidget(
+                x, 204, contentWidth, 14,
+                Component.literal("Already stored by WorldArchive?"), font));
         Button rebuild = Button.builder(
-                        Component.literal("Rebuild Catalog from Managed Storage"),
+                        Component.literal("Find Stored Backups"),
                         ignored -> rebuildLocal())
-                .bounds(x, 196, contentWidth, 20).build();
+                .bounds(x, 218, contentWidth, 20).build();
         rebuild.active = !busy;
         addRenderableWidget(rebuild);
-        addRenderableOnly(new MultiLineTextWidget(x, 224, status, font)
-                .setMaxWidth(contentWidth).setMaxRows(3));
-        Button done = Button.builder(Component.literal("Done"), ignored -> onClose())
+        addRenderableOnly(new MultiLineTextWidget(x, 240, status, font)
+                .setMaxWidth(contentWidth).setMaxRows(2));
+        Button done = Button.builder(Component.literal("Back"), ignored -> onClose())
                 .bounds(x + (contentWidth - 120) / 2, height - 28, 120, 20).build();
         done.active = !busy;
         addRenderableWidget(done);
@@ -127,10 +138,11 @@ public final class BackupImportScreen extends Screen {
 
     private void chooseZipFolder() {
         busy = true;
-        status = Component.literal("Waiting for folder selection...").withStyle(ChatFormatting.GRAY);
+        status = Component.literal("Choose the folder containing your backup files...")
+                .withStyle(ChatFormatting.GRAY);
         rebuildWidgets();
         CancellableRequest<FolderSelectionResult> request = ClientSettingsAccess.chooseFolder(
-                "Choose a WorldArchive ZIP backup folder", Optional.empty());
+                "Choose a folder containing WorldArchive backups", Optional.empty());
         picker = request;
         request.completion().whenComplete((result, throwable) -> minecraft.execute(() -> {
             if (picker != request) {
@@ -139,7 +151,8 @@ public final class BackupImportScreen extends Screen {
             picker = null;
             busy = false;
             if (throwable != null || result == null) {
-                status = Component.literal("Folder selection failed").withStyle(ChatFormatting.RED);
+                status = Component.literal("The backup folder could not be opened")
+                        .withStyle(ChatFormatting.RED);
                 rebuildWidgets();
                 return;
             }
@@ -147,7 +160,7 @@ public final class BackupImportScreen extends Screen {
                 case FolderSelectionResult.Selected selected ->
                         preview(imports.previewZip(selected.path(), zipMode));
                 case FolderSelectionResult.Cancelled ignored -> {
-                    status = Component.literal("Folder selection cancelled")
+                    status = Component.literal("No folder was selected")
                             .withStyle(ChatFormatting.GRAY);
                     rebuildWidgets();
                 }
@@ -164,37 +177,47 @@ public final class BackupImportScreen extends Screen {
     }
 
     private void preview(CompletionStage<ImportPreview> operation) {
+        long token = lifecycle;
         busy = true;
-        status = Component.literal("Inspecting backup artifacts...").withStyle(ChatFormatting.YELLOW);
+        status = Component.literal("Checking which backups can be imported...")
+                .withStyle(ChatFormatting.YELLOW);
         rebuildWidgets();
         operation.whenComplete((preview, throwable) -> minecraft.execute(() -> {
+            if (!active || token != lifecycle) {
+                if (preview != null) {
+                    imports.discard(preview.token());
+                }
+                return;
+            }
             busy = false;
             if (throwable != null || preview == null) {
-                status = Component.literal("Import preview failed; no changes were made")
+                status = Component.literal("Those backups could not be read; nothing was changed")
                         .withStyle(ChatFormatting.RED);
                 rebuildWidgets();
                 return;
             }
+            status = defaultStatus();
             minecraft.setScreenAndShow(new BackupImportPreviewScreen(this, facade, preview));
         }));
     }
 
+    private static Component defaultStatus() {
+        return Component.literal("Choose where your existing backups are stored.")
+                .withStyle(ChatFormatting.GRAY);
+    }
+
     private void rebuildLocal() {
         busy = true;
-        status = Component.literal("Rebuilding local backup catalog...")
+        status = Component.literal("Looking for backups already stored by WorldArchive...")
                 .withStyle(ChatFormatting.YELLOW);
         rebuildWidgets();
-        imports.rebuildLocal().whenComplete((summary, throwable) -> minecraft.execute(() -> {
-            busy = false;
-            status = throwable == null && summary != null
-                    ? Component.literal(summary.message()).withStyle(ChatFormatting.GREEN)
-                    : Component.literal("Local rebuild failed").withStyle(ChatFormatting.RED);
-            rebuildWidgets();
-        }));
+        preview(imports.previewLocal());
     }
 
     @Override
     public void removed() {
+        active = false;
+        lifecycle++;
         CancellableRequest<FolderSelectionResult> request = picker;
         picker = null;
         if (request != null) {

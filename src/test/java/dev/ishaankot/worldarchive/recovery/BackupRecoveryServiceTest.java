@@ -358,6 +358,7 @@ class BackupRecoveryServiceTest extends BackupRecoveryServiceTestSupport {
             BackupRecoveryService service = new BackupRecoveryService(
                     new InMemoryCatalog(fixture.record()),
                     Map.of(DestinationType.ZIP, zip),
+                    dev.ishaankot.worldarchive.catalog.BackupDeletionRegistry.NONE,
                     new WorldIdentityStore(),
                     RestoredWorldMetadataFinalizer.NO_OP,
                     executor,

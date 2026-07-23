@@ -37,7 +37,9 @@ tasks.register('verifyFormatting') {
 
     doLast {
         def failures = []
-        repositoryFilePaths.get().findAll { isTextFile(it) }.each { path ->
+        repositoryFilePaths.get().findAll {
+            isTextFile(it) && repositoryDirectory.file(it).asFile.isFile()
+        }.each { path ->
             def text = repositoryDirectory.file(path).asFile.getText('UTF-8')
             if (!text.endsWith('\n')) {
                 failures << "${path}: missing final newline"
@@ -76,7 +78,9 @@ tasks.register('provenanceScan') {
         ]
         def failures = []
 
-        repositoryFilePaths.get().each { path ->
+        repositoryFilePaths.get().findAll {
+            repositoryDirectory.file(it).asFile.isFile()
+        }.each { path ->
             def normalized = path.replace('\\', '/').toLowerCase(Locale.ROOT)
             if (normalized == '.temp' || normalized.startsWith('.temp/')) {
                 failures << "${path}: temporary content must not be tracked"
@@ -131,7 +135,9 @@ tasks.register('verifyCodeStructure') {
 
     doLast {
         def failures = []
-        repositoryFilePaths.get().findAll { it.endsWith('.java') }.each { path ->
+        repositoryFilePaths.get().findAll {
+            it.endsWith('.java') && repositoryDirectory.file(it).asFile.isFile()
+        }.each { path ->
             def lineCount = repositoryDirectory.file(path).asFile.readLines('UTF-8').size()
             if (lineCount > 1_000) {
                 failures << "${path}: ${lineCount} lines (maximum 1000)"

@@ -2,9 +2,11 @@ package dev.ishaankot.worldarchive.storage.zip;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.ishaankot.worldarchive.catalog.FileBackupCatalog;
+import dev.ishaankot.worldarchive.catalog.FileBackupDeletionRegistry;
 import dev.ishaankot.worldarchive.config.WorldIdentityStore;
 import dev.ishaankot.worldarchive.core.BackupCapture;
 import dev.ishaankot.worldarchive.core.DeleteBackupRequest;
@@ -27,16 +29,153 @@ import dev.ishaankot.worldarchive.storage.git.GitBackendSettings;
 import dev.ishaankot.worldarchive.storage.git.WorldGitSnapshotStore;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 final class FileBackupImportServiceIntegrationTest {
     @TempDir
     Path temporaryDirectory;
+
+    @Test
+    void importsOnlyBackupsSelectedFromPreview() throws Exception {
+        ZipBackupStore sourceStore = new ZipBackupStore(temporaryDirectory.resolve("selection-source"));
+        ZipBackupArtifact first = sourceBackup(sourceStore, "selection-first");
+        ZipBackupArtifact second = sourceBackup(sourceStore, "selection-second");
+        FileBackupCatalog catalog = new FileBackupCatalog(
+                temporaryDirectory.resolve("selection-catalog.json"));
+        FileImportSourceRegistry registry = new FileImportSourceRegistry(
+                temporaryDirectory.resolve("selection-sources.json"));
+        ZipBackupStore managed = new ZipBackupStore(temporaryDirectory.resolve("selection-managed"));
+        try (WorldGitSnapshotStore git = gitStore("selection-git");
+                FileBackupImportService imports = imports(catalog, registry, git, managed)) {
+            ImportPreview preview = imports.previewZip(sourceStore.root(), ZipImportMode.COPY)
+                    .toCompletableFuture().join();
+
+            ImportSummary summary = imports.execute(
+                    preview.token(), Set.of(first.manifest().backupId()))
+                    .toCompletableFuture().join();
+
+            assertEquals(1, summary.added());
+            assertTrue(catalog.find(first.manifest().backupId()).isPresent());
+            assertTrue(catalog.find(second.manifest().backupId()).isEmpty());
+        }
+    }
+
+    @Test
+    void discardedPreviewCannotExecuteOrChangeTheCatalog() throws Exception {
+        ZipBackupArtifact source = sourceBackup("discard-source");
+        FileBackupCatalog catalog = new FileBackupCatalog(
+                temporaryDirectory.resolve("discard-catalog.json"));
+        FileImportSourceRegistry sources = new FileImportSourceRegistry(
+                temporaryDirectory.resolve("discard-sources.json"));
+        ZipBackupStore managed = new ZipBackupStore(
+                temporaryDirectory.resolve("discard-managed"));
+        try (WorldGitSnapshotStore git = gitStore("discard-git");
+                FileBackupImportService imports = imports(catalog, sources, git, managed)) {
+            ImportPreview preview = imports.previewZip(
+                    source.archivePath().getParent().getParent(), ZipImportMode.COPY)
+                    .toCompletableFuture().join();
+
+            imports.discard(preview.token()).toCompletableFuture().join();
+
+            assertThrows(
+                    java.util.concurrent.CompletionException.class,
+                    () -> imports.execute(preview.token()).toCompletableFuture().join());
+            assertTrue(catalog.listAll().isEmpty());
+        }
+    }
+
+    @Test
+    void storedBackupSearchAlsoImportsOnlyTheSelectedBackups() throws Exception {
+        ZipBackupStore sourceStore = new ZipBackupStore(temporaryDirectory.resolve("stored-source"));
+        ZipBackupArtifact first = sourceBackup(sourceStore, "stored-first");
+        ZipBackupArtifact second = sourceBackup(sourceStore, "stored-second");
+        ZipBackupStore managed = new ZipBackupStore(temporaryDirectory.resolve("stored-managed"));
+        FileImportSourceRegistry sources = new FileImportSourceRegistry(
+                temporaryDirectory.resolve("stored-sources.json"));
+        try (WorldGitSnapshotStore git = gitStore("stored-git");
+                FileBackupImportService initial = imports(
+                        new FileBackupCatalog(temporaryDirectory.resolve("stored-initial.json")),
+                        sources,
+                        git,
+                        managed)) {
+            ImportPreview copy = initial.previewZip(sourceStore.root(), ZipImportMode.COPY)
+                    .toCompletableFuture().join();
+            initial.execute(copy.token()).toCompletableFuture().join();
+
+            FileBackupCatalog rebuilt = new FileBackupCatalog(
+                    temporaryDirectory.resolve("stored-rebuilt.json"));
+            try (FileBackupImportService search = imports(rebuilt, sources, git, managed)) {
+                ImportPreview found = search.previewLocal().toCompletableFuture().join();
+                assertEquals(2, found.items().size());
+
+                search.execute(found.token(), Set.of(first.manifest().backupId()))
+                        .toCompletableFuture().join();
+
+                assertTrue(rebuilt.find(first.manifest().backupId()).isPresent());
+                assertTrue(rebuilt.find(second.manifest().backupId()).isEmpty());
+            }
+        }
+    }
+
+    @Test
+    void deletionMarkerSuppressesAStillDiscoverableManagedBackup() throws Exception {
+        ZipBackupArtifact source = sourceBackup("deleted-source");
+        FileBackupCatalog catalog = new FileBackupCatalog(
+                temporaryDirectory.resolve("deleted-catalog.json"));
+        FileImportSourceRegistry sources = new FileImportSourceRegistry(
+                temporaryDirectory.resolve("deleted-sources.json"));
+        FileBackupDeletionRegistry deletions = new FileBackupDeletionRegistry(
+                temporaryDirectory.resolve("deleted-backups.txt"));
+        ZipBackupStore managed = new ZipBackupStore(temporaryDirectory.resolve("deleted-managed"));
+        try (WorldGitSnapshotStore git = gitStore("deleted-git");
+                FileBackupImportService imports = imports(
+                        catalog, sources, deletions, git, managed)) {
+            ImportPreview preview = imports.previewZip(
+                    source.archivePath().getParent().getParent(), ZipImportMode.COPY)
+                    .toCompletableFuture().join();
+            imports.execute(preview.token()).toCompletableFuture().join();
+
+            deletions.record(source.manifest().backupId());
+            assertTrue(catalog.remove(source.manifest().backupId()));
+            assertFalse(managed.listCompleteArchives().isEmpty());
+
+            assertTrue(catalog.listAll().isEmpty());
+            assertEquals(0, imports.rebuildLocal().toCompletableFuture().join().added());
+            assertTrue(catalog.listAll().isEmpty());
+        }
+    }
+
+    @Test
+    void linkedZipChangedAfterPreviewIsRejectedBeforeAnyImportMutation() throws Exception {
+        ZipBackupArtifact source = sourceBackup("changed-link-source");
+        FileBackupCatalog catalog = new FileBackupCatalog(
+                temporaryDirectory.resolve("changed-link-catalog.json"));
+        FileImportSourceRegistry sources = new FileImportSourceRegistry(
+                temporaryDirectory.resolve("changed-link-sources.json"));
+        ZipBackupStore managed = new ZipBackupStore(
+                temporaryDirectory.resolve("changed-link-managed"));
+        try (WorldGitSnapshotStore git = gitStore("changed-link-git");
+                FileBackupImportService imports = imports(catalog, sources, git, managed)) {
+            ImportPreview preview = imports.previewZip(
+                    source.archivePath().getParent().getParent(), ZipImportMode.LINK)
+                    .toCompletableFuture().join();
+            Files.write(
+                    source.archivePath(), new byte[] {1}, StandardOpenOption.APPEND);
+
+            assertThrows(
+                    java.util.concurrent.CompletionException.class,
+                    () -> imports.execute(preview.token()).toCompletableFuture().join());
+            assertTrue(catalog.listAll().isEmpty());
+            assertTrue(sources.list().isEmpty());
+        }
+    }
 
     @Test
     void linkedZipImportIsIdempotentAndDeletionNeverTouchesSource() throws Exception {
@@ -67,6 +206,7 @@ final class FileBackupImportServiceIntegrationTest {
                     Optional.empty(),
                     Optional.of(resolver(managed)),
                     registry,
+                    dev.ishaankot.worldarchive.catalog.BackupDeletionRegistry.NONE,
                     new WorldIdentityStore(),
                     RestoredWorldMetadataFinalizer.NO_OP,
                     Runnable::run,
@@ -121,6 +261,22 @@ final class FileBackupImportServiceIntegrationTest {
                 catalog, registry, git, resolver(managed), java.util.Set::of, Runnable::run);
     }
 
+    private FileBackupImportService imports(
+            FileBackupCatalog catalog,
+            FileImportSourceRegistry registry,
+            FileBackupDeletionRegistry deletions,
+            WorldGitSnapshotStore git,
+            ZipBackupStore managed) {
+        return new FileBackupImportService(
+                catalog,
+                registry,
+                deletions,
+                git,
+                resolver(managed),
+                java.util.Set::of,
+                Runnable::run);
+    }
+
     private WorldGitSnapshotStore gitStore(String name) {
         return new WorldGitSnapshotStore(new GitBackendSettings(
                 true,
@@ -153,6 +309,12 @@ final class FileBackupImportServiceIntegrationTest {
         BackupManifest manifest = manifest(world);
         return new ZipBackupStore(temporaryDirectory.resolve(name).resolve("archives"))
                 .create(new BackupCapture(world, manifest));
+    }
+
+    private ZipBackupArtifact sourceBackup(ZipBackupStore store, String name) throws Exception {
+        Path world = Files.createDirectories(temporaryDirectory.resolve(name).resolve("world"));
+        Files.writeString(world.resolve("level.dat"), "recoverable-world-data-" + name);
+        return store.create(new BackupCapture(world, manifest(world)));
     }
 
     private static BackupManifest manifest(Path world) throws Exception {

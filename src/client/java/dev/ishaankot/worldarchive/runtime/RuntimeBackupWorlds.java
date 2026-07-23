@@ -40,10 +40,14 @@ final class RuntimeBackupWorlds {
             if (!live) {
                 context = runtime.actionContexts().markActionOnly(context);
             }
+            int backupCount = byWorld.getOrDefault(world.worldId(), List.of()).size();
+            if (!shouldInclude(live, backupCount)) {
+                continue;
+            }
             entries.put(world.worldId(), new BackupWorldEntry(
                     context,
                     !live,
-                    byWorld.getOrDefault(world.worldId(), List.of()).size()));
+                    backupCount));
         }
         addCatalogOnly(entries, byWorld);
         return entries.values().stream()
@@ -51,6 +55,10 @@ final class RuntimeBackupWorlds {
                         entry -> entry.context().displayName(),
                         String.CASE_INSENSITIVE_ORDER))
                 .toList();
+    }
+
+    static boolean shouldInclude(boolean live, int backupCount) {
+        return live || backupCount > 0;
     }
 
     private void addCatalogOnly(

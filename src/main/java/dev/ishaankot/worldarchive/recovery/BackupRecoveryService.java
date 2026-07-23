@@ -1,6 +1,7 @@
 package dev.ishaankot.worldarchive.recovery;
 
 import dev.ishaankot.worldarchive.catalog.BackupCatalog;
+import dev.ishaankot.worldarchive.catalog.BackupDeletionRegistry;
 import dev.ishaankot.worldarchive.config.WorldIdentityStore;
 import dev.ishaankot.worldarchive.importing.ImportSourceRegistry;
 import dev.ishaankot.worldarchive.core.BackupMaintenanceService;
@@ -59,6 +60,8 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
 
     private final Map<DestinationType, RecoveryDestination> destinations;
 
+    private final BackupDeletionRegistry deletions;
+
     private final WorldIdentityStore identityStore;
 
     private final RestoredWorldMetadataFinalizer metadataFinalizer;
@@ -87,12 +90,14 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
         this(
                 catalog,
                 destinationMap(gitBackend, zipStore, Optional.empty(), Clock.systemUTC()),
+                BackupDeletionRegistry.NONE,
                 identityStore,
                 metadataFinalizer,
                 executor,
                 Clock.systemUTC(),
                 DEFAULT_CONFIRMATION_LIFETIME,
-                operationGate);
+                operationGate,
+                Files::move);
     }
 
     public BackupRecoveryService(
@@ -100,6 +105,7 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
             Optional<? extends GitSnapshotStore> gitBackend,
             Optional<? extends ZipBackupStoreResolver> zipStore,
             ImportSourceRegistry sources,
+            BackupDeletionRegistry deletions,
             WorldIdentityStore identityStore,
             RestoredWorldMetadataFinalizer metadataFinalizer,
             Executor executor,
@@ -111,12 +117,14 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
                         zipStore,
                         Optional.of(Objects.requireNonNull(sources, "sources")),
                         Clock.systemUTC()),
+                deletions,
                 identityStore,
                 metadataFinalizer,
                 executor,
                 Clock.systemUTC(),
                 DEFAULT_CONFIRMATION_LIFETIME,
-                operationGate);
+                operationGate,
+                Files::move);
     }
 
     BackupRecoveryService(
@@ -131,6 +139,7 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
         this(
                 catalog,
                 destinations,
+                BackupDeletionRegistry.NONE,
                 identityStore,
                 metadataFinalizer,
                 executor,
@@ -143,6 +152,7 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
     BackupRecoveryService(
             BackupCatalog catalog,
             Map<DestinationType, RecoveryDestination> destinations,
+            BackupDeletionRegistry deletions,
             WorldIdentityStore identityStore,
             RestoredWorldMetadataFinalizer metadataFinalizer,
             Executor executor,
@@ -152,6 +162,7 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
             DirectoryMove directoryMove) {
         this.catalog = Objects.requireNonNull(catalog, "catalog");
         this.destinations = validatedDestinations(destinations);
+        this.deletions = Objects.requireNonNull(deletions, "deletions");
         this.identityStore = Objects.requireNonNull(identityStore, "identityStore");
         this.metadataFinalizer = Objects.requireNonNull(metadataFinalizer, "metadataFinalizer");
         this.executor = Objects.requireNonNull(executor, "executor");
@@ -472,10 +483,13 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
         if (!record.manifest().worldId().equals(confirmation.worldId())) {
             throw new BackupRecoveryException("Delete confirmation does not match the backup world");
         }
+        boolean deletionIntentRecorded = false;
         try (WorldOperationGate.Permit ignored = operationGate.enter(record.manifest().worldId())) {
             cancellation.checkpoint();
             BackupRecord current = requireRecord(request.backupId());
             requireSameManifest(record, current);
+            deletions.record(current.manifest().backupId());
+            deletionIntentRecorded = true;
             OperationId operationId = OperationId.create();
             List<DestinationResult> present = presentDestinations(current);
             List<DestinationResult> attempts = new ArrayList<>();
@@ -528,6 +542,10 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
                     operationId, current, BackupOperation.DELETE, OperationPhase.COMPLETE,
                     present.size(), present.size(), "Destination deletion complete"));
             return result;
+        } finally {
+            if (deletionIntentRecorded && catalog.find(request.backupId()).isPresent()) {
+                deletions.restore(request.backupId());
+            }
         }
     }
 

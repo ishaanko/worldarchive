@@ -1,6 +1,7 @@
 package dev.ishaankot.worldarchive.runtime;
 
 import dev.ishaankot.worldarchive.config.WorldArchiveConfig;
+import dev.ishaankot.worldarchive.catalog.FileBackupDeletionRegistry;
 import dev.ishaankot.worldarchive.config.WorldConfig;
 import dev.ishaankot.worldarchive.core.BackupBackend;
 import dev.ishaankot.worldarchive.core.BackupCaptureGate;
@@ -19,6 +20,8 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 
 /** Builds and primes one immutable runtime storage/service graph. */
 final class RuntimeStateFactory {
@@ -35,12 +38,15 @@ final class RuntimeStateFactory {
         ZipBackupStoreResolver zipStores = new RuntimeZipBackupStores(storagePaths);
         FileImportSourceRegistry importSources = new FileImportSourceRegistry(
                 runtime.storageRoot().resolve("import-sources.json"));
+        FileBackupDeletionRegistry deletions = new FileBackupDeletionRegistry(
+                runtime.storageRoot().resolve("deleted-backups.txt"));
         Set<WorldId> configuredWorldIds = config.worlds().stream()
                 .map(WorldConfig::worldId)
                 .collect(java.util.stream.Collectors.toUnmodifiableSet());
         FileBackupImportService imports = new FileBackupImportService(
                 runtime.catalog(),
                 importSources,
+                deletions,
                 gitBackend,
                 zipStores,
                 () -> configuredWorldIds,
@@ -51,6 +57,7 @@ final class RuntimeStateFactory {
                 Optional.of(gitBackend),
                 Optional.of(zipStores),
                 importSources,
+                deletions,
                 runtime.identityStore(),
                 new MinecraftRestoredWorldMetadataFinalizer(),
                 runtime.workerExecutor(),
@@ -66,10 +73,8 @@ final class RuntimeStateFactory {
                 runtime.operationGate(),
                 runtime.workerExecutor(),
                 runtime.clock());
-        RuntimeState state = new RuntimeState(
+        return new RuntimeState(
                 config, storagePaths, gitBackend, selector, coordinator, imports);
-        prime(config, gitBackend, selector, imports);
-        return state;
     }
 
     private WorldGitSnapshotStore gitBackend(
@@ -98,12 +103,8 @@ final class RuntimeStateFactory {
                 () -> config, backends));
     }
 
-    private void prime(
-            WorldArchiveConfig config,
-            WorldGitSnapshotStore gitBackend,
-            RuntimeDestinationSelector selector,
-            FileBackupImportService imports) {
-        imports.rebuildLocal().whenComplete((summary, throwable) -> {
+    CompletionStage<Void> prime(RuntimeState state) {
+        CompletionStage<Void> rebuild = state.imports().rebuildLocal().handle((summary, throwable) -> {
             if (throwable != null) {
                 runtime.logFailure("Local backup catalog rebuild failed", throwable);
             } else if (summary != null && (summary.conflicts() > 0 || summary.issues() > 0)) {
@@ -111,17 +112,22 @@ final class RuntimeStateFactory {
                         "Local backup catalog rebuild found conflicts or unreadable artifacts",
                         new IllegalStateException(summary.message()));
             }
+            return null;
         });
-        if (!config.git().enabled()) {
-            selector.gitDisabled();
-            return;
+        if (!state.config().git().enabled()) {
+            state.selector().gitDisabled();
+            return rebuild;
         }
-        gitBackend.probeTools().whenComplete((health, throwable) -> {
+        CompletionStage<Void> probe = state.gitBackend().probeTools().handle((health, throwable) -> {
             if (throwable != null || health == null) {
-                selector.gitToolProbeFailed();
+                state.selector().gitToolProbeFailed();
             } else {
-                selector.gitToolsAvailable(health.available());
+                state.selector().gitToolsAvailable(health.available());
             }
+            return null;
         });
+        return CompletableFuture.allOf(
+                rebuild.toCompletableFuture(),
+                probe.toCompletableFuture());
     }
 }

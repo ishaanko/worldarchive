@@ -12,8 +12,10 @@ import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -55,11 +57,32 @@ public final class ZipImportScanner {
                 return FileVisitResult.CONTINUE;
             }
         });
+        rejectDuplicateIdentities(candidates, issues);
         candidates.sort(Comparator
                 .comparing((ZipImportCandidate candidate) -> candidate.manifest().createdAt())
                 .thenComparing(candidate -> candidate.manifest().backupId()));
         issues.sort(Comparator.comparing(issue -> issue.path().toString()));
         return new ZipImportScan(candidates, issues);
+    }
+
+    private static void rejectDuplicateIdentities(
+            List<ZipImportCandidate> candidates,
+            List<ZipImportIssue> issues) {
+        Map<dev.ishaankot.worldarchive.model.BackupId, List<ZipImportCandidate>> byId =
+                new HashMap<>();
+        for (ZipImportCandidate candidate : candidates) {
+            byId.computeIfAbsent(
+                    candidate.manifest().backupId(), ignored -> new ArrayList<>()).add(candidate);
+        }
+        for (List<ZipImportCandidate> duplicates : byId.values()) {
+            if (duplicates.size() < 2) {
+                continue;
+            }
+            candidates.removeAll(duplicates);
+            duplicates.forEach(candidate -> issues.add(new ZipImportIssue(
+                    candidate.archivePath(),
+                    "Multiple ZIP archives use the same backup identity")));
+        }
     }
 
     private static void inspect(

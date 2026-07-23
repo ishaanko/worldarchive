@@ -74,7 +74,8 @@ final class GitImportRepository {
             Path sourceRepository,
             List<GitImportCandidate> candidates,
             String remoteUrl,
-            boolean fullDownload)
+            boolean fullDownload,
+            boolean preserveHistory)
             throws IOException, InterruptedException, GitStorageException {
         repository.ensure();
         Map<BackupId, GitImportInstallStatus> outcomes = new LinkedHashMap<>();
@@ -83,7 +84,9 @@ final class GitImportRepository {
             outcomes.put(candidate.manifest().backupId(), installSnapshot(
                     sourceRepository, candidate, remoteUrl, fullDownload));
         }
-        updateHistory(candidates, outcomes);
+        if (preserveHistory) {
+            updateHistory(candidates, outcomes);
+        }
         return Map.copyOf(outcomes);
     }
 

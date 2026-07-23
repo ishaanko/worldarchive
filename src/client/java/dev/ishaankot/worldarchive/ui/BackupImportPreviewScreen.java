@@ -3,7 +3,12 @@ package dev.ishaankot.worldarchive.ui;
 import dev.ishaankot.worldarchive.importing.ImportDisposition;
 import dev.ishaankot.worldarchive.importing.ImportPreview;
 import dev.ishaankot.worldarchive.importing.ImportPreviewItem;
+import dev.ishaankot.worldarchive.model.BackupId;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.HashSet;
 import java.util.Objects;
+import java.util.Set;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.MultiLineTextWidget;
@@ -11,29 +16,45 @@ import net.minecraft.client.gui.components.StringWidget;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 
-/** Explicit confirmation and final result for a pinned import preview. */
+/** Lets the user choose exact backups before executing a pinned import preview. */
 public final class BackupImportPreviewScreen extends Screen {
+    private static final int ROW_HEIGHT = 24;
+
+    private static final DateTimeFormatter DATE_FORMAT = DateTimeFormatter
+            .ofPattern("MMM d, yyyy h:mm a")
+            .withZone(ZoneId.systemDefault());
+
     private final Screen parent;
 
     private final BackupClientFacade facade;
 
     private final ImportPreview preview;
 
+    private final Set<BackupId> selected = new HashSet<>();
+
     private Component status;
 
     private boolean busy;
 
-    private boolean complete;
+    private boolean finished;
+
+    private boolean successful;
+
+    private int page;
 
     public BackupImportPreviewScreen(
             Screen parent,
             BackupClientFacade facade,
             ImportPreview preview) {
-        super(Component.literal("Confirm Backup Recovery"));
+        super(Component.literal("Choose Backups"));
         this.parent = Objects.requireNonNull(parent, "parent");
         this.facade = Objects.requireNonNull(facade, "facade");
         this.preview = Objects.requireNonNull(preview, "preview");
-        status = Component.literal(summaryText()).withStyle(ChatFormatting.GRAY);
+        preview.items().stream()
+                .filter(BackupImportPreviewScreen::actionable)
+                .map(item -> item.manifest().backupId())
+                .forEach(selected::add);
+        updateSelectionStatus();
     }
 
     @Override
@@ -43,71 +64,143 @@ public final class BackupImportPreviewScreen extends Screen {
         addRenderableOnly(new StringWidget(
                 x, 12, contentWidth, 20,
                 title.copy().withStyle(ChatFormatting.BOLD), font));
-        addRenderableOnly(new MultiLineTextWidget(x, 40, previewText(), font)
-                .setMaxWidth(contentWidth).setMaxRows(10));
+        addRenderableOnly(new MultiLineTextWidget(
+                x, 34, Component.literal(summaryText()), font)
+                .setMaxWidth(contentWidth).setMaxRows(2));
+        int pageSize = Math.max(1, Math.min(7, (height - 126) / ROW_HEIGHT));
+        int pageCount = Math.max(1, (preview.items().size() + pageSize - 1) / pageSize);
+        page = Math.min(page, pageCount - 1);
+        addBackupButtons(x, contentWidth, pageSize);
         addRenderableOnly(new MultiLineTextWidget(x, height - 72, status, font)
                 .setMaxWidth(contentWidth).setMaxRows(2));
-        int half = (contentWidth - 4) / 2;
+        addFooter(x, contentWidth, pageCount);
+    }
+
+    private void addBackupButtons(int x, int contentWidth, int pageSize) {
+        int first = page * pageSize;
+        int limit = Math.min(preview.items().size(), first + pageSize);
+        int y = 58;
+        for (int index = first; index < limit; index++) {
+            ImportPreviewItem item = preview.items().get(index);
+            BackupId backupId = item.manifest().backupId();
+            String marker = actionable(item)
+                    ? selected.contains(backupId) ? "[x] " : "[ ] "
+                    : "";
+            String label = marker + item.manifest().worldName() + " — "
+                    + DATE_FORMAT.format(item.manifest().createdAt()) + " — "
+                    + disposition(item.disposition());
+            Button choice = Button.builder(Component.literal(label), ignored -> {
+                        if (!selected.remove(backupId)) {
+                            selected.add(backupId);
+                        }
+                        updateSelectionStatus();
+                        rebuildWidgets();
+                    })
+                    .bounds(x, y, contentWidth, 20).build();
+            choice.active = !busy && !finished && actionable(item);
+            addRenderableWidget(choice);
+            y += ROW_HEIGHT;
+        }
+    }
+
+    private void addFooter(int x, int contentWidth, int pageCount) {
+        int buttonWidth = (contentWidth - 12) / 4;
+        Button previous = Button.builder(Component.literal("<"), ignored -> {
+                    page--;
+                    rebuildWidgets();
+                })
+                .bounds(x, height - 28, buttonWidth, 20).build();
+        previous.active = !busy && page > 0;
+        addRenderableWidget(previous);
+        Button next = Button.builder(Component.literal(">"), ignored -> {
+                    page++;
+                    rebuildWidgets();
+                })
+                .bounds(x + buttonWidth + 4, height - 28, buttonWidth, 20).build();
+        next.active = !busy && page + 1 < pageCount;
+        addRenderableWidget(next);
         Button confirm = Button.builder(
-                        Component.literal(complete ? "Complete" : "Recover Backups"),
+                        Component.literal(successful
+                                ? "Imported"
+                                : finished ? "Failed" : "Import Selected"),
                         ignored -> execute())
-                .bounds(x, height - 28, half, 20).build();
-        confirm.active = !busy && !complete && preview.actionableCount() > 0;
+                .bounds(x + (buttonWidth + 4) * 2, height - 28, buttonWidth, 20).build();
+        confirm.active = !busy && !finished && !selected.isEmpty();
         addRenderableWidget(confirm);
-        Button cancel = Button.builder(
-                        Component.literal(complete ? "Done" : "Cancel"),
-                        ignored -> onClose())
-                .bounds(x + half + 4, height - 28, half, 20).build();
-        cancel.active = !busy;
-        addRenderableWidget(cancel);
+        Button back = Button.builder(Component.literal("Back"), ignored -> onClose())
+                .bounds(x + (buttonWidth + 4) * 3, height - 28, buttonWidth, 20).build();
+        back.active = !busy;
+        addRenderableWidget(back);
     }
 
     private void execute() {
         busy = true;
-        status = Component.literal("Recovering exact previewed artifacts...")
+        status = Component.literal("Importing the selected backups...")
                 .withStyle(ChatFormatting.YELLOW);
         rebuildWidgets();
-        facade.importService().execute(preview.token()).whenComplete((summary, throwable) ->
-                minecraft.execute(() -> {
+        facade.importService().execute(preview.token(), Set.copyOf(selected))
+                .whenComplete((summary, throwable) -> minecraft.execute(() -> {
                     busy = false;
-                    complete = throwable == null && summary != null;
-                    status = complete
+                    finished = true;
+                    successful = throwable == null && summary != null;
+                    status = successful
                             ? Component.literal(summary.message()).withStyle(ChatFormatting.GREEN)
-                            : Component.literal("Recovery failed; existing backups were not overwritten")
+                            : Component.literal(
+                                    "Import stopped. Some selected backups may have been imported; "
+                                            + "go Back and check again before retrying.")
                                     .withStyle(ChatFormatting.RED);
                     rebuildWidgets();
                 }));
     }
 
-    private Component previewText() {
-        StringBuilder text = new StringBuilder(summaryText());
-        int shown = Math.min(7, preview.items().size());
-        for (int index = 0; index < shown; index++) {
-            ImportPreviewItem item = preview.items().get(index);
-            text.append("\n").append(item.manifest().worldName())
-                    .append(" • ").append(item.manifest().createdAt())
-                    .append(" • ").append(item.disposition());
-        }
-        if (preview.items().size() > shown) {
-            text.append("\n+").append(preview.items().size() - shown).append(" more");
-        }
-        if (!preview.issues().isEmpty()) {
-            text.append("\n").append(preview.issues().size())
-                    .append(" item(s) could not be imported safely");
-        }
-        return Component.literal(text.toString());
+    private void updateSelectionStatus() {
+        String issues = preview.issues().isEmpty()
+                ? ""
+                : "; " + preview.issues().size() + " could not be imported safely";
+        status = Component.literal(selected.size() + " backup(s) selected" + issues)
+                .withStyle(ChatFormatting.GRAY);
     }
 
     private String summaryText() {
         long conflicts = preview.items().stream()
                 .filter(item -> item.disposition() == ImportDisposition.CONFLICT)
                 .count();
-        return preview.kind() + " preview: " + preview.items().size() + " backup(s), "
-                + preview.actionableCount() + " change(s), " + conflicts + " conflict(s)";
+        return sourceName() + ": " + preview.items().size() + " backup(s) found, "
+                + preview.actionableCount() + " available to import, "
+                + conflicts + " conflict(s)";
+    }
+
+    private String sourceName() {
+        return switch (preview.kind()) {
+            case GIT -> "Repository";
+            case ZIP -> "Backup folder";
+            case LOCAL_REBUILD -> "Stored backups";
+        };
+    }
+
+    private static String disposition(ImportDisposition disposition) {
+        return switch (disposition) {
+            case ADD -> "Ready to import";
+            case MERGE -> "Ready to update";
+            case UNCHANGED -> "Already imported";
+            case CONFLICT -> "Needs attention";
+        };
+    }
+
+    private static boolean actionable(ImportPreviewItem item) {
+        return item.disposition() == ImportDisposition.ADD
+                || item.disposition() == ImportDisposition.MERGE;
     }
 
     @Override
     public void onClose() {
+        if (busy) {
+            return;
+        }
+        if (!finished) {
+            facade.importService().discard(preview.token());
+            finished = true;
+        }
         minecraft.setScreenAndShow(parent);
     }
 }

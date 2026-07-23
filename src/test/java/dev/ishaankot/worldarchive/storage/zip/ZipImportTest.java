@@ -69,6 +69,23 @@ final class ZipImportTest {
         assertTrue(Files.isRegularFile(source.archivePath()));
     }
 
+    @Test
+    void rejectsEveryArchiveWhenBackupIdentityIsDuplicated() throws Exception {
+        Path world = Files.createDirectories(temporaryDirectory.resolve("duplicate-world"));
+        Files.writeString(world.resolve("level.dat"), "world-data");
+        Path sourceRoot = temporaryDirectory.resolve("duplicate-archives");
+        ZipBackupArtifact source = new ZipBackupStore(sourceRoot)
+                .create(new BackupCapture(world, manifest(world)));
+        Files.copy(source.archivePath(), sourceRoot.resolve("duplicate.zip"));
+
+        ZipImportScan scan = new ZipImportScanner().scan(sourceRoot);
+
+        assertTrue(scan.candidates().isEmpty());
+        assertEquals(2, scan.issues().size());
+        assertTrue(scan.issues().stream().allMatch(issue ->
+                issue.message().contains("same backup identity")));
+    }
+
     private static BackupManifest manifest(Path world) throws Exception {
         List<ZipInventoryEntry> files = new ArrayList<>();
         for (ZipSourceScanner.SourceEntry entry : ZipSourceScanner.snapshot(world).entries()) {
