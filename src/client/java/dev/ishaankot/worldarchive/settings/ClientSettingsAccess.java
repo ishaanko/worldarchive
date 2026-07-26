@@ -246,7 +246,8 @@ public final class ClientSettingsAccess {
                                     world.enabled(),
                                     world.path(),
                                     Optional.of(requested.get(world.worldId())),
-                                    world.zipDestination())
+                                    world.zipDestination(),
+                                    world.storagePolicy())
                             : world)
                     .toList();
             WorldArchiveConfig connected = new WorldArchiveConfig(

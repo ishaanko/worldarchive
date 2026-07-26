@@ -133,6 +133,50 @@ class WorldGitSnapshotStoreIntegrationTest {
     }
 
     @Test
+    void localCleanupLeavesRemoteSnapshotAndCanRehydrateIt() throws Exception {
+        Path repositoryRoot = temporaryDirectory.resolve("cleanup-repositories");
+        Path remote = temporaryDirectory.resolve("cleanup-remote.git");
+        nativeGit("init", "--bare", remote.toString());
+        WorldId worldId = WorldId.create();
+        BackupId backupId = BackupId.create();
+        Path world = world("cleanup-world", "before cleanup");
+        BackupCapture capture = capture(world, worldId, backupId, Instant.now());
+        ExecutorService executor = Executors.newCachedThreadPool();
+
+        try (WorldGitSnapshotStore store = new WorldGitSnapshotStore(
+                settings(repositoryRoot, Optional.empty()),
+                Optional.empty(),
+                Map.of(worldId, remote.toString()),
+                new SystemGitCommandRunner(),
+                executor)) {
+            assertEquals(
+                    SyncStatus.SYNCED,
+                    await(store.createBackup(capture, ProgressListener.NO_OP)).syncStatus());
+
+            assertTrue(await(store.deleteCurrentLocalSnapshot(worldId, backupId)));
+            await(store.compactCurrentStorage(worldId));
+
+            assertTrue(await(store.listCurrentSnapshots(worldId)).isEmpty());
+            assertTrue(nativeGit(
+                    "--git-dir=" + remote,
+                    "for-each-ref",
+                    "--format=%(refname)",
+                    "refs/heads/backups").contains(backupId.toString()));
+            assertTrue(await(store.verifyRestorableSnapshot(
+                    worldId,
+                    backupId,
+                    capture.manifest())).valid());
+            assertEquals(
+                    List.of(backupId),
+                    await(store.listCurrentSnapshots(worldId)).stream()
+                            .map(GitSnapshot::backupId)
+                            .toList());
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void expandsWorldTemplateIntoDistinctLocalRemotes() throws Exception {
         Path repositoryRoot = temporaryDirectory.resolve("templated-repositories");
         WorldId firstWorldId = WorldId.create();

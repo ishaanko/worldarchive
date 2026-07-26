@@ -1,6 +1,7 @@
 package dev.ishaankot.worldarchive.settings;
 
 import dev.ishaankot.worldarchive.config.WorldConfig;
+import dev.ishaankot.worldarchive.config.StoragePolicy;
 import dev.ishaankot.worldarchive.model.WorldId;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -55,7 +56,9 @@ public final class WorldConfigReconciler {
                     enabled,
                     path,
                     stored == null ? Optional.empty() : stored.remoteUrl(),
-                    stored == null ? Optional.empty() : stored.zipDestination()));
+                    stored == null ? Optional.empty() : stored.zipDestination(),
+                    stored == null ? StoragePolicy.defaults()
+                            : stored.storagePolicy()));
             usedIds.add(worldId);
             usedPaths.add(path);
         }

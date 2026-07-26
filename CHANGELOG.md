@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Add per-world managed-local storage budgets with separate Git and ZIP usage,
+  a history-based days-remaining forecast, and weekly near-budget review notices.
+- Add guided cleanup previews that keep 7 daily, 4 weekly, and 12 monthly story
+  anchors by default, permanently protect labeled milestones, and rank lighter
+  automatic sessions before manual or higher-change backups.
+- Require an exact selectable artifact list and a second explicit confirmation
+  before cleanup, while preserving at least one verified local restore point.
+
+### Changed
+
+- Treat configured Git remotes, linked imports, and legacy shared repositories
+  as unmetered storage that guided cleanup never deletes.
+- Allow synchronized Git snapshots to be evicted locally and rehydrated from
+  their unchanged remote ref when a later verification or restore needs them.
+
 ## 0.3.1 (2026-07-22)
 
 ### Changed

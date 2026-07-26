@@ -14,6 +14,9 @@ import dev.ishaankot.worldarchive.recovery.BackupRecoveryService;
 import dev.ishaankot.worldarchive.storage.git.GitBackendSettings;
 import dev.ishaankot.worldarchive.storage.git.SystemGitCommandRunner;
 import dev.ishaankot.worldarchive.storage.git.WorldGitSnapshotStore;
+import dev.ishaankot.worldarchive.storage.management.FileStorageHistoryStore;
+import dev.ishaankot.worldarchive.storage.management.FileStorageReviewStore;
+import dev.ishaankot.worldarchive.storage.management.ManagedStorageService;
 import dev.ishaankot.worldarchive.storage.zip.ZipBackupBackend;
 import dev.ishaankot.worldarchive.storage.zip.ZipBackupStoreResolver;
 import java.util.List;
@@ -73,8 +76,28 @@ final class RuntimeStateFactory {
                 runtime.operationGate(),
                 runtime.workerExecutor(),
                 runtime.clock());
+        ManagedStorageService storage = new ManagedStorageService(
+                () -> config,
+                runtime.catalog(),
+                deletions,
+                gitBackend,
+                zipStores,
+                new FileStorageHistoryStore(
+                        runtime.storageRoot().resolve("storage-history")),
+                new FileStorageReviewStore(
+                        runtime.storageRoot().resolve("storage-reviews")),
+                runtime.operationGate(),
+                runtime.workerExecutor(),
+                runtime.clock(),
+                java.time.ZoneId.systemDefault());
         return new RuntimeState(
-                config, storagePaths, gitBackend, selector, coordinator, imports);
+                config,
+                storagePaths,
+                gitBackend,
+                selector,
+                coordinator,
+                imports,
+                storage);
     }
 
     private WorldGitSnapshotStore gitBackend(

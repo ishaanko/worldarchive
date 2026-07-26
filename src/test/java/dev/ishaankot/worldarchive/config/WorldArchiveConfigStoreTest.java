@@ -15,6 +15,7 @@ import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import dev.ishaankot.worldarchive.model.WorldId;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.io.TempDir;
@@ -71,7 +72,8 @@ final class WorldArchiveConfigStoreTest {
                         true,
                         world,
                         Optional.of("ssh://example.invalid/forever-world.git"),
-                        Optional.of(worldZip))));
+                        Optional.of(worldZip),
+                        new StoragePolicy(50L * 1_024 * 1_024 * 1_024, 14, 8, 24))));
 
         store.save(expected, java.util.List.of(world));
         WorldArchiveConfig canonicalExpected = expected.validateDestinations(java.util.List.of(world));
@@ -83,10 +85,41 @@ final class WorldArchiveConfigStoreTest {
         assertFalse(serialized.contains("\"remoteUrlTemplate\""));
         assertTrue(serialized.contains("\"remoteUrl\": \"ssh://example.invalid/forever-world.git\""));
         assertTrue(serialized.contains("\"zipDestination\": \""));
+        assertTrue(serialized.contains("\"budgetBytes\": 53687091200"));
+        assertTrue(serialized.contains("\"dailyCopies\": 14"));
         assertTrue(serialized.contains("\"legacySharedRepository\""));
         assertTrue(serialized.contains("\"legacyRemoteUrl\""));
         assertFalse(serialized.contains("\"repository\":"));
         assertFalse(serialized.toLowerCase().contains("password"));
+    }
+
+    @Test
+    void migratesSchemaSixWorldsWithDisabledBalancedStoragePolicies() throws IOException {
+        Path world = Files.createDirectory(temporaryDirectory.resolve("schema-six-world"));
+        Path file = temporaryDirectory.resolve("schema-six.json");
+        WorldId worldId = WorldId.create();
+        WorldArchiveConfig defaults = WorldArchiveConfig.defaults();
+        WorldArchiveConfig current = new WorldArchiveConfig(
+                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
+                defaults.triggers(),
+                defaults.git(),
+                defaults.zip(),
+                java.util.List.of(new WorldConfig(worldId, true, world)));
+        WorldArchiveConfigStore store = new WorldArchiveConfigStore(file);
+        store.save(current, java.util.List.of(world));
+        com.google.gson.JsonObject schemaSix = com.google.gson.JsonParser.parseString(
+                        Files.readString(file, StandardCharsets.UTF_8))
+                .getAsJsonObject();
+        schemaSix.addProperty("schemaVersion", 6);
+        schemaSix.getAsJsonArray("worlds").get(0).getAsJsonObject().remove("storage");
+        Files.writeString(file, schemaSix.toString(), StandardCharsets.UTF_8);
+
+        WorldArchiveConfig migrated = store.load(java.util.List.of(world));
+
+        assertEquals(StoragePolicy.defaults(), migrated.worlds().getFirst().storagePolicy());
+        String persisted = Files.readString(file, StandardCharsets.UTF_8);
+        assertTrue(persisted.contains("\"schemaVersion\": 7"));
+        assertTrue(persisted.contains("\"storage\""));
     }
 
     @Test
@@ -106,7 +139,7 @@ final class WorldArchiveConfigStoreTest {
                         world)));
         store.save(current, java.util.List.of(world));
         String invalid = Files.readString(file, StandardCharsets.UTF_8)
-                .replace("\"schemaVersion\": 6", "\"schemaVersion\": 4")
+                .replace("\"schemaVersion\": 7", "\"schemaVersion\": 4")
                 .replace(
                         "\"remoteName\": \"origin\",",
                         "\"remoteName\": \"origin\",\n      \"remoteUrlTemplate\": \"https://example.invalid/shared.git\",");
@@ -135,7 +168,7 @@ final class WorldArchiveConfigStoreTest {
         WorldArchiveConfigStore store = new WorldArchiveConfigStore(file);
         store.save(current, java.util.List.of(world));
         String schemaFour = Files.readString(file, StandardCharsets.UTF_8)
-                .replace("\"schemaVersion\": 6", "\"schemaVersion\": 4")
+                .replace("\"schemaVersion\": 7", "\"schemaVersion\": 4")
                 .replace(
                         "\"remoteName\": \"origin\",",
                         "\"remoteName\": \"origin\",\n"
@@ -150,7 +183,7 @@ final class WorldArchiveConfigStoreTest {
                 "https://example.invalid/world-" + worldId + ".git",
                 migrated.worlds().getFirst().remoteUrl().orElseThrow());
         String persisted = Files.readString(file, StandardCharsets.UTF_8);
-        assertTrue(persisted.contains("\"schemaVersion\": 6"));
+        assertTrue(persisted.contains("\"schemaVersion\": 7"));
         assertFalse(persisted.contains("remoteUrlTemplate"));
     }
 
@@ -199,7 +232,7 @@ final class WorldArchiveConfigStoreTest {
         assertEquals(60, migrated.triggers().scheduleIntervalMinutes());
         assertFalse(migrated.git().enabled());
         assertEquals(zipDestination.toRealPath(), migrated.zip().destination().orElseThrow());
-        assertTrue(Files.readString(file, StandardCharsets.UTF_8).contains("\"schemaVersion\": 6"));
+        assertTrue(Files.readString(file, StandardCharsets.UTF_8).contains("\"schemaVersion\": 7"));
     }
 
     @Test
@@ -268,7 +301,7 @@ final class WorldArchiveConfigStoreTest {
                 migrated.git().health());
         assertTrue(Files.isDirectory(legacyGit));
         String persisted = Files.readString(file, StandardCharsets.UTF_8);
-        assertTrue(persisted.contains("\"schemaVersion\": 6"));
+        assertTrue(persisted.contains("\"schemaVersion\": 7"));
         assertTrue(persisted.contains("\"legacySharedRepository\""));
         assertFalse(persisted.contains("\"repository\":"));
     }
