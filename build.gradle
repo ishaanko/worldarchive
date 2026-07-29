@@ -41,11 +41,6 @@ dependencies {
     implementation "net.fabricmc:fabric-loader:${loader_version}"
     implementation "net.fabricmc.fabric-api:fabric-api:${fabric_api_version}"
     implementation "maven.modrinth:modmenu:${modmenu_version}"
-
-    testImplementation platform('org.junit:junit-bom:5.13.4')
-    testImplementation 'org.junit.jupiter:junit-jupiter'
-    testImplementation sourceSets.client.output
-    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
 processResources {
@@ -63,11 +58,6 @@ processResources {
 tasks.withType(JavaCompile).configureEach {
     options.release = 25
     options.encoding = 'UTF-8'
-}
-
-tasks.withType(Test).configureEach {
-    useJUnitPlatform()
-    systemProperty 'java.io.tmpdir', file(System.getProperty('java.io.tmpdir')).canonicalPath
 }
 
 java {

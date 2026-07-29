@@ -139,7 +139,8 @@ public final class SettingsDraft {
                         true,
                         world.path(),
                         world.remoteUrl(),
-                        world.zipDestination()))
+                        world.zipDestination(),
+                        world.storagePolicy()))
                 .toList();
         return new SettingsDraft(new WorldArchiveConfig(
                 WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
@@ -173,7 +174,8 @@ public final class SettingsDraft {
                         true,
                         world.path(),
                         world.remoteUrl(),
-                        world.zipDestination()))
+                        world.zipDestination(),
+                        world.storagePolicy()))
                 .toList();
         WorldArchiveConfig reset = defaults.defaultsKeepingWorlds(worlds);
         GitDestinationConfig git = reset.git();
@@ -398,7 +400,8 @@ public final class SettingsDraft {
                         worldEnabled.getOrDefault(world.worldId(), world.enabled()),
                         world.path(),
                         remoteUrl.isBlank() ? Optional.empty() : Optional.of(remoteUrl),
-                        archiveDirectory));
+                        archiveDirectory,
+                        world.storagePolicy()));
             } catch (IllegalArgumentException exception) {
                 issues.put(
                         SettingsField.WORLD_REMOTE_URL,

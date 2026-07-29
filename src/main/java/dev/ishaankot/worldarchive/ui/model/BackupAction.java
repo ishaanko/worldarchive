@@ -8,5 +8,6 @@ public enum BackupAction {
     SYNC,
     VERIFY,
     OPEN_FOLDER,
+    STORAGE,
     SETTINGS
 }

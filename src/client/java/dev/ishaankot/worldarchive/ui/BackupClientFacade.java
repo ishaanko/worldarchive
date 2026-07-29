@@ -3,10 +3,16 @@ package dev.ishaankot.worldarchive.ui;
 import dev.ishaankot.worldarchive.core.BackupService;
 import dev.ishaankot.worldarchive.core.ProgressListener;
 import dev.ishaankot.worldarchive.core.RestoreBackupResult;
+import dev.ishaankot.worldarchive.config.StoragePolicy;
 import dev.ishaankot.worldarchive.importing.BackupImportService;
 import dev.ishaankot.worldarchive.model.BackupResult;
 import dev.ishaankot.worldarchive.ui.model.BackupBrowserCapabilities;
 import dev.ishaankot.worldarchive.ui.model.BackupRow;
+import dev.ishaankot.worldarchive.storage.management.CleanupPlan;
+import dev.ishaankot.worldarchive.storage.management.CleanupRequest;
+import dev.ishaankot.worldarchive.storage.management.CleanupResult;
+import dev.ishaankot.worldarchive.storage.management.StorageOverview;
+import dev.ishaankot.worldarchive.model.WorldId;
 import java.util.Optional;
 import java.util.List;
 import java.util.concurrent.CompletionStage;
@@ -29,6 +35,16 @@ public interface BackupClientFacade {
             ProgressListener progressListener);
 
     CompletionStage<BackupBrowserCapabilities> browserCapabilities(BackupWorldContext world);
+
+    CompletionStage<StorageOverview> storageOverview(WorldId worldId);
+
+    CompletionStage<Boolean> claimStorageReviewNotice(WorldId worldId);
+
+    CompletionStage<CleanupPlan> prepareCleanup(WorldId worldId);
+
+    CompletionStage<CleanupResult> applyCleanup(CleanupRequest request);
+
+    CompletionStage<Void> saveStoragePolicy(WorldId worldId, StoragePolicy policy);
 
     void openManagedFolder(BackupWorldContext world, Optional<BackupRow> selectedBackup);
 

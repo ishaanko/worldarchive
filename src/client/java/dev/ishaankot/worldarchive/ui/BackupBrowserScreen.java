@@ -356,6 +356,7 @@ public final class BackupBrowserScreen extends Screen {
         int y = Math.max(150, height - 24);
         List<BackupAction> secondaryActions = List.of(
                 BackupAction.OPEN_FOLDER,
+                BackupAction.STORAGE,
                 BackupAction.SETTINGS);
         int buttonWidth = actionButtonWidth(contentWidth, secondaryActions.size() + 1);
         int currentX = x;
@@ -417,6 +418,8 @@ public final class BackupBrowserScreen extends Screen {
                     "Checking backup integrity",
                     listener -> service.verifyBackup(row.backupId(), listener)));
             case OPEN_FOLDER -> openFolder();
+            case STORAGE -> minecraft.setScreenAndShow(
+                    new StorageScreen(this, world, facade));
             case SETTINGS -> openSettings();
             default -> throw new IllegalStateException("Unknown backup action: " + action);
         }
@@ -622,6 +625,7 @@ public final class BackupBrowserScreen extends Screen {
             case SYNC -> "Sync";
             case VERIFY -> "Verify";
             case OPEN_FOLDER -> "Open Folder";
+            case STORAGE -> "Storage";
             case SETTINGS -> "Settings";
             default -> throw new IllegalStateException("Unknown backup action: " + action);
         };

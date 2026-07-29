@@ -225,7 +225,20 @@ public final class GitBackupBackend implements GitSnapshotStore {
     public CompletionStage<Boolean> deleteLocalSnapshot(WorldId worldId, BackupId backupId) {
         Objects.requireNonNull(worldId, "worldId");
         Objects.requireNonNull(backupId, "backupId");
-        return submit(() -> withRepositoryLock(() -> deleteLocalSnapshotBlocking(worldId, backupId)));
+        return submit(() -> withRepositoryLock(() ->
+                new GitStorageCompactor(settings, repository, refs, commands)
+                        .deleteLocalSnapshot(worldId, backupId)));
+    }
+
+    public CompletionStage<Void> compactStorage(WorldId worldId) {
+        Objects.requireNonNull(worldId, "worldId");
+        return submit(() -> withRepositoryLock(() -> {
+            repository.requireWorld(worldId);
+            repository.requireBare();
+            boolean noSnapshots = listSnapshotsBlocking(Optional.of(worldId)).isEmpty();
+            new GitStorageCompactor(settings, repository, refs, commands).compact(worldId, noSnapshots);
+            return null;
+        }));
     }
 
     @Override
@@ -676,19 +689,6 @@ public final class GitBackupBackend implements GitSnapshotStore {
                     Optional.of(snapshot.committedAt())), current.get());
         }
         refs.deleteExact(refName, current.get());
-        return true;
-    }
-
-    private boolean deleteLocalSnapshotBlocking(WorldId worldId, BackupId backupId)
-            throws IOException, InterruptedException, GitStorageException {
-        repository.requireWorld(worldId);
-        repository.requireBare();
-        String refName = GitSnapshot.refName(worldId, backupId);
-        Optional<String> current = refs.resolve(refName);
-        if (current.isEmpty()) {
-            return false;
-        }
-        refs.deleteExact(refName, current.orElseThrow());
         return true;
     }
 

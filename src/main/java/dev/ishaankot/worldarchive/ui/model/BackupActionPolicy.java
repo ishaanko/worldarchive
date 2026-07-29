@@ -34,6 +34,7 @@ public final class BackupActionPolicy {
                 capabilities.managedFolderAvailable()
                         ? enabled()
                         : disabled(ActionDisabledReason.FOLDER_UNAVAILABLE));
+        result.put(BackupAction.STORAGE, enabled());
         result.put(BackupAction.SETTINGS, enabled());
 
         if (selection.isEmpty()) {

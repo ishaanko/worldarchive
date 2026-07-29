@@ -118,11 +118,11 @@ public final class WorldArchiveConfigStore {
             } else if (schemaVersion == 4) {
                 parsed = migrateVersionFour(root);
                 migrated = true;
-            } else if (schemaVersion == 5) {
-                parsed = parseCurrent(root);
+            } else if (java.util.Set.of(5, 6).contains(schemaVersion)) {
+                parsed = parseCurrent(root, false);
                 migrated = true;
             } else {
-                parsed = parseCurrent(root);
+                parsed = parseCurrent(root, true);
                 migrated = false;
             }
             WorldArchiveConfig validated = parsed.validateDestinations(knownWorldPaths);
@@ -135,7 +135,9 @@ public final class WorldArchiveConfigStore {
         }
     }
 
-    private WorldArchiveConfig parseCurrent(JsonObject root) throws IOException {
+    private WorldArchiveConfig parseCurrent(
+            JsonObject root,
+            boolean storagePolicyPresent) throws IOException {
         TriggerConfig triggers = parseGlobalTriggers(requiredObject(root, "triggers"));
         JsonObject destinations = requiredObject(root, "destinations");
         GitDestinationConfig git = parseCurrentGit(requiredObject(destinations, "git"));
@@ -145,7 +147,7 @@ public final class WorldArchiveConfigStore {
                 triggers,
                 git,
                 zip,
-                parseWorlds(requiredArray(root, "worlds")));
+                parseWorlds(requiredArray(root, "worlds"), storagePolicyPresent));
     }
 
     private WorldArchiveConfig migrateVersionOne(JsonObject root) throws IOException {
@@ -231,7 +233,7 @@ public final class WorldArchiveConfigStore {
                 parseHealth(requiredObject(gitObject, "health"), DestinationType.GIT),
                 optionalPath(gitObject, "legacySharedRepository"),
                 optionalString(gitObject, "legacyRemoteUrl"));
-        List<WorldConfig> worlds = parseWorlds(requiredArray(root, "worlds")).stream()
+        List<WorldConfig> worlds = parseWorlds(requiredArray(root, "worlds"), false).stream()
                 .map(world -> new WorldConfig(
                         world.worldId(),
                         world.enabled(),
@@ -376,6 +378,12 @@ public final class WorldArchiveConfigStore {
             worldConfig.remoteUrl().ifPresent(url -> world.addProperty("remoteUrl", url));
             worldConfig.zipDestination()
                     .ifPresent(path -> world.addProperty("zipDestination", path.toString()));
+            JsonObject storage = new JsonObject();
+            storage.addProperty("budgetBytes", worldConfig.storagePolicy().budgetBytes());
+            storage.addProperty("dailyCopies", worldConfig.storagePolicy().dailyCopies());
+            storage.addProperty("weeklyCopies", worldConfig.storagePolicy().weeklyCopies());
+            storage.addProperty("monthlyCopies", worldConfig.storagePolicy().monthlyCopies());
+            world.add("storage", storage);
             worlds.add(world);
         }
         root.add("worlds", worlds);
@@ -481,6 +489,21 @@ public final class WorldArchiveConfigStore {
                 .orElseThrow(() -> new ConfigurationException("Required integer is missing: " + name));
     }
 
+    private static long requiredLong(JsonObject object, String name)
+            throws ConfigurationException {
+        JsonElement element = object.get(name);
+        if (element == null
+                || !element.isJsonPrimitive()
+                || !element.getAsJsonPrimitive().isNumber()) {
+            throw new ConfigurationException("Required long is missing or invalid: " + name);
+        }
+        try {
+            return new BigDecimal(element.getAsString()).longValueExact();
+        } catch (ArithmeticException | NumberFormatException exception) {
+            throw new ConfigurationException("Expected a long: " + name, exception);
+        }
+    }
+
     private static Optional<Integer> optionalInteger(JsonObject object, String name)
             throws ConfigurationException {
         JsonElement element = object.get(name);
@@ -551,20 +574,39 @@ public final class WorldArchiveConfigStore {
     }
 
     private List<WorldConfig> parseWorlds(JsonArray worldsArray) throws IOException {
+        return parseWorlds(worldsArray, false);
+    }
+
+    private List<WorldConfig> parseWorlds(
+            JsonArray worldsArray,
+            boolean storagePolicyPresent) throws IOException {
         List<WorldConfig> worlds = new ArrayList<>(worldsArray.size());
         for (JsonElement element : worldsArray) {
             if (!element.isJsonObject()) {
                 throw new ConfigurationException("Per-world configuration must be an object");
             }
             JsonObject world = element.getAsJsonObject();
+            StoragePolicy storagePolicy = storagePolicyPresent
+                    ? parseStoragePolicy(requiredObject(world, "storage"))
+                    : StoragePolicy.defaults();
             worlds.add(new WorldConfig(
                     WorldId.parse(requiredString(world, "worldId")),
                     requiredBoolean(world, "enabled"),
                     requiredPath(world, "path"),
                     optionalString(world, "remoteUrl"),
-                    optionalPath(world, "zipDestination")));
+                    optionalPath(world, "zipDestination"),
+                    storagePolicy));
         }
         return worlds;
+    }
+
+    private static StoragePolicy parseStoragePolicy(JsonObject object)
+            throws ConfigurationException {
+        return new StoragePolicy(
+                requiredLong(object, "budgetBytes"),
+                requiredInteger(object, "dailyCopies"),
+                requiredInteger(object, "weeklyCopies"),
+                requiredInteger(object, "monthlyCopies"));
     }
 
     private Path requiredPath(JsonObject object, String name) throws IOException {

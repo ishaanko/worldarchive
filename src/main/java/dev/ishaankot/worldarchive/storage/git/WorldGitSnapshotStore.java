@@ -205,6 +205,12 @@ public final class WorldGitSnapshotStore implements GitSnapshotStore {
         });
     }
 
+    /** Lists only the current isolated repository, excluding read-compatible legacy storage. */
+    public CompletionStage<List<GitSnapshot>> listCurrentSnapshots(WorldId worldId) {
+        Objects.requireNonNull(worldId, "worldId");
+        return child(worldId).listSnapshots(Optional.of(worldId));
+    }
+
     @Override
     public CompletionStage<GitVerification> verifySnapshot(WorldId worldId, BackupId backupId) {
         return withLocatedLocal(
@@ -298,6 +304,28 @@ public final class WorldGitSnapshotStore implements GitSnapshotStore {
                 worldId,
                 backupId,
                 backend -> backend.deleteLocalSnapshot(worldId, backupId));
+    }
+
+    /** Deletes only the current isolated local ref and never contacts a configured remote. */
+    public CompletionStage<Boolean> deleteCurrentLocalSnapshot(
+            WorldId worldId,
+            BackupId backupId) {
+        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(backupId, "backupId");
+        return child(worldId).deleteLocalSnapshot(worldId, backupId);
+    }
+
+    public CompletionStage<Void> compactCurrentStorage(WorldId worldId) {
+        Objects.requireNonNull(worldId, "worldId");
+        return child(worldId).compactStorage(worldId);
+    }
+
+    public CompletionStage<GitVerification> verifyCurrentSnapshot(
+            WorldId worldId,
+            BackupId backupId) {
+        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(backupId, "backupId");
+        return child(worldId).verifySnapshot(worldId, backupId);
     }
 
     @Override

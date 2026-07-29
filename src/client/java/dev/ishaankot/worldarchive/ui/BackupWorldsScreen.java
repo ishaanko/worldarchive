@@ -3,6 +3,8 @@ package dev.ishaankot.worldarchive.ui;
 import dev.ishaankot.worldarchive.settings.ClientSettingsAccess;
 import java.util.List;
 import java.util.Objects;
+import java.util.HashSet;
+import java.util.Set;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.MultiLineTextWidget;
@@ -20,6 +22,9 @@ public final class BackupWorldsScreen extends Screen {
     private final BackupClientFacade facade;
 
     private List<BackupWorldEntry> worlds = List.of();
+
+    private final Set<dev.ishaankot.worldarchive.model.WorldId> storageReviews =
+            new HashSet<>();
 
     private Component status = Component.literal("Loading worlds...").withStyle(ChatFormatting.GRAY);
 
@@ -97,7 +102,24 @@ public final class BackupWorldsScreen extends Screen {
             }
             page = 0;
             rebuildWidgets();
+            loadStorageNotices(token);
         }));
+    }
+
+    private void loadStorageNotices(long token) {
+        storageReviews.clear();
+        for (BackupWorldEntry entry : worlds) {
+            facade.claimStorageReviewNotice(entry.context().worldId())
+                    .whenComplete((recommended, throwable) -> minecraft.execute(() -> {
+                        if (!active || token != lifecycle) {
+                            return;
+                        }
+                        if (throwable == null && Boolean.TRUE.equals(recommended)) {
+                            storageReviews.add(entry.context().worldId());
+                            rebuildWidgets();
+                        }
+                    }));
+        }
     }
 
     private void addWorldButtons(int pageSize, int x, int contentWidth) {
@@ -109,16 +131,23 @@ public final class BackupWorldsScreen extends Screen {
             String prefix = entry.recoveryOnly() ? "Archived: " : "";
             String label = prefix + entry.context().displayName() + "  ["
                     + entry.context().worldId().displayCode() + "]  "
-                    + entry.backupCount() + " backup(s)";
+                    + entry.backupCount() + " backup(s)"
+                    + (storageReviews.contains(entry.context().worldId())
+                            ? "  · Storage review"
+                            : "");
             Button open = Button.builder(
                             Component.literal(label),
                             ignored -> minecraft.setScreenAndShow(new BackupBrowserScreen(
                                     this, entry.context(), facade)))
                     .bounds(x, y, contentWidth, 20)
                     .build();
-            open.setTooltip(Tooltip.create(Component.literal(entry.recoveryOnly()
+            String tooltip = entry.recoveryOnly()
                     ? "The original save is missing. Restore and delete remain available."
-                    : entry.context().worldDirectory().toString())));
+                    : entry.context().worldDirectory().toString();
+            if (storageReviews.contains(entry.context().worldId())) {
+                tooltip += "\nManaged storage is near or above this world's budget.";
+            }
+            open.setTooltip(Tooltip.create(Component.literal(tooltip)));
             addRenderableWidget(open);
             y += ROW_HEIGHT;
         }

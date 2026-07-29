@@ -17,6 +17,8 @@ always restores backups as new worlds without modifying the original.
 - Optional per-world ZIP folder overrides
 - Per-world and per-destination settings
 - Backup labels, verification, remote sync, and deletion
+- Per-world storage budgets, Git/ZIP usage, and growth forecasts
+- Previewed daily/weekly/monthly cleanup that preserves labeled story milestones
 - Previewed recovery of existing WorldArchive Git histories
 - Copy or read-only link import for folders of WorldArchive ZIP archives
 - Offline catalog and Git-ref rebuilding from managed backup storage
@@ -24,8 +26,9 @@ always restores backups as new worlds without modifying the original.
 - Partial-success reporting when one destination fails
 - Safe, copy-only restores to a new world
 
-WorldArchive does not delete backups automatically. Storage use will grow until
-backups are deleted manually.
+WorldArchive never deletes backups automatically. A configured per-world budget
+enables a weekly near-limit notice and a guided cleanup preview, but the exact
+local artifacts must still be reviewed and confirmed manually.
 
 ## Dependencies
 
@@ -79,6 +82,20 @@ The **ZIP** tab defines the default archive folder. The **Worlds** tab lists
 multiple worlds at once and lets any selected world inherit that default or use
 a separate ZIP root, such as a different drive or synced folder.
 
+Each world's backup browser also has a **Storage** screen. It measures managed
+local Git and ZIP files separately, learns the world's recent growth rate, and
+estimates when the configured budget will be reached. Remote Git refs, linked
+imports, and legacy shared repositories are shown as unmetered and are never
+removed by guided cleanup.
+
+The balanced cleanup policy keeps one representative backup for each of 7
+recent days, 4 earlier weeks, and 12 earlier months. Labeled backups are always
+kept. Within a period, manual backups and backups with more changed files are
+preferred as story anchors. Changed-file counts are exact content comparisons,
+but WorldArchive does not claim they reveal the length or importance of a play
+session: one Minecraft region-file change can contain either a tiny update or
+substantial building.
+
 Restoring a backup verifies it and creates a new, uniquely named world. The
 original world is never overwritten or modified.
 
@@ -123,6 +140,8 @@ Paths are relative to the Minecraft instance directory, normally `.minecraft`.
 | Import source registry | `worldarchive/import-sources.json` |
 | Deleted-backup registry | `worldarchive/deleted-backups.txt` |
 | Change inventories | `worldarchive/inventories/` |
+| Storage forecast history | `worldarchive/storage-history/` |
+| Storage review cadence | `worldarchive/storage-reviews/` |
 | Temporary captures | `worldarchive/capture-temp/` |
 | World identity | `saves/<world>/.worldarchive/world.json` |
 
@@ -132,25 +151,21 @@ Git destination from multiple computers at the same time. Configurations from
 older releases retain their shared Git repository as read-compatible legacy
 storage; WorldArchive never moves or deletes it during migration.
 
-## Building the mod
+## Build the mod
 
-Install a Java 25 JDK and set `JAVA_HOME` to it. Git is required by the project
-checks. Git LFS is recommended for full integration-test coverage.
-
-On Windows:
+Install Java 25 and Git. On Windows, run:
 
 ```powershell
-.\gradlew.bat --no-daemon check build
+.\gradlew.bat build
 ```
 
-On Linux or macOS:
+On Linux or macOS, run:
 
 ```sh
-./gradlew --no-daemon check build
+./gradlew build
 ```
 
-The build runs the test suite, Checkstyle, formatting checks, the license check,
-and the provenance scan. Generated JARs are written to `build/libs/`.
+The JAR files are in `build/libs/`.
 
 ## License
 
@@ -162,9 +177,3 @@ WorldArchive is licensed under the [Apache License 2.0](LICENSE).
 
 Bug reports and pull requests are welcome. For larger changes, open an issue
 first to discuss the proposed approach.
-
-Before submitting a pull request, run the full project checks:
-
-```sh
-./gradlew --no-daemon check build
-```
