@@ -4,6 +4,7 @@ import dev.ishaankot.worldarchive.WorldArchiveMetadata;
 import dev.ishaankot.worldarchive.catalog.BackupCatalog;
 import dev.ishaankot.worldarchive.catalog.FileBackupCatalog;
 import dev.ishaankot.worldarchive.config.WorldArchiveConfig;
+import dev.ishaankot.worldarchive.config.StoragePolicy;
 import dev.ishaankot.worldarchive.config.WorldConfig;
 import dev.ishaankot.worldarchive.config.WorldIdentityStore;
 import dev.ishaankot.worldarchive.core.BackupCoordinator;
@@ -34,6 +35,10 @@ import dev.ishaankot.worldarchive.ui.BackupWorldEntry;
 import dev.ishaankot.worldarchive.ui.BackupWorldSelection;
 import dev.ishaankot.worldarchive.ui.model.BackupBrowserCapabilities;
 import dev.ishaankot.worldarchive.ui.model.BackupRow;
+import dev.ishaankot.worldarchive.storage.management.CleanupPlan;
+import dev.ishaankot.worldarchive.storage.management.CleanupRequest;
+import dev.ishaankot.worldarchive.storage.management.CleanupResult;
+import dev.ishaankot.worldarchive.storage.management.StorageOverview;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Clock;
@@ -120,6 +125,8 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
     private final BackupCoordinator coordinatorView = new RuntimeBackupCoordinator(this);
 
     private final BackupImportService importsView = new RuntimeBackupImportService(this);
+
+    private final RuntimeStorageCoordinator storageView = new RuntimeStorageCoordinator(this);
 
     private final RuntimeNavigation navigation = new RuntimeNavigation(this);
 
@@ -526,6 +533,35 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
                 storageIssue.isEmpty() && folderAvailable,
                 storageIssue.or(() -> worldSettingsWarning()
                         .or(() -> backgroundWarning.get().or(state.selector()::warning)))));
+    }
+
+    @Override
+    public CompletionStage<StorageOverview> storageOverview(WorldId worldId) {
+        return storageView.overview(Objects.requireNonNull(worldId, "worldId"));
+    }
+
+    @Override
+    public CompletionStage<Boolean> claimStorageReviewNotice(WorldId worldId) {
+        return storageView.claimReviewNotice(Objects.requireNonNull(worldId, "worldId"));
+    }
+
+    @Override
+    public CompletionStage<CleanupPlan> prepareCleanup(WorldId worldId) {
+        return storageView.prepareCleanup(Objects.requireNonNull(worldId, "worldId"));
+    }
+
+    @Override
+    public CompletionStage<CleanupResult> applyCleanup(CleanupRequest request) {
+        return storageView.applyCleanup(Objects.requireNonNull(request, "request"));
+    }
+
+    @Override
+    public CompletionStage<Void> saveStoragePolicy(
+            WorldId worldId,
+            StoragePolicy policy) {
+        return storageView.savePolicy(
+                Objects.requireNonNull(worldId, "worldId"),
+                Objects.requireNonNull(policy, "policy"));
     }
 
     @Override

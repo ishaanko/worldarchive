@@ -11,7 +11,8 @@ public record WorldConfig(
         boolean enabled,
         Path path,
         Optional<String> remoteUrl,
-        Optional<Path> zipDestination) {
+        Optional<Path> zipDestination,
+        StoragePolicy storagePolicy) {
     public WorldConfig {
         Objects.requireNonNull(worldId, "worldId");
         path = Objects.requireNonNull(path, "path").toAbsolutePath().normalize();
@@ -19,6 +20,22 @@ public record WorldConfig(
                 .map(RemoteUrlPolicy::validatePlain);
         zipDestination = Objects.requireNonNull(zipDestination, "zipDestination")
                 .map(destination -> destination.toAbsolutePath().normalize());
+        Objects.requireNonNull(storagePolicy, "storagePolicy");
+    }
+
+    public WorldConfig(
+            WorldId worldId,
+            boolean enabled,
+            Path path,
+            Optional<String> remoteUrl,
+            Optional<Path> zipDestination) {
+        this(
+                worldId,
+                enabled,
+                path,
+                remoteUrl,
+                zipDestination,
+                StoragePolicy.defaults());
     }
 
     public WorldConfig(

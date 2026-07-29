@@ -5,6 +5,7 @@ import dev.ishaankot.worldarchive.core.CreateBackupRequest;
 import dev.ishaankot.worldarchive.core.SerializedBackupCoordinator;
 import dev.ishaankot.worldarchive.importing.FileBackupImportService;
 import dev.ishaankot.worldarchive.storage.git.WorldGitSnapshotStore;
+import dev.ishaankot.worldarchive.storage.management.ManagedStorageService;
 import java.util.Objects;
 
 /** One immutable, internally consistent runtime service graph. */
@@ -14,7 +15,8 @@ record RuntimeState(
         WorldGitSnapshotStore gitBackend,
         RuntimeDestinationSelector selector,
         SerializedBackupCoordinator coordinator,
-        FileBackupImportService imports) {
+        FileBackupImportService imports,
+        ManagedStorageService storage) {
     RuntimeState {
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(storagePaths, "storagePaths");
@@ -22,6 +24,7 @@ record RuntimeState(
         Objects.requireNonNull(selector, "selector");
         Objects.requireNonNull(coordinator, "coordinator");
         Objects.requireNonNull(imports, "imports");
+        Objects.requireNonNull(storage, "storage");
     }
 
     boolean enabledDestinations(CreateBackupRequest request) {
