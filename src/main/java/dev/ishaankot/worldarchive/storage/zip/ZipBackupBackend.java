@@ -1,5 +1,6 @@
 package dev.ishaankot.worldarchive.storage.zip;
 
+import dev.ishaankot.worldarchive.core.AsyncTasks;
 import dev.ishaankot.worldarchive.core.BackupBackend;
 import dev.ishaankot.worldarchive.core.BackupCapture;
 import dev.ishaankot.worldarchive.core.BackupOperation;
@@ -15,7 +16,6 @@ import java.nio.file.AccessDeniedException;
 import java.nio.file.FileSystemException;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
 
@@ -58,7 +58,7 @@ public final class ZipBackupBackend implements BackupBackend {
         Objects.requireNonNull(progressListener, "progressListener");
         OperationId operationId = OperationId.create();
         long totalBytes = capture.manifest().sourceByteCount();
-        return CompletableFuture.supplyAsync(() -> {
+        return AsyncTasks.supply(executor, () -> {
             report(progressListener, progress(
                     operationId, capture, OperationPhase.PREPARING, 0, totalBytes,
                     "Preparing ZIP backup"));
@@ -80,7 +80,7 @@ public final class ZipBackupBackend implements BackupBackend {
                         "ZIP backup failed"));
                 return DestinationResult.failed(DestinationType.ZIP, safeFailure(exception));
             }
-        }, executor);
+        });
     }
 
     private static OperationProgress progress(

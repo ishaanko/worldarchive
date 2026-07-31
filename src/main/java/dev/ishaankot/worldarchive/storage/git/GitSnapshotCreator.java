@@ -8,7 +8,6 @@ import dev.ishaankot.worldarchive.model.BackupManifest;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -85,12 +84,8 @@ final class GitSnapshotCreator {
         Path index = temporary.resolve("index");
         Map<String, String> environment = GitCommands.indexEnvironment(index, false);
         try {
-            String historyRef = repository.historyRef(manifest.worldId());
-            Optional<String> previousHistory = refs.resolve(historyRef);
-            Optional<String> parentCommit = previousHistory.isPresent()
-                    ? previousHistory
-                    : refs.newestCommit(manifest.worldId());
-            readParentTree(parentCommit, workTree, environment);
+            Optional<String> previousCommit = refs.newestCommit(manifest.worldId());
+            readPreviousTree(previousCommit, workTree, environment);
             String tree = stageTree(
                     workTree,
                     environment,
@@ -99,7 +94,6 @@ final class GitSnapshotCreator {
                     operationId);
             String commit = createCommit(
                     tree,
-                    parentCommit,
                     workTree,
                     environment,
                     snapshotManifest);
@@ -116,27 +110,23 @@ final class GitSnapshotCreator {
                     commit,
                     manifest.createdAt());
             verifier.verify(snapshot);
-            refs.publishSnapshotAndHistory(
-                    snapshotRef,
-                    historyRef,
-                    commit,
-                    previousHistory);
+            refs.updateWithRollback(snapshotRef, commit, Optional.empty());
             return snapshot;
         } finally {
             GitTemporaryDirectory.deleteUnlessLocked(temporary);
         }
     }
 
-    private void readParentTree(
-            Optional<String> parentCommit,
+    private void readPreviousTree(
+            Optional<String> previousCommit,
             Path workTree,
             Map<String, String> environment)
             throws IOException, InterruptedException, GitStorageException {
-        List<String> arguments = parentCommit
-                .map(parent -> List.of(
+        List<String> arguments = previousCommit
+                .map(previous -> List.of(
                         "--git-dir=" + settings.repository(),
                         "read-tree",
-                        parent))
+                        previous))
                 .orElseGet(() -> List.of(
                         "--git-dir=" + settings.repository(),
                         "read-tree",
@@ -180,7 +170,6 @@ final class GitSnapshotCreator {
 
     private String createCommit(
             String tree,
-            Optional<String> parentCommit,
             Path workTree,
             Map<String, String> indexEnvironment,
             GitSnapshotManifest snapshotManifest)
@@ -193,16 +182,11 @@ final class GitSnapshotCreator {
         commitEnvironment.put("GIT_COMMITTER_EMAIL", "worldarchive@localhost");
         commitEnvironment.put("GIT_AUTHOR_DATE", manifest.createdAt().toString());
         commitEnvironment.put("GIT_COMMITTER_DATE", manifest.createdAt().toString());
-        List<String> arguments = new ArrayList<>(List.of(
-                "--git-dir=" + settings.repository(),
-                "commit-tree",
-                tree));
-        parentCommit.ifPresent(parent -> {
-            arguments.add("-p");
-            arguments.add(parent);
-        });
         return GitCommands.objectId(commands.checked(
-                arguments,
+                List.of(
+                        "--git-dir=" + settings.repository(),
+                        "commit-tree",
+                        tree),
                 workTree,
                 commitEnvironment,
                 GitCommand.utf8Input(GitSnapshotVerifier.commitMessage(snapshotManifest)))

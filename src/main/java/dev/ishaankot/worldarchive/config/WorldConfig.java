@@ -17,7 +17,7 @@ public record WorldConfig(
         Objects.requireNonNull(worldId, "worldId");
         path = Objects.requireNonNull(path, "path").toAbsolutePath().normalize();
         remoteUrl = Objects.requireNonNull(remoteUrl, "remoteUrl")
-                .map(RemoteUrlPolicy::validatePlain);
+                .map(RemoteUrlPolicy::validateConfiguredPlain);
         zipDestination = Objects.requireNonNull(zipDestination, "zipDestination")
                 .map(destination -> destination.toAbsolutePath().normalize());
         Objects.requireNonNull(storagePolicy, "storagePolicy");

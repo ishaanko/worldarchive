@@ -34,6 +34,8 @@ final class CleanupConfirmationScreen extends Screen {
 
     private boolean busy;
 
+    private boolean active;
+
     private int page;
 
     CleanupConfirmationScreen(
@@ -57,6 +59,7 @@ final class CleanupConfirmationScreen extends Screen {
 
     @Override
     protected void init() {
+        active = true;
         int contentWidth = Math.min(440, Math.max(240, width - 20));
         int x = (width - contentWidth) / 2;
         addRenderableOnly(new StringWidget(
@@ -159,9 +162,12 @@ final class CleanupConfirmationScreen extends Screen {
         facade.applyCleanup(new CleanupRequest(plan.confirmationToken(), selected))
                 .whenComplete((result, throwable) -> minecraft.execute(() -> {
                     busy = false;
+                    if (!active) {
+                        return;
+                    }
                     if (throwable != null || result == null) {
                         minecraft.setScreenAndShow(new CleanupResultScreen(
-                                preview,
+                                returnTo,
                                 world,
                                 null,
                                 StorageScreen.failure(throwable)));
@@ -177,6 +183,19 @@ final class CleanupConfirmationScreen extends Screen {
 
     @Override
     public void onClose() {
-        minecraft.setScreenAndShow(preview);
+        if (!busy) {
+            minecraft.setScreenAndShow(preview);
+        }
+    }
+
+    @Override
+    public boolean shouldCloseOnEsc() {
+        return !busy;
+    }
+
+    @Override
+    public void removed() {
+        active = false;
+        super.removed();
     }
 }

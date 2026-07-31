@@ -71,19 +71,14 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
         Path staging = lease.path();
         try {
             TreeSnapshot before = TreeSnapshot.scan(source);
-            Set<String> contentProofRequired = new HashSet<>();
             createDirectories(staging, before.directories());
             List<WorldInventory.Entry> inventoryEntries = copyFiles(
                     staging,
                     before,
-                    contentProofRequired,
                     progressListener);
             TreeSnapshot after = TreeSnapshot.scan(source);
-            before.requireStableMatch(after, contentProofRequired);
-            proveTimestampDriftDidNotChangeContent(
-                    before,
-                    inventoryEntries,
-                    contentProofRequired);
+            before.requireStableMatch(after);
+            proveSourceContentMatchesCapture(before, inventoryEntries);
             WorldInventory inventory = WorldInventory.create(inventoryEntries);
             long changedFiles = previousInventory
                     .map(inventory::changedFilesSince)
@@ -114,7 +109,6 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
     private List<WorldInventory.Entry> copyFiles(
             Path staging,
             TreeSnapshot snapshot,
-            Set<String> contentProofRequired,
             CaptureProgressListener progressListener)
             throws IOException, InterruptedException {
         List<WorldInventory.Entry> inventory = new ArrayList<>(snapshot.files().size());
@@ -123,11 +117,9 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
         for (SourceFile file : snapshot.files()) {
             requireNotInterrupted();
             observer.beforeFileCopy(Path.of(file.portablePath()));
-            file.markTimestampDrift(contentProofRequired);
             Path target = PortableWorldPath.resolveInside(staging, file.portablePath());
             CopyResult copied = copyFile(file.path(), target);
             observer.afterFileCopy(Path.of(file.portablePath()));
-            file.markTimestampDrift(contentProofRequired);
             if (copied.size() != file.fingerprint().size()) {
                 throw new IOException(
                         "World file changed size while it was being captured: "
@@ -143,24 +135,16 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
         return inventory;
     }
 
-    private static void proveTimestampDriftDidNotChangeContent(
+    private static void proveSourceContentMatchesCapture(
             TreeSnapshot snapshot,
-            List<WorldInventory.Entry> inventory,
-            Set<String> contentProofRequired)
+            List<WorldInventory.Entry> inventory)
             throws IOException {
-        if (contentProofRequired.isEmpty()) {
-            return;
-        }
         Map<String, WorldInventory.Entry> capturedByPath = new HashMap<>();
         for (WorldInventory.Entry entry : inventory) {
             capturedByPath.put(entry.path(), entry);
         }
         for (SourceFile file : snapshot.files()) {
-            boolean requiresProof = contentProofRequired.contains(file.portablePath());
-            requiresProof |= file.hasTimestampDrift();
-            if (!requiresProof) {
-                continue;
-            }
+            file.requireStableAttributes();
             CopyResult current = hashFile(file.path());
             file.requireStableAttributes();
             WorldInventory.Entry captured = capturedByPath.get(file.portablePath());
@@ -296,10 +280,7 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
             return (int) portablePath.chars().filter(character -> character == '/').count() + 1;
         }
 
-        private void requireStableMatch(
-                TreeSnapshot current,
-                Set<String> contentProofRequired)
-                throws IOException {
+        private void requireStableMatch(TreeSnapshot current) throws IOException {
             if (byteCount != current.byteCount
                     || !directories.equals(current.directories)
                     || files.size() != current.files.size()) {
@@ -312,9 +293,6 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
                 if (!expected.hasSameStableFile(observed)) {
                     throw new IOException(
                             "World tree changed while its private capture was being created");
-                }
-                if (expected.fingerprint().hasTimestampDrift(observed.fingerprint())) {
-                    contentProofRequired.add(expected.portablePath());
                 }
             }
         }
@@ -461,13 +439,7 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
             Objects.requireNonNull(fingerprint, "fingerprint");
         }
 
-        private void markTimestampDrift(Set<String> contentProofRequired) throws IOException {
-            if (hasTimestampDrift()) {
-                contentProofRequired.add(portablePath);
-            }
-        }
-
-        private boolean hasTimestampDrift() throws IOException {
+        private void requireStableAttributes() throws IOException {
             BasicFileAttributes current = Files.readAttributes(
                     path,
                     BasicFileAttributes.class,
@@ -477,11 +449,6 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
             if (!fingerprint.hasSameStableAttributes(currentFingerprint)) {
                 throw changedFileException();
             }
-            return fingerprint.hasTimestampDrift(currentFingerprint);
-        }
-
-        private void requireStableAttributes() throws IOException {
-            hasTimestampDrift();
         }
 
         private boolean hasSameStableFile(SourceFile other) {
@@ -500,13 +467,11 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
     private record FileFingerprint(
             Object fileKey,
             long size,
-            FileTime lastModifiedTime,
             FileTime creationTime) {
         private FileFingerprint {
             if (size < 0) {
                 throw new IllegalArgumentException("Source fingerprint size is negative");
             }
-            Objects.requireNonNull(lastModifiedTime, "lastModifiedTime");
             Objects.requireNonNull(creationTime, "creationTime");
         }
 
@@ -514,7 +479,6 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
             return new FileFingerprint(
                     attributes.fileKey(),
                     attributes.size(),
-                    attributes.lastModifiedTime(),
                     identityCreationTime(attributes));
         }
 
@@ -524,9 +488,6 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
                     && creationTime.equals(other.creationTime);
         }
 
-        private boolean hasTimestampDrift(FileFingerprint other) {
-            return !lastModifiedTime.equals(other.lastModifiedTime);
-        }
     }
 
     /** Directory mtimes are deferred on Windows; identity and membership remain authoritative. */

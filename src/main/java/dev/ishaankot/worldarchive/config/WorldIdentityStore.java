@@ -14,7 +14,6 @@ import java.io.IOException;
 import java.math.BigDecimal;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.LinkOption;
@@ -127,7 +126,8 @@ public final class WorldIdentityStore {
             throw new IOException("World identity file is unexpectedly large");
         }
         try {
-            JsonElement parsed = JsonParser.parseString(Files.readString(identityFile, StandardCharsets.UTF_8));
+            JsonElement parsed = JsonParser.parseString(
+                    AtomicFiles.readUtf8(identityFile, MAXIMUM_IDENTITY_BYTES));
             if (!parsed.isJsonObject()) {
                 throw new IOException("World identity root must be a JSON object");
             }
@@ -150,7 +150,10 @@ public final class WorldIdentityStore {
         object.addProperty("schemaVersion", identity.schemaVersion());
         object.addProperty("worldId", identity.worldId().toString());
         identity.sourceBackupId().ifPresent(id -> object.addProperty("sourceBackupId", id.toString()));
-        AtomicFiles.writeUtf8(identityFile, GSON.toJson(object) + System.lineSeparator());
+        AtomicFiles.writeUtf8(
+                identityFile,
+                GSON.toJson(object) + System.lineSeparator(),
+                MAXIMUM_IDENTITY_BYTES);
     }
 
     private static void rejectSymlink(Path path, String description) throws IOException {

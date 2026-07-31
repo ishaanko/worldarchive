@@ -3,6 +3,7 @@ package dev.ishaankot.worldarchive.importing;
 import dev.ishaankot.worldarchive.catalog.BackupCatalog;
 import dev.ishaankot.worldarchive.catalog.BackupDeletionRegistry;
 import dev.ishaankot.worldarchive.catalog.CatalogMergeResult;
+import dev.ishaankot.worldarchive.core.AsyncTasks;
 import dev.ishaankot.worldarchive.model.BackupId;
 import dev.ishaankot.worldarchive.model.BackupManifest;
 import dev.ishaankot.worldarchive.model.BackupRecord;
@@ -19,6 +20,7 @@ import dev.ishaankot.worldarchive.storage.git.GitPreparedImport;
 import dev.ishaankot.worldarchive.storage.git.GitSnapshot;
 import dev.ishaankot.worldarchive.storage.git.WorldGitSnapshotStore;
 import dev.ishaankot.worldarchive.storage.zip.ZipBackupArtifact;
+import dev.ishaankot.worldarchive.storage.zip.ZipBackupStore;
 import dev.ishaankot.worldarchive.storage.zip.ZipBackupStoreResolver;
 import dev.ishaankot.worldarchive.storage.zip.ZipImportCandidate;
 import dev.ishaankot.worldarchive.storage.zip.ZipImportIssue;
@@ -26,7 +28,11 @@ import dev.ishaankot.worldarchive.storage.zip.ZipImportScan;
 import dev.ishaankot.worldarchive.storage.zip.ZipImportScanner;
 import java.io.IOException;
 import java.nio.file.Path;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -41,10 +47,15 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.function.Supplier;
 
 /** Durable preview-first implementation for ZIP/Git import and managed local rebuilds. */
 public final class FileBackupImportService implements BackupImportService, AutoCloseable {
+    static final Duration PREVIEW_LIFETIME = Duration.ofMinutes(15);
+
+    static final int MAXIMUM_PREPARED_PREVIEWS = 16;
+
     private final BackupCatalog catalog;
 
     private final ImportSourceRegistry sources;
@@ -59,7 +70,9 @@ public final class FileBackupImportService implements BackupImportService, AutoC
 
     private final Executor executor;
 
-    private final ConcurrentMap<UUID, PreparedPlan> prepared = new ConcurrentHashMap<>();
+    private final Clock clock;
+
+    private final ConcurrentMap<UUID, RetainedPlan> prepared = new ConcurrentHashMap<>();
 
     public FileBackupImportService(
             BackupCatalog catalog,
@@ -75,7 +88,8 @@ public final class FileBackupImportService implements BackupImportService, AutoC
                 git,
                 zipStores,
                 configuredWorlds,
-                executor);
+                executor,
+                Clock.systemUTC());
     }
 
     public FileBackupImportService(
@@ -86,6 +100,26 @@ public final class FileBackupImportService implements BackupImportService, AutoC
             ZipBackupStoreResolver zipStores,
             Supplier<Set<WorldId>> configuredWorlds,
             Executor executor) {
+        this(
+                catalog,
+                sources,
+                deletions,
+                git,
+                zipStores,
+                configuredWorlds,
+                executor,
+                Clock.systemUTC());
+    }
+
+    FileBackupImportService(
+            BackupCatalog catalog,
+            ImportSourceRegistry sources,
+            BackupDeletionRegistry deletions,
+            WorldGitSnapshotStore git,
+            ZipBackupStoreResolver zipStores,
+            Supplier<Set<WorldId>> configuredWorlds,
+            Executor executor,
+            Clock clock) {
         this.catalog = Objects.requireNonNull(catalog, "catalog");
         this.sources = Objects.requireNonNull(sources, "sources");
         this.deletions = Objects.requireNonNull(deletions, "deletions");
@@ -93,24 +127,25 @@ public final class FileBackupImportService implements BackupImportService, AutoC
         this.zipStores = Objects.requireNonNull(zipStores, "zipStores");
         this.configuredWorlds = Objects.requireNonNull(configuredWorlds, "configuredWorlds");
         this.executor = Objects.requireNonNull(executor, "executor");
+        this.clock = Objects.requireNonNull(clock, "clock");
     }
 
     @Override
     public CompletionStage<ImportPreview> previewZip(Path folder, ZipImportMode mode) {
         Path selected = Objects.requireNonNull(folder, "folder").toAbsolutePath().normalize();
         Objects.requireNonNull(mode, "mode");
-        return CompletableFuture.supplyAsync(() -> {
+        return AsyncTasks.supply(executor, () -> {
             try {
                 ZipImportScan scan = new ZipImportScanner().scan(selected);
                 UUID token = UUID.randomUUID();
                 ZipPlan plan = new ZipPlan(token, selected, mode, scan);
                 ImportPreview preview = zipPreview(plan);
-                prepared.put(token, plan);
+                retain(plan);
                 return preview;
             } catch (IOException exception) {
                 throw new CompletionException(exception);
             }
-        }, executor);
+        });
     }
 
     @Override
@@ -125,7 +160,7 @@ public final class FileBackupImportService implements BackupImportService, AutoC
             GitPlan plan = new GitPlan(token, hydration, connection, fetched);
             try {
                 ImportPreview preview = gitPreview(plan);
-                prepared.put(token, plan);
+                retain(plan);
                 return preview;
             } catch (IOException | RuntimeException exception) {
                 plan.close();
@@ -136,7 +171,7 @@ public final class FileBackupImportService implements BackupImportService, AutoC
 
     @Override
     public CompletionStage<ImportPreview> previewLocal() {
-        return CompletableFuture.supplyAsync(() -> {
+        return AsyncTasks.supply(executor, () -> {
             try {
                 UUID token = UUID.randomUUID();
                 LocalScan scan = scanLocal();
@@ -152,12 +187,12 @@ public final class FileBackupImportService implements BackupImportService, AutoC
                         items,
                         java.util.Collections.nCopies(
                                 scan.issues(), "A stored backup could not be read safely"));
-                prepared.put(token, plan);
+                retain(plan);
                 return preview;
             } catch (Exception exception) {
                 throw new CompletionException(exception);
             }
-        }, executor);
+        });
     }
 
     @Override
@@ -168,52 +203,99 @@ public final class FileBackupImportService implements BackupImportService, AutoC
     @Override
     public CompletionStage<ImportSummary> execute(UUID token, Set<BackupId> selected) {
         Objects.requireNonNull(token, "token");
-        PreparedPlan plan = prepared.remove(token);
+        PreparedPlan plan = claim(token);
         if (plan == null) {
             return CompletableFuture.failedFuture(
                     new IllegalArgumentException("Import preview is missing, expired, or already used"));
         }
-        return CompletableFuture.supplyAsync(() -> {
-            try (plan) {
-                Set<BackupId> chosen = selected == null
-                        ? plan.backupIds()
-                        : validateSelection(plan, selected);
-                return switch (plan) {
-                    case ZipPlan zip -> executeZip(zip, chosen);
-                    case GitPlan gitPlan -> executeGit(gitPlan, chosen);
-                    case LocalPlan local -> executeLocal(local, chosen);
-                };
-            } catch (Exception exception) {
-                throw new CompletionException(exception);
-            }
-        }, executor);
+        try {
+            return CompletableFuture.supplyAsync(() -> {
+                try (plan) {
+                    Set<BackupId> chosen = selected == null
+                            ? plan.backupIds()
+                            : validateSelection(plan, selected);
+                    return switch (plan) {
+                        case ZipPlan zip -> executeZip(zip, chosen);
+                        case GitPlan gitPlan -> executeGit(gitPlan, chosen);
+                        case LocalPlan local -> executeLocal(local, chosen);
+                    };
+                } catch (Exception exception) {
+                    throw new CompletionException(exception);
+                }
+            }, executor);
+        } catch (RejectedExecutionException exception) {
+            plan.close();
+            return CompletableFuture.failedFuture(exception);
+        }
     }
 
     @Override
     public CompletionStage<Void> discard(UUID token) {
         Objects.requireNonNull(token, "token");
-        PreparedPlan plan = prepared.remove(token);
-        if (plan != null) {
-            plan.close();
+        RetainedPlan retained = prepared.remove(token);
+        if (retained != null) {
+            retained.close();
         }
+        expirePrepared(clock.instant());
         return CompletableFuture.completedFuture(null);
     }
 
     @Override
     public CompletionStage<ImportSummary> rebuildLocal() {
-        return CompletableFuture.supplyAsync(() -> {
+        return AsyncTasks.supply(executor, () -> {
             try {
                 return rebuildLocalBlocking();
             } catch (Exception exception) {
                 throw new CompletionException(exception);
             }
-        }, executor);
+        });
     }
 
     @Override
-    public void close() {
-        prepared.values().forEach(PreparedPlan::close);
-        prepared.clear();
+    public synchronized void close() {
+        prepared.forEach((token, retained) -> {
+            if (prepared.remove(token, retained)) {
+                retained.close();
+            }
+        });
+    }
+
+    private synchronized void retain(PreparedPlan plan) {
+        Instant now = clock.instant();
+        expirePrepared(now);
+        RetainedPlan retained = new RetainedPlan(
+                plan,
+                now.plus(PREVIEW_LIFETIME));
+        if (prepared.putIfAbsent(plan.token(), retained) != null) {
+            plan.close();
+            throw new IllegalStateException("Import preview token is already retained");
+        }
+        while (prepared.size() > MAXIMUM_PREPARED_PREVIEWS) {
+            Map.Entry<UUID, RetainedPlan> oldest = prepared.entrySet().stream()
+                    .min(Comparator
+                            .comparing((Map.Entry<UUID, RetainedPlan> entry) ->
+                                    entry.getValue().expiresAt())
+                            .thenComparing(Map.Entry::getKey))
+                    .orElseThrow();
+            if (prepared.remove(oldest.getKey(), oldest.getValue())) {
+                oldest.getValue().close();
+            }
+        }
+    }
+
+    private PreparedPlan claim(UUID token) {
+        expirePrepared(clock.instant());
+        RetainedPlan retained = prepared.remove(token);
+        return retained == null ? null : retained.plan();
+    }
+
+    private void expirePrepared(Instant now) {
+        prepared.forEach((token, retained) -> {
+            if (!now.isBefore(retained.expiresAt())
+                    && prepared.remove(token, retained)) {
+                retained.close();
+            }
+        });
     }
 
     private ImportPreview zipPreview(ZipPlan plan) throws IOException {
@@ -223,11 +305,17 @@ public final class FileBackupImportService implements BackupImportService, AutoC
             DestinationResult destination = plan.mode() == ZipImportMode.COPY
                     ? DestinationResult.success(
                             DestinationType.ZIP,
-                            managedZipArtifactId(candidate.manifest(), candidate.archivePath()))
+                            zipPreviewArtifactId(
+                                    candidate.manifest(),
+                                    candidate.archivePath(),
+                                    plan.mode()))
                             .withVerification(VerificationStatus.VERIFIED)
                     : DestinationResult.externalSuccess(
                             DestinationType.ZIP,
-                            managedZipArtifactId(candidate.manifest(), candidate.archivePath()),
+                            zipPreviewArtifactId(
+                                    candidate.manifest(),
+                                    candidate.archivePath(),
+                                    plan.mode()),
                             previewSource,
                             VerificationStatus.VERIFIED,
                             SyncStatus.NOT_CONFIGURED);
@@ -369,7 +457,7 @@ public final class FileBackupImportService implements BackupImportService, AutoC
             dev.ishaankot.worldarchive.storage.zip.ZipBackupStore
                     .requireUnchangedImportCandidate(candidate);
         }
-        if (plan.mode() == ZipImportMode.LINK) {
+        if (plan.mode() == ZipImportMode.LINK && !candidates.isEmpty()) {
             for (ZipImportCandidate candidate : candidates) {
                 bindings.put(candidate.manifest().backupId(), new ImportArtifactBinding(
                         candidate.manifest().worldId(),
@@ -433,8 +521,10 @@ public final class FileBackupImportService implements BackupImportService, AutoC
                         candidate.commitId()));
             }
         }
-        sources.put(ImportSource.git(
-                sourceId, plan.fetched().remote(), fullDownload, bindings));
+        if (!bindings.isEmpty()) {
+            sources.put(ImportSource.git(
+                    sourceId, plan.fetched().remote(), fullDownload, bindings));
+        }
         for (GitImportCandidate candidate : candidates) {
             if (installs.get(candidate.manifest().backupId()) == GitImportInstallStatus.CONFLICT) {
                 summary.conflicts++;
@@ -623,6 +713,16 @@ public final class FileBackupImportService implements BackupImportService, AutoC
         return manifest.worldId() + "/" + archive.getFileName();
     }
 
+    static String zipPreviewArtifactId(
+            BackupManifest manifest,
+            Path archive,
+            ZipImportMode mode) {
+        Objects.requireNonNull(mode, "mode");
+        return mode == ZipImportMode.COPY
+                ? manifest.worldId() + "/" + ZipBackupStore.archiveFilename(manifest)
+                : managedZipArtifactId(manifest, archive);
+    }
+
     private static String relativeLocator(Path root, Path archive) throws IOException {
         Path relative = root.relativize(archive.toAbsolutePath().normalize());
         if (relative.toString().isBlank() || relative.startsWith("..")) {
@@ -643,6 +743,20 @@ public final class FileBackupImportService implements BackupImportService, AutoC
             String remote,
             GitHydrationMode hydration) {
         return ImportSourceId.derived(hydration + "\0" + remote);
+    }
+
+    private record RetainedPlan(
+            PreparedPlan plan,
+            Instant expiresAt) implements AutoCloseable {
+        private RetainedPlan {
+            Objects.requireNonNull(plan, "plan");
+            Objects.requireNonNull(expiresAt, "expiresAt");
+        }
+
+        @Override
+        public void close() {
+            plan.close();
+        }
     }
 
     private sealed interface PreparedPlan extends AutoCloseable permits ZipPlan, GitPlan, LocalPlan {

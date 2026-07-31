@@ -14,13 +14,10 @@ import java.nio.channels.FileChannel;
 import java.nio.channels.SeekableByteChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
-import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -42,24 +39,10 @@ import java.util.regex.Pattern;
  * enabled destination.</p>
  */
 public final class ZipBackupStore implements ZipBackupStoreResolver {
-    private static final String OPERATION_LOCK_NAME = ".worldarchive.lock";
+    static final String OPERATION_LOCK_NAME = ".worldarchive.lock";
 
     private static final ConcurrentMap<Path, ReentrantLock> PROCESS_LOCKS =
             new ConcurrentHashMap<>();
-
-    private static final DateTimeFormatter FILE_TIMESTAMP = DateTimeFormatter
-            .ofPattern("uuuu-MM-dd_HH-mm-ss'Z'")
-            .withZone(ZoneOffset.UTC);
-
-    private static final int MAXIMUM_FILENAME_SEGMENT_LENGTH = 64;
-
-    private static final String BACKUP_ID_PATTERN =
-            "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
-
-    private static final Pattern ARCHIVE_NAME = Pattern.compile(
-            "(?:[0-9]{8}T[0-9]{9}Z_"
-                    + "|[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}Z - [^\\r\\n/\\\\]+ - )"
-                    + "(" + BACKUP_ID_PATTERN + ")\\.zip");
 
     private static final Pattern CHECKSUM_LINE = Pattern.compile(
             "([0-9a-f]{64})  ([^\\r\\n]+)(?:\\r?\\n)?");
@@ -125,8 +108,7 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
         String checksumName = filename + ".sha256";
         String checksumPartialName = checksumName + ".partial";
 
-        ReentrantLock processLock = PROCESS_LOCKS.computeIfAbsent(
-                worldDestination, ignored -> new ReentrantLock());
+        ReentrantLock processLock = processLock(worldDestination);
         acquireProcessLock(processLock);
         try {
             return createLocked(
@@ -323,6 +305,13 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
         }
     }
 
+    static ReentrantLock processLock(Path worldDirectory) {
+        Path key = Objects.requireNonNull(worldDirectory, "worldDirectory")
+                .toAbsolutePath()
+                .normalize();
+        return PROCESS_LOCKS.computeIfAbsent(key, ignored -> new ReentrantLock());
+    }
+
     /** Lists only generated archives that have a complete, parseable checksum sibling. */
     public List<ZipBackupArtifact> listCompleteArchives() throws IOException {
         if (!Files.exists(root, LinkOption.NOFOLLOW_LINKS)) {
@@ -362,7 +351,7 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
     /** Verifies the sidecar checksum, archive structure, inventory, and every world file. */
     public ZipVerification verify(Path archivePath) {
         ZipVerificationState verification = new ZipVerificationState();
-        ManagedArchive managed;
+        ManagedZipArchive managed;
         try {
             managed = managedArchive(archivePath);
         } catch (IOException | RuntimeException exception) {
@@ -395,7 +384,7 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
     }
 
     private void verifyManagedArchive(
-            ManagedArchive managed,
+            ManagedZipArchive managed,
             ZipVerificationState verification) {
         try (ManagedDirectoryAccess directory = ManagedDirectoryAccess.open(
                 root, managed.archive().getParent())) {
@@ -418,7 +407,7 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
 
     private static void requireVerificationFiles(
             ManagedDirectoryAccess directory,
-            ManagedArchive managed,
+            ManagedZipArchive managed,
             Set<String> problems) {
         try {
             directory.requireRegularFile(
@@ -440,7 +429,7 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
 
     private static ChecksumSnapshot verificationChecksum(
             ManagedDirectoryAccess directory,
-            ManagedArchive managed,
+            ManagedZipArchive managed,
             Set<String> problems) {
         try {
             return new ChecksumSnapshot(
@@ -457,7 +446,7 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
 
     private static void verifyPrivateCopy(
             ManagedDirectoryAccess directory,
-            ManagedArchive managed,
+            ManagedZipArchive managed,
             ChecksumSnapshot checksum,
             ZipVerificationState verification) {
         try (ExactArchiveCopy archive = ExactArchiveCopy.capture(
@@ -476,7 +465,7 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
 
     private static void inspectPrivateCopy(
             ExactArchiveCopy archive,
-            ManagedArchive managed,
+            ManagedZipArchive managed,
             ZipVerificationState verification) {
         try {
             Inspection inspection = archive.inspect();
@@ -496,7 +485,7 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
 
     private static void verifyCopyUnchanged(
             ManagedDirectoryAccess directory,
-            ManagedArchive managed,
+            ManagedZipArchive managed,
             ExactArchiveCopy archive,
             ChecksumSnapshot checksum,
             Set<String> problems) {
@@ -529,7 +518,7 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
     public void materialize(Path archivePath, Path stagingDirectory) throws IOException {
         ZipArchiveExtractor.StagingDirectory staging =
                 ZipArchiveExtractor.openEmpty(stagingDirectory);
-        ManagedArchive managed = managedArchive(archivePath);
+        ManagedZipArchive managed = managedArchive(archivePath);
         try (ManagedDirectoryAccess directory = ManagedDirectoryAccess.open(
                 root, managed.archive().getParent())) {
             directory.requireRegularFile(
@@ -592,9 +581,8 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
 
     /** Deletes only the selected generated archive and its exact checksum sibling. */
     public boolean delete(Path archivePath) throws IOException {
-        ManagedArchive managed = managedArchive(archivePath);
-        ReentrantLock processLock = PROCESS_LOCKS.computeIfAbsent(
-                managed.archive().getParent(), ignored -> new ReentrantLock());
+        ManagedZipArchive managed = managedArchive(archivePath);
+        ReentrantLock processLock = processLock(managed.archive().getParent());
         acquireProcessLock(processLock);
         try {
             return deleteLocked(managed);
@@ -603,7 +591,7 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
         }
     }
 
-    private boolean deleteLocked(ManagedArchive managed) throws IOException {
+    private boolean deleteLocked(ManagedZipArchive managed) throws IOException {
         try (ManagedDirectoryAccess directory = ManagedDirectoryAccess.open(
                         root, managed.archive().getParent());
                 ManagedDirectoryAccess.LockedFile ignored =
@@ -650,7 +638,7 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
 
     public boolean delete(ZipBackupArtifact artifact) throws IOException {
         Objects.requireNonNull(artifact, "artifact");
-        ManagedArchive managed = managedArchive(artifact.archivePath());
+        ManagedZipArchive managed = managedArchive(artifact.archivePath());
         if (!managed.checksum().equals(artifact.checksumPath())
                 || !managed.worldId().equals(artifact.manifest().worldId())
                 || !managed.backupId().equals(artifact.manifest().backupId())) {
@@ -664,11 +652,11 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
             WorldId worldId,
             List<ZipBackupArtifact> artifacts) throws IOException {
         for (String archiveName : directory.listNames()) {
-            if (!ARCHIVE_NAME.matcher(archiveName).matches()) {
+            if (!ManagedZipArchive.matchesFilename(archiveName)) {
                 continue;
             }
             try {
-                ManagedArchive managed = managedArchive(directory.resolve(archiveName));
+                ManagedZipArchive managed = managedArchive(directory.resolve(archiveName));
                 if (!managed.worldId().equals(worldId)) {
                     continue;
                 }
@@ -837,77 +825,12 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
         }
     }
 
-    private static void requireAbsent(
-            ManagedDirectoryAccess destination,
-            String... names) throws IOException {
-        for (String name : names) {
-            if (destination.exists(name)) {
-                throw new FileAlreadyExistsException(destination.resolve(name).toString());
-            }
-        }
+    public static String archiveFilename(BackupManifest manifest) {
+        return ManagedZipArchive.filename(manifest);
     }
 
-    static String archiveFilename(BackupManifest manifest) {
-        String description = manifest.label().orElseGet(() -> switch (manifest.trigger()) {
-            case MANUAL -> "Manual";
-            case WORLD_EXIT -> "World Exit";
-            case SCHEDULED -> "Scheduled";
-        });
-        return FILE_TIMESTAMP.format(manifest.createdAt())
-                + " - " + filenameSegment(manifest.worldName(), "World")
-                + " - " + filenameSegment(description, "Backup")
-                + " - " + manifest.backupId() + ".zip";
-    }
-
-    private static String filenameSegment(String value, String fallback) {
-        String sanitized = value
-                .replaceAll("[<>:\"/\\\\|?*\\p{Cntrl}]", " ")
-                .replaceAll("\\s+", " ")
-                .strip()
-                .replaceAll("[. ]+$", "");
-        if (sanitized.isBlank()) {
-            return fallback;
-        }
-        if (sanitized.length() > MAXIMUM_FILENAME_SEGMENT_LENGTH) {
-            int end = MAXIMUM_FILENAME_SEGMENT_LENGTH;
-            if (Character.isHighSurrogate(sanitized.charAt(end - 1))
-                    && Character.isLowSurrogate(sanitized.charAt(end))) {
-                end--;
-            }
-            sanitized = sanitized.substring(0, end)
-                    .replaceAll("[. ]+$", "");
-        }
-        return sanitized.isBlank() ? fallback : sanitized;
-    }
-
-    private ManagedArchive managedArchive(Path archivePath) throws IOException {
-        ManagedPathGuard.requireDirectory(root, "ZIP destination contains an unsafe path component");
-        Path archive = Objects.requireNonNull(archivePath, "archivePath")
-                .toAbsolutePath()
-                .normalize();
-        Path parent = archive.getParent();
-        if (parent == null || parent.getParent() == null || !parent.getParent().equals(root)) {
-            throw new ZipBackupException("ZIP archive is outside the configured destination");
-        }
-        ManagedPathGuard.requireDirectory(
-                parent, "ZIP archive parent contains an unsafe path component");
-        WorldId worldId;
-        BackupId backupId;
-        try {
-            worldId = WorldId.parse(parent.getFileName().toString());
-            Matcher matcher = ARCHIVE_NAME.matcher(archive.getFileName().toString());
-            if (!matcher.matches()) {
-                throw new IllegalArgumentException("Archive filename does not match the managed format");
-            }
-            backupId = BackupId.parse(matcher.group(1));
-        } catch (IllegalArgumentException exception) {
-            throw new ZipBackupException("ZIP archive does not have a managed identity", exception);
-        }
-        return new ManagedArchive(
-                worldId,
-                backupId,
-                archive,
-                parent.resolve(archive.getFileName().toString() + ".sha256"));
+    private ManagedZipArchive managedArchive(Path archivePath) throws IOException {
+        return ManagedZipArchive.resolve(root, archivePath);
     }
 
     static String readChecksum(
@@ -963,20 +886,6 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
     static void requireNotInterrupted() throws InterruptedIOException {
         if (Thread.currentThread().isInterrupted()) {
             throw new InterruptedIOException("ZIP operation was interrupted");
-        }
-    }
-
-    private record ManagedArchive(
-            WorldId worldId,
-            BackupId backupId,
-            Path archive,
-            Path checksum) {
-        String archiveName() {
-            return archive.getFileName().toString();
-        }
-
-        String checksumName() {
-            return checksum.getFileName().toString();
         }
     }
 

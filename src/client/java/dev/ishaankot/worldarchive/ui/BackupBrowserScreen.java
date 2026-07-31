@@ -348,7 +348,12 @@ public final class BackupBrowserScreen extends Screen {
                 selection);
 
         addActionRow(
-                List.of(BackupAction.CREATE, BackupAction.RESTORE, BackupAction.DELETE, BackupAction.SYNC),
+                List.of(
+                        BackupAction.CREATE,
+                        BackupAction.RESTORE,
+                        BackupAction.DELETE,
+                        BackupAction.SYNC,
+                        BackupAction.VERIFY),
                 availability,
                 x,
                 contentWidth,

@@ -13,6 +13,7 @@ import dev.ishaankot.worldarchive.core.CreateBackupRequest;
 import dev.ishaankot.worldarchive.core.FileSystemBackupCaptureFactory;
 import dev.ishaankot.worldarchive.core.FileWorldInventoryStore;
 import dev.ishaankot.worldarchive.core.LockingWorldOperationGate;
+import dev.ishaankot.worldarchive.core.OperationId;
 import dev.ishaankot.worldarchive.core.OperationProgress;
 import dev.ishaankot.worldarchive.core.PreparedBackup;
 import dev.ishaankot.worldarchive.core.ProgressListener;
@@ -49,7 +50,6 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Callable;
-import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
@@ -60,16 +60,12 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
-import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.gui.components.toasts.SystemToast;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.server.IntegratedServer;
-import net.minecraft.network.chat.Component;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -86,8 +82,6 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
     private final Path storageRoot;
 
     private final BackupCatalog catalog;
-
-    private final RuntimeNoticeStore noticeStore;
 
     private final FileWorldInventoryStore inventoryStore;
 
@@ -120,8 +114,6 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
     private final RuntimeActionContextRegistry actionContexts =
             new RuntimeActionContextRegistry();
 
-    private final Set<CompletableFuture<BackupResult>> exitWork = ConcurrentHashMap.newKeySet();
-
     private final BackupCoordinator coordinatorView = new RuntimeBackupCoordinator(this);
 
     private final BackupImportService importsView = new RuntimeBackupImportService(this);
@@ -132,15 +124,9 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
 
     private final AtomicBoolean closed = new AtomicBoolean();
 
-    private final AtomicReference<Optional<String>> backgroundWarning =
-            new AtomicReference<>(Optional.empty());
+    private final RuntimeBackgroundBackupMonitor backgroundBackups;
 
     private final Set<WorldId> worldSettingsFailures = ConcurrentHashMap.newKeySet();
-
-    private final AtomicReference<Optional<String>> retainedStartupWarning =
-            new AtomicReference<>(Optional.empty());
-
-    private final AtomicBoolean retainedWarningShown = new AtomicBoolean();
 
     private final Object stateLock = new Object();
 
@@ -151,13 +137,11 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
                 .toAbsolutePath()
                 .normalize()
                 .resolve("worldarchive");
-        this.noticeStore = new RuntimeNoticeStore(
-                storageRoot.resolve("last-background-warning.txt"));
-        try {
-            retainedStartupWarning.set(noticeStore.load());
-        } catch (IOException exception) {
-            LOGGER.warn("Stored background backup notice could not be loaded");
-        }
+        this.backgroundBackups = new RuntimeBackgroundBackupMonitor(
+                minecraft,
+                storageRoot.resolve("last-background-warning.txt"),
+                closed::get,
+                this::logFailure);
         this.catalog = new FileBackupCatalog(storageRoot.resolve("catalog.json"));
         this.inventoryStore = new FileWorldInventoryStore(storageRoot.resolve("inventories"));
         this.captureFactory = new FileSystemBackupCaptureFactory(storageRoot.resolve("capture-temp"));
@@ -290,40 +274,7 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
 
     /** Waits only for exit-triggered work and never waits beyond the supplied duration. */
     public boolean awaitExitWork(Duration timeout) {
-        Objects.requireNonNull(timeout, "timeout");
-        if (timeout.isNegative()) {
-            throw new IllegalArgumentException("timeout must not be negative");
-        }
-        long remainingNanos = timeout.toNanos();
-        long deadline = System.nanoTime() + remainingNanos;
-        boolean interrupted = false;
-        try {
-            while (!exitWork.isEmpty()) {
-                CompletableFuture<?>[] work = exitWork.toArray(CompletableFuture[]::new);
-                if (work.length == 0) {
-                    return true;
-                }
-                try {
-                    CompletableFuture.allOf(work).get(remainingNanos, TimeUnit.NANOSECONDS);
-                } catch (ExecutionException | CancellationException exception) {
-                    // A completed failure still counts as settled exit work.
-                } catch (TimeoutException exception) {
-                    return false;
-                } catch (InterruptedException exception) {
-                    interrupted = true;
-                    return false;
-                }
-                remainingNanos = deadline - System.nanoTime();
-                if (remainingNanos <= 0 && !exitWork.isEmpty()) {
-                    return false;
-                }
-            }
-            return true;
-        } finally {
-            if (interrupted) {
-                Thread.currentThread().interrupt();
-            }
-        }
+        return backgroundBackups.awaitExitWork(timeout);
     }
 
     /** Performs bounded exit draining, rejects new work, and releases runtime-owned workers. */
@@ -333,6 +284,7 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
         }
         lifecycle.close();
         actionContexts.clear();
+        storageView.close();
         if (!awaitExitWork(CLIENT_SHUTDOWN_WAIT)) {
             observeExitResult(
                     null,
@@ -532,7 +484,8 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
                 config.git().enabled() && state.gitBackend().remoteConfigured(world.worldId()),
                 storageIssue.isEmpty() && folderAvailable,
                 storageIssue.or(() -> worldSettingsWarning()
-                        .or(() -> backgroundWarning.get().or(state.selector()::warning)))));
+                        .or(() -> backgroundBackups.warning()
+                                .or(state.selector()::warning)))));
     }
 
     @Override
@@ -553,6 +506,12 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
     @Override
     public CompletionStage<CleanupResult> applyCleanup(CleanupRequest request) {
         return storageView.applyCleanup(Objects.requireNonNull(request, "request"));
+    }
+
+    @Override
+    public CompletionStage<Void> discardCleanup(OperationId confirmationToken) {
+        return storageView.discardCleanup(
+                Objects.requireNonNull(confirmationToken, "confirmationToken"));
     }
 
     @Override
@@ -760,97 +719,23 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
     }
 
     void trackExit(CompletableFuture<BackupResult> result) {
-        exitWork.add(result);
-        result.whenComplete((value, throwable) -> {
-            observeExitResult(value, throwable);
-            exitWork.remove(result);
-        });
+        backgroundBackups.trackExit(result);
     }
 
     void observeScheduledResult(BackupResult result, Throwable throwable) {
-        Optional<String> warning = BackgroundBackupWarnings.scheduled(result, throwable);
-        if (warning.isEmpty()) {
-            backgroundWarning.set(Optional.empty());
-            return;
-        }
-        backgroundWarning.set(warning);
-        if (!closed.get()) {
-            minecraft.execute(() -> {
-                if (!closed.get()) {
-                    showClientWarning(warning.orElseThrow());
-                }
-            });
-        }
+        backgroundBackups.observeScheduledResult(result, throwable);
     }
 
     void observeExitResult(BackupResult result, Throwable throwable) {
-        if (throwable != null) {
-            logFailure("World-exit backup did not complete", throwable);
-        } else if (result == null) {
-            LOGGER.warn("World-exit backup completed without a result");
-        }
-        Optional<String> warning = BackgroundBackupWarnings.worldExit(result, throwable);
-        BackgroundBackupWarnings.ExitNotice notice =
-                BackgroundBackupWarnings.worldExitNotice(result, throwable);
-        try {
-            if (warning.isPresent()) {
-                noticeStore.retain(warning.orElseThrow());
-            } else {
-                noticeStore.clear();
-            }
-        } catch (IOException exception) {
-            logFailure("World-exit backup notice could not be stored", exception);
-        }
-        backgroundWarning.set(warning);
-        enqueueWorldExitNotice(notice);
+        backgroundBackups.observeExitResult(result, throwable);
     }
 
     void showRetainedBackgroundWarning() {
-        if (closed.get()) {
-            return;
-        }
-        Optional<String> retained = retainedStartupWarning.get();
-        if (retained.isEmpty() || !retainedWarningShown.compareAndSet(false, true)) {
-            return;
-        }
-        showClientWarning(retained.orElseThrow());
-        retainedStartupWarning.compareAndSet(retained, Optional.empty());
-        try {
-            noticeStore.clear();
-        } catch (IOException exception) {
-            logFailure("Background backup notice could not be cleared", exception);
-        }
-    }
-
-    private void showClientWarning(String message) {
-        minecraft.gui.chatListener().handleSystemMessage(
-                Component.literal("WorldArchive: " + message)
-                        .withStyle(ChatFormatting.YELLOW),
-                false);
-    }
-
-    private void showWorldExitNotice(BackgroundBackupWarnings.ExitNotice notice) {
-        ChatFormatting color = switch (notice.severity()) {
-            case SUCCESS -> ChatFormatting.GREEN;
-            case WARNING -> ChatFormatting.YELLOW;
-            case ERROR -> ChatFormatting.RED;
-        };
-        SystemToast.addOrUpdate(
-                minecraft.gui.toastManager(),
-                SystemToast.SystemToastId.WORLD_BACKUP,
-                Component.literal("WorldArchive").withStyle(ChatFormatting.BOLD),
-                Component.literal(notice.message()).withStyle(color));
+        backgroundBackups.showRetainedWarning();
     }
 
     void enqueueWorldExitNotice(BackgroundBackupWarnings.ExitNotice notice) {
-        if (closed.get()) {
-            return;
-        }
-        minecraft.execute(() -> {
-            if (!closed.get()) {
-                showWorldExitNotice(notice);
-            }
-        });
+        backgroundBackups.enqueueWorldExitNotice(notice);
     }
 
     RuntimeState requireCurrentState() {

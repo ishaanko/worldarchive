@@ -131,19 +131,23 @@ final class CleanupPreviewScreen extends Screen {
                 .filter(item -> selected.contains(item.backupId()))
                 .mapToLong(CleanupItem::estimatedReclaimableBytes)
                 .sum();
+        boolean selectedTargetReachable =
+                Math.max(0, plan.currentBytes() - estimate) <= plan.targetBytes();
         String total = selected.size() + " backup(s) selected · about "
                 + StorageScreen.bytes(estimate)
                 + " reclaimable";
-        if (!plan.targetReachable()) {
-            total += " · protected history keeps usage above target";
+        if (!selectedTargetReachable) {
+            total += plan.targetReachable()
+                    ? " · the selected copies keep usage above target"
+                    : " · protected history keeps usage above target";
         }
         addRenderableOnly(new StringWidget(
                 x,
                 height - 52,
                 contentWidth,
                 16,
-                Component.literal(total).withStyle(
-                        plan.targetReachable()
+                        Component.literal(total).withStyle(
+                        selectedTargetReachable
                                 ? ChatFormatting.GRAY
                                 : ChatFormatting.YELLOW),
                 font));
@@ -209,6 +213,7 @@ final class CleanupPreviewScreen extends Screen {
 
     @Override
     public void onClose() {
+        facade.discardCleanup(plan.confirmationToken());
         minecraft.setScreenAndShow(parent);
     }
 }

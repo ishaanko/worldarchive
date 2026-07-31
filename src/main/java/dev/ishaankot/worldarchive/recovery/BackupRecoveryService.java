@@ -250,9 +250,19 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
                     0, 0, "Preparing restored world copy"));
             RestoreWorkspace workspace = openRestoreWorkspace(
                     request, progressListener, operationId, current);
-            List<DestinationCandidate> candidates = verifiedRestoreSources(
-                    current, progressListener, operationId, cancellation);
-            for (DestinationCandidate candidate : candidates) {
+            List<DestinationCandidate> candidates = restorableCandidates(current);
+            for (int index = 0; index < candidates.size(); index++) {
+                DestinationCandidate candidate = candidates.get(index);
+                if (!verifyRestoreSource(
+                        current,
+                        candidate,
+                        progressListener,
+                        operationId,
+                        cancellation,
+                        index,
+                        candidates.size())) {
+                    continue;
+                }
                 Optional<RestoreBackupResult> restored = restoreFromCandidate(
                         request,
                         current,
@@ -266,7 +276,7 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
                 }
             }
             reportFailure(progressListener, operationId, current, BackupOperation.RESTORE,
-                    "All restore sources failed during materialization");
+                    "No valid restore source is available");
             throw new BackupRecoveryException("No valid destination can restore this backup");
         }
     }
@@ -286,38 +296,30 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
         }
     }
 
-    private List<DestinationCandidate> verifiedRestoreSources(
+    private boolean verifyRestoreSource(
             BackupRecord record,
+            DestinationCandidate candidate,
             ProgressListener progressListener,
             OperationId operationId,
-            OperationCancellation cancellation) throws InterruptedException {
-        List<DestinationCandidate> candidates = restorableCandidates(record);
-        List<DestinationCandidate> verified = new ArrayList<>();
-        for (DestinationCandidate candidate : candidates) {
+            OperationCancellation cancellation,
+            int completed,
+            int total) throws InterruptedException {
+        cancellation.checkpoint();
+        report(progressListener, progress(
+                operationId, record, BackupOperation.RESTORE, OperationPhase.VERIFYING,
+                completed, total, "Verifying restore source"));
+        try {
+            VerificationOutcome outcome = candidate.adapter().verifyForRestore(
+                    record, candidate.result());
             cancellation.checkpoint();
-            report(progressListener, progress(
-                    operationId, record, BackupOperation.RESTORE, OperationPhase.VERIFYING,
-                    verified.size(), candidates.size(), "Verifying restore source"));
-            try {
-                VerificationOutcome outcome = candidate.adapter().verifyForRestore(
-                        record, candidate.result());
-                if (outcome.valid()) {
-                    verified.add(candidate);
-                }
-                cancellation.checkpoint();
-            } catch (InterruptedException exception) {
-                Thread.currentThread().interrupt();
-                throw exception;
-            } catch (Exception exception) {
-                // Another independently stored destination may still be valid.
-            }
+            return outcome.valid();
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw exception;
+        } catch (Exception exception) {
+            // Another independently stored destination may still be valid.
+            return false;
         }
-        if (verified.isEmpty()) {
-            reportFailure(progressListener, operationId, record, BackupOperation.RESTORE,
-                    "No valid restore source is available");
-            throw new BackupRecoveryException("No valid destination can restore this backup");
-        }
-        return verified;
     }
 
     private Optional<RestoreBackupResult> restoreFromCandidate(
@@ -458,8 +460,8 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
         DeleteConfirmation confirmation;
         do {
             token = OperationId.create();
-            confirmation = new DeleteConfirmation(
-                    backupId, record.manifest().worldId(), now.plus(confirmationLifetime));
+            confirmation = DeleteConfirmation.create(
+                    record, now.plus(confirmationLifetime));
         } while (confirmations.putIfAbsent(token, confirmation) != null);
         long artifacts = presentDestinations(record).size();
         String description = "Delete backup " + backupId + " for "
@@ -480,14 +482,11 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
             throw new BackupRecoveryException("Delete confirmation is invalid, expired, or already used");
         }
         BackupRecord record = requireRecord(request.backupId());
-        if (!record.manifest().worldId().equals(confirmation.worldId())) {
-            throw new BackupRecoveryException("Delete confirmation does not match the backup world");
-        }
         boolean deletionIntentRecorded = false;
         try (WorldOperationGate.Permit ignored = operationGate.enter(record.manifest().worldId())) {
             cancellation.checkpoint();
             BackupRecord current = requireRecord(request.backupId());
-            requireSameManifest(record, current);
+            confirmation.requireMatches(current);
             deletions.record(current.manifest().backupId());
             deletionIntentRecorded = true;
             OperationId operationId = OperationId.create();
@@ -517,12 +516,10 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
                     }
                 }
                 if (removed) {
-                    attempts.add(new DestinationResult(
-                            destination.destination(),
+                    attempts.add(withState(
+                            destination,
                             DestinationStatus.SUCCESS,
-                            destination.artifactId(),
                             Optional.empty(),
-                            destination.verificationStatus(),
                             destination.syncStatus()));
                 } else {
                     attempts.add(DestinationResult.failed(
@@ -824,12 +821,10 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
             }
         });
         return switch (synchronizedResult.syncStatus()) {
-            case SYNCED, NOT_CONFIGURED -> new DestinationResult(
-                    DestinationType.GIT,
+            case SYNCED, NOT_CONFIGURED -> withState(
+                    local,
                     DestinationStatus.SUCCESS,
-                    local.artifactId(),
                     Optional.empty(),
-                    local.verificationStatus(),
                     synchronizedResult.syncStatus());
             case NOT_SYNCED, PENDING, FAILED -> pendingSync(
                     local,
@@ -842,13 +837,27 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
             DestinationResult local,
             String message,
             SyncStatus status) {
-        return new DestinationResult(
-                DestinationType.GIT,
+        return withState(
+                local,
                 DestinationStatus.PENDING_SYNC,
-                local.artifactId(),
                 Optional.of(message),
-                local.verificationStatus(),
                 status);
+    }
+
+    private static DestinationResult withState(
+            DestinationResult original,
+            DestinationStatus status,
+            Optional<String> message,
+            SyncStatus syncStatus) {
+        return new DestinationResult(
+                original.destination(),
+                status,
+                original.artifactId(),
+                message,
+                original.verificationStatus(),
+                syncStatus,
+                original.ownership(),
+                original.importSourceId());
     }
 
     private static OperationProgress progress(
@@ -970,12 +979,6 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
             return new DestinationKey(
                     result.destination(), result.artifactId().orElse("<none>"));
         }
-    }
-
-    private record DeleteConfirmation(
-            BackupId backupId,
-            WorldId worldId,
-            Instant expiresAt) {
     }
 
 }

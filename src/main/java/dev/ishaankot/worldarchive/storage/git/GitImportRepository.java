@@ -276,14 +276,23 @@ final class GitImportRepository {
             List<GitImportCandidate> candidates,
             Map<BackupId, GitImportInstallStatus> outcomes)
             throws IOException, InterruptedException, GitStorageException {
-        Optional<GitImportCandidate> newest = candidates.stream()
-                .filter(candidate -> outcomes.get(candidate.manifest().backupId())
-                        != GitImportInstallStatus.CONFLICT)
-                .max(java.util.Comparator.comparing(candidate -> candidate.manifest().createdAt()));
-        if (newest.isEmpty()) {
+        GitImportCandidate newestLegacy = null;
+        for (GitImportCandidate candidate : candidates) {
+            if (outcomes.get(candidate.manifest().backupId())
+                            == GitImportInstallStatus.CONFLICT
+                    || !hasParent(candidate.commitId())) {
+                continue;
+            }
+            if (newestLegacy == null
+                    || candidate.manifest().createdAt().isAfter(
+                            newestLegacy.manifest().createdAt())) {
+                newestLegacy = candidate;
+            }
+        }
+        if (newestLegacy == null) {
             return;
         }
-        GitImportCandidate candidate = newest.orElseThrow();
+        GitImportCandidate candidate = newestLegacy;
         String historyRef = repository.historyRef(candidate.manifest().worldId());
         Optional<String> current = refs.resolve(historyRef);
         if (current.equals(Optional.of(candidate.commitId()))) {
@@ -292,6 +301,21 @@ final class GitImportRepository {
         if (current.isEmpty() || isAncestor(current.orElseThrow(), candidate.commitId())) {
             refs.updateWithRollback(historyRef, candidate.commitId(), current);
         }
+    }
+
+    private boolean hasParent(String commit)
+            throws IOException, InterruptedException, GitStorageException {
+        GitCommandResult result = commands.checked(
+                List.of(
+                        "--git-dir=" + settings.repository(),
+                        "rev-list",
+                        "--parents",
+                        "--max-count=1",
+                        commit),
+                settings.repository(),
+                Map.of(),
+                new byte[0]);
+        return result.standardOutput().trim().split("\\s+").length > 1;
     }
 
     private boolean isAncestor(String ancestor, String descendant)

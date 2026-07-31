@@ -50,6 +50,10 @@ final class ZipArchiveExtractor {
             StagingDirectory staging,
             ZipInventory inventory,
             ZipStoreHooks hooks) throws IOException {
+        if (inventory.byteCount() > Files.getFileStore(staging.path()).getUsableSpace()) {
+            throw new ZipBackupException(
+                    "ZIP restore staging storage has insufficient free space");
+        }
         Map<String, ZipInventoryEntry> expected = new HashMap<>();
         for (ZipInventoryEntry file : inventory.files()) {
             expected.put(PortableZipPath.collisionKey(file.path(), false), file);

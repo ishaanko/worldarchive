@@ -112,8 +112,19 @@ final class ZipRecoveryDestination implements RecoveryDestination {
                     .unlink(destination.importSourceId().orElseThrow(), record.manifest().backupId());
             return true;
         }
-        store(record).delete(archivePath(record, destination));
-        // Successful exact-path inspection also reconciles an already-absent archive and sidecar.
+        ZipBackupStore store = store(record);
+        Path catalogArchive = archivePath(record, destination);
+        boolean removed = store.delete(catalogArchive);
+        if (!removed) {
+            Path canonicalArchive = store.root()
+                    .resolve(record.manifest().worldId().toString())
+                    .resolve(ZipBackupStore.archiveFilename(record.manifest()))
+                    .normalize();
+            if (!canonicalArchive.equals(catalogArchive)) {
+                store.delete(canonicalArchive);
+            }
+        }
+        // A safe catalog or canonical path also reconciles an already-absent managed pair.
         return true;
     }
 

@@ -1,12 +1,37 @@
-def repositoryFilePaths = providers.exec {
-    commandLine 'git', 'ls-files', '--cached', '--others', '--exclude-standard', '-z'
-}.standardOutput.asText.map { output ->
-    output
-        .split('\\u0000')
-        .findAll { !it.isBlank() }
+def repositoryDirectory = layout.projectDirectory
+def repositoryFilePaths = providers.provider {
+    if (repositoryDirectory.file('.git').asFile.exists()) {
+        return providers.exec {
+            commandLine 'git', 'ls-files', '--cached', '--others', '--exclude-standard', '-z'
+        }.standardOutput.asText.get()
+            .split('\\u0000')
+            .findAll { !it.isBlank() }
+            .sort()
+    }
+    def excludedDirectories = [
+        '.agent/**',
+        '.gradle/**',
+        '.temp/**',
+        '.worktrees/**',
+        'build/**',
+        'classes/**',
+        'logs/**',
+        'out/**',
+        'run/**'
+    ]
+    return repositoryDirectory.asFileTree.matching {
+        exclude excludedDirectories
+        exclude 'AGENTS.md'
+    }.files
+        .findAll { it.isFile() }
+        .collect {
+            repositoryDirectory.asFile.toPath()
+                .relativize(it.toPath())
+                .toString()
+                .replace(File.separator, '/')
+        }
         .sort()
 }
-def repositoryDirectory = layout.projectDirectory
 
 static boolean isTextFile(String path) {
     def extensions = [

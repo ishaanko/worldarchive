@@ -15,6 +15,10 @@ final class RuntimeActionContextRegistry {
         return value;
     }
 
+    void allowSourceActions(BackupWorldContext context) {
+        actionOnly.remove(Objects.requireNonNull(context, "context"));
+    }
+
     boolean sourceActionsAllowed(BackupWorldContext context) {
         return !actionOnly.contains(Objects.requireNonNull(context, "context"));
     }

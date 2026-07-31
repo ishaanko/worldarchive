@@ -1,6 +1,9 @@
 package dev.ishaankot.worldarchive.model;
 
+import java.nio.charset.StandardCharsets;
+import java.time.DateTimeException;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.regex.Pattern;
@@ -33,7 +36,7 @@ public record BackupManifest(
         label = Objects.requireNonNull(label, "label")
                 .map(SensitiveDataRedactor::redact)
                 .map(value -> requireText(value, "label", 128));
-        Objects.requireNonNull(createdAt, "createdAt");
+        createdAt = requirePortableCreatedAt(createdAt);
         Objects.requireNonNull(trigger, "trigger");
         if (sourceFileCount < 0) {
             throw new IllegalArgumentException("sourceFileCount must not be negative");
@@ -135,6 +138,9 @@ public record BackupManifest(
         if (value.chars().anyMatch(character -> Character.isISOControl(character))) {
             throw new IllegalArgumentException(name + " must not contain control characters");
         }
+        if (!StandardCharsets.UTF_8.newEncoder().canEncode(value)) {
+            throw new IllegalArgumentException(name + " must contain valid Unicode text");
+        }
         return value;
     }
 
@@ -144,5 +150,21 @@ public record BackupManifest(
             throw new IllegalArgumentException(name + " must be 64 lowercase hexadecimal characters");
         }
         return value;
+    }
+
+    private static Instant requirePortableCreatedAt(Instant value) {
+        Objects.requireNonNull(value, "createdAt");
+        try {
+            int year = value.atZone(ZoneOffset.UTC).getYear();
+            if (year < 0 || year > 9_999) {
+                throw new IllegalArgumentException(
+                        "createdAt must use a four-digit UTC year");
+            }
+            return value;
+        } catch (DateTimeException exception) {
+            throw new IllegalArgumentException(
+                    "createdAt is outside the portable date range",
+                    exception);
+        }
     }
 }

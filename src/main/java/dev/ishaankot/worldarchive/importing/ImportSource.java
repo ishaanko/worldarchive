@@ -77,11 +77,11 @@ public record ImportSource(
     private static String validateLocation(ImportSourceMode mode, String location) {
         Objects.requireNonNull(location, "location");
         if (mode == ImportSourceMode.ZIP_LINK) {
-            Path path = Path.of(location).toAbsolutePath().normalize();
+            Path path = Path.of(location);
             if (!path.isAbsolute()) {
                 throw new IllegalArgumentException("Linked ZIP source must be absolute");
             }
-            return path.toString();
+            return path.normalize().toString();
         }
         return RemoteUrlPolicy.validatePlain(location);
     }

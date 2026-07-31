@@ -58,6 +58,8 @@ public final class GitBackupBackend implements GitSnapshotStore {
 
     private final GitRefStore refs;
 
+    private final GitRemoteSnapshotStore remoteSnapshots;
+
     private final GitSnapshotCreator snapshotCreator;
 
     private final GitAsyncExecutor async;
@@ -107,6 +109,7 @@ public final class GitBackupBackend implements GitSnapshotStore {
         this.verifier = new GitSnapshotVerifier(settings, commands);
         this.repository = new GitRepositoryManager(settings, commands);
         this.refs = new GitRefStore(settings, commands, repository);
+        this.remoteSnapshots = new GitRemoteSnapshotStore(settings, repository, refs);
         this.snapshotCreator = new GitSnapshotCreator(
                 settings,
                 commands,
@@ -219,6 +222,16 @@ public final class GitBackupBackend implements GitSnapshotStore {
         Objects.requireNonNull(worldId, "worldId");
         Objects.requireNonNull(backupId, "backupId");
         return submit(() -> withRepositoryLock(() -> deleteSnapshotBlocking(worldId, backupId)));
+    }
+
+    /** Proves that the current configured remote has the exact local snapshot commit. */
+    public CompletionStage<Boolean> currentRemoteContainsSnapshot(
+            WorldId worldId,
+            BackupId backupId) {
+        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(backupId, "backupId");
+        return submit(() -> withRepositoryLock(
+                () -> remoteSnapshots.containsExactLocalSnapshot(worldId, backupId)));
     }
 
     @Override
@@ -591,7 +604,7 @@ public final class GitBackupBackend implements GitSnapshotStore {
         repository.configureRemote();
         String snapshotRef = GitSnapshot.refName(worldId, backupId);
         Optional<Instant> committedAt = expectedManifest.map(BackupManifest::createdAt);
-        RemoteSnapshotRef remoteSnapshot = remoteSnapshotRefs(
+        RemoteSnapshotRef remoteSnapshot = remoteSnapshots.find(
                         worldId,
                         backupId,
                         committedAt)
@@ -675,7 +688,7 @@ public final class GitBackupBackend implements GitSnapshotStore {
         Optional<String> current = refs.resolve(refName);
         if (current.isEmpty()) {
             if (settings.remoteUrl().isPresent()
-                    && !remoteSnapshotRefs(worldId, backupId, Optional.empty()).isEmpty()) {
+                    && !remoteSnapshots.find(worldId, backupId, Optional.empty()).isEmpty()) {
                 throw new GitStorageException(
                         "Configured Git remote still contains the snapshot but its exact local commit is unavailable");
             }
@@ -683,7 +696,7 @@ public final class GitBackupBackend implements GitSnapshotStore {
         }
         if (settings.remoteUrl().isPresent()) {
             GitSnapshot snapshot = refs.snapshotForCommit(worldId, backupId, current.get());
-            deleteRemoteSnapshotRefs(remoteSnapshotRefs(
+            deleteRemoteSnapshotRefs(remoteSnapshots.find(
                     worldId,
                     backupId,
                     Optional.of(snapshot.committedAt())), current.get());
@@ -799,52 +812,18 @@ public final class GitBackupBackend implements GitSnapshotStore {
                 settings.repository(),
                 Map.of(),
                 new byte[0]);
-        String historyRef = repository.historyRef(snapshot.worldId());
-        boolean snapshotIsHistoryTip = refs.resolve(historyRef)
-                .filter(snapshot.commitId()::equals)
-                .isPresent();
-        List<String> pushArguments = new ArrayList<>(List.of(
-                "--git-dir=" + settings.repository(),
-                "push",
-                "--atomic",
-                "--porcelain",
-                settings.remoteName()));
-        if (snapshotIsHistoryTip) {
-            pushArguments.add(historyRef + ":" + historyRef);
-        }
-        pushArguments.add(snapshot.refName() + ":" + GitRemoteSnapshotRef.current(snapshot));
         commands.checked(
-                pushArguments,
+                List.of(
+                        "--git-dir=" + settings.repository(),
+                        "push",
+                        "--atomic",
+                        "--porcelain",
+                        settings.remoteName(),
+                        snapshot.refName() + ":" + GitRemoteSnapshotRef.current(snapshot)),
                 settings.repository(),
                 Map.of(),
                 new byte[0]);
         migrateLegacyRemoteRefs(snapshot.worldId());
-    }
-
-    private List<RemoteSnapshotRef> remoteSnapshotRefs(
-            WorldId worldId,
-            BackupId backupId,
-            Optional<Instant> committedAt)
-            throws IOException, InterruptedException, GitStorageException {
-        Map<String, String> matches = new LinkedHashMap<>();
-        if (committedAt.isPresent()) {
-            String currentRef = GitRemoteSnapshotRef.current(
-                    backupId,
-                    committedAt.orElseThrow());
-            refs.resolveRemote(currentRef).ifPresent(commit -> matches.put(currentRef, commit));
-        } else {
-            matches.putAll(refs.resolveRemotePattern(
-                    GitRemoteSnapshotRef.searchPattern(backupId)));
-        }
-        String legacyRef = GitRemoteSnapshotRef.legacy(worldId, backupId);
-        refs.resolveRemote(legacyRef).ifPresent(commit -> matches.put(legacyRef, commit));
-        if (matches.size() > 2) {
-            throw new GitStorageException(
-                    "Configured Git remote returned ambiguous backup branches");
-        }
-        return matches.entrySet().stream()
-                .map(entry -> new RemoteSnapshotRef(entry.getKey(), entry.getValue()))
-                .toList();
     }
 
     private void migrateLegacyRemoteRefs(WorldId worldId)

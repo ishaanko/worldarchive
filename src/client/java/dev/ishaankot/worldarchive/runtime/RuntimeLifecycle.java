@@ -286,6 +286,13 @@ final class RuntimeLifecycle {
                     Optional.empty(),
                     BackupTrigger.WORLD_EXIT);
             if (!state.enabledDestinations(request)) {
+                if (state.selector().hasConfiguredDestination(request)) {
+                    runtime.observeExitResult(
+                            null,
+                            new IllegalStateException(state.selector()
+                                    .warning()
+                                    .orElse("A configured world-exit destination is unavailable")));
+                }
                 return;
             }
             PendingLiveBackup exit = new PendingLiveBackup(

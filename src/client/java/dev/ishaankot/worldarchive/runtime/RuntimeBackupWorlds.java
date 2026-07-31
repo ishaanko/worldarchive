@@ -36,6 +36,7 @@ final class RuntimeBackupWorlds {
         Map<WorldId, BackupWorldEntry> entries = new HashMap<>();
         for (WorldConfig world : state.config().worlds()) {
             BackupWorldContext context = configuredContext(world);
+            runtime.actionContexts().allowSourceActions(context);
             boolean live = new RuntimeNavigation(runtime).sourceDirectoryAvailable(context);
             if (!live) {
                 context = runtime.actionContexts().markActionOnly(context);

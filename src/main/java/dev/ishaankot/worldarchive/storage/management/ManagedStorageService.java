@@ -5,6 +5,7 @@ import dev.ishaankot.worldarchive.catalog.BackupDeletionRegistry;
 import dev.ishaankot.worldarchive.config.StoragePolicy;
 import dev.ishaankot.worldarchive.config.WorldArchiveConfig;
 import dev.ishaankot.worldarchive.config.WorldConfig;
+import dev.ishaankot.worldarchive.core.AsyncTasks;
 import dev.ishaankot.worldarchive.core.OperationId;
 import dev.ishaankot.worldarchive.core.WorldOperationGate;
 import dev.ishaankot.worldarchive.model.ArtifactOwnership;
@@ -13,6 +14,7 @@ import dev.ishaankot.worldarchive.model.BackupRecord;
 import dev.ishaankot.worldarchive.model.BackupResult;
 import dev.ishaankot.worldarchive.model.DestinationResult;
 import dev.ishaankot.worldarchive.model.DestinationType;
+import dev.ishaankot.worldarchive.model.SensitiveDataRedactor;
 import dev.ishaankot.worldarchive.model.SyncStatus;
 import dev.ishaankot.worldarchive.model.VerificationStatus;
 import dev.ishaankot.worldarchive.model.WorldId;
@@ -35,6 +37,7 @@ import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -42,7 +45,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
@@ -78,7 +80,7 @@ public final class ManagedStorageService {
 
     private final ZoneId zoneId;
 
-    private final Map<OperationId, CleanupPlan> confirmations = new ConcurrentHashMap<>();
+    private final Map<WorldId, CleanupPlan> confirmations = new ConcurrentHashMap<>();
 
     public ManagedStorageService(
             Supplier<WorldArchiveConfig> config,
@@ -107,30 +109,30 @@ public final class ManagedStorageService {
 
     public CompletionStage<StorageOverview> overview(WorldId worldId) {
         Objects.requireNonNull(worldId, "worldId");
-        return CompletableFuture.supplyAsync(() -> {
+        return AsyncTasks.supply(executor, () -> {
             try {
                 Snapshot snapshot = snapshot(worldId);
                 return overview(snapshot, true);
             } catch (Exception exception) {
                 throw new CompletionException(exception);
             }
-        }, executor);
+        });
     }
 
     public CompletionStage<CleanupPlan> prepareCleanup(WorldId worldId) {
         Objects.requireNonNull(worldId, "worldId");
-        return CompletableFuture.supplyAsync(() -> {
+        return AsyncTasks.supply(executor, () -> {
             try {
                 return prepareCleanupBlocking(worldId);
             } catch (Exception exception) {
                 throw new CompletionException(exception);
             }
-        }, executor);
+        });
     }
 
     public CompletionStage<Boolean> claimReviewNotice(WorldId worldId) {
         Objects.requireNonNull(worldId, "worldId");
-        return CompletableFuture.supplyAsync(() -> {
+        return AsyncTasks.supply(executor, () -> {
             try {
                 StorageOverview current = overview(snapshot(worldId), true);
                 return current.cleanupReviewRecommended()
@@ -138,18 +140,18 @@ public final class ManagedStorageService {
             } catch (Exception exception) {
                 return false;
             }
-        }, executor);
+        });
     }
 
     public CompletionStage<CleanupResult> applyCleanup(CleanupRequest request) {
         Objects.requireNonNull(request, "request");
-        return CompletableFuture.supplyAsync(() -> {
+        return AsyncTasks.supply(executor, () -> {
             try {
                 return applyCleanupBlocking(request);
             } catch (Exception exception) {
                 throw new CompletionException(exception);
             }
-        }, executor);
+        });
     }
 
     private CleanupPlan prepareCleanupBlocking(WorldId worldId) throws Exception {
@@ -182,14 +184,18 @@ public final class ManagedStorageService {
                 continue;
             }
             long bytes = artifactBytes(zip);
-            CleanupItem item = item(record, false, true, 0, bytes);
+            CleanupItem item = item(record, false, true, false, 0, bytes);
             selected.put(record.manifest().backupId(), item);
             projected = Math.max(0, projected - bytes);
         }
 
-        boolean removeCompleteGit = projected > target
-                && canRemoveCompleteGitHistory(snapshot, protectedIds, safetyFloor);
+        Optional<Set<BackupId>> protectedRemoteCopies = projected > target
+                ? protectedRemoteCopiesForGitRemoval(
+                        snapshot, protectedIds, safetyFloor)
+                : Optional.empty();
+        boolean removeCompleteGit = protectedRemoteCopies.isPresent();
         if (removeCompleteGit) {
+            Set<BackupId> remoteCopies = protectedRemoteCopies.orElseThrow();
             List<BackupId> localGitIds = snapshot.localGitSnapshots().keySet().stream()
                     .sorted()
                     .toList();
@@ -208,6 +214,7 @@ public final class ManagedStorageService {
                         record,
                         true,
                         previous != null && previous.removeZip(),
+                        remoteCopies.contains(backupId),
                         estimate,
                         previous == null ? 0 : previous.exactZipBytes()));
             }
@@ -228,14 +235,14 @@ public final class ManagedStorageService {
                 safetyFloor,
                 projected <= target,
                 snapshot.fingerprint());
-        confirmations.put(token, plan);
         expireConfirmations();
+        confirmations.put(worldId, plan);
         return plan;
     }
 
     private CleanupResult applyCleanupBlocking(CleanupRequest request) throws Exception {
-        CleanupPlan plan = confirmations.remove(request.confirmationToken());
-        if (plan == null || !clock.instant().isBefore(plan.expiresAt())) {
+        CleanupPlan plan = claimConfirmation(request.confirmationToken());
+        if (plan == null) {
             throw new IOException("Cleanup confirmation is invalid, expired, or already used");
         }
         Map<BackupId, CleanupItem> prepared = new HashMap<>();
@@ -247,9 +254,12 @@ public final class ManagedStorageService {
                 throw new IOException("Storage changed after the preview; review cleanup again");
             }
             requireVerifiedSafetyFloor(current, plan.verifiedSafetyFloor());
+            Set<BackupId> remoteCopies = requireCurrentRemoteCopies(
+                    plan, request, current);
             long before = current.totalBytes();
             Map<BackupId, String> failures = new LinkedHashMap<>();
-            boolean removedGit = applyItems(plan, request, current, failures);
+            boolean removedGit = applyItems(
+                    plan, request, current, remoteCopies, failures);
             if (removedGit) {
                 try {
                     await(git.compactCurrentStorage(plan.worldId()));
@@ -303,6 +313,7 @@ public final class ManagedStorageService {
             CleanupPlan plan,
             CleanupRequest request,
             Snapshot current,
+            Set<BackupId> remoteCopies,
             Map<BackupId, String> failures) {
         boolean removedGit = false;
         for (CleanupItem item : plan.items()) {
@@ -317,7 +328,9 @@ public final class ManagedStorageService {
                     await(git.deleteCurrentLocalSnapshot(
                             plan.worldId(),
                             item.backupId()));
-                    removeGitCatalogCopy(item.backupId());
+                    removeGitCatalogCopy(
+                            item.backupId(),
+                            remoteCopies.contains(item.backupId()));
                     removedGit = true;
                 }
             } catch (Exception exception) {
@@ -339,7 +352,11 @@ public final class ManagedStorageService {
         StorageSample current = new StorageSample(now, snapshot.totalBytes());
         samples.add(current);
         if (recordSample) {
-            history.append(snapshot.world().worldId(), current);
+            try {
+                history.append(snapshot.world().worldId(), current);
+            } catch (IOException ignored) {
+                // Forecast history is optional and must not block storage actions.
+            }
         }
         StorageForecast forecast = StorageForecastCalculator.calculate(
                 snapshot.world().storagePolicy(),
@@ -362,7 +379,8 @@ public final class ManagedStorageService {
     }
 
     private Snapshot snapshot(WorldId worldId) throws Exception {
-        WorldConfig world = config.get().worlds().stream()
+        WorldArchiveConfig currentConfig = config.get();
+        WorldConfig world = currentConfig.worlds().stream()
                 .filter(candidate -> candidate.worldId().equals(worldId))
                 .findFirst()
                 .orElseThrow(() -> new IOException(
@@ -371,10 +389,7 @@ public final class ManagedStorageService {
         Map<BackupId, ZipBackupArtifact> zipArtifacts = new HashMap<>();
         ZipBackupStore zipStore = zipStores.store(worldId);
         for (ZipBackupArtifact artifact : zipStore.listCompleteArchives()) {
-            if (artifact.manifest().worldId().equals(worldId)
-                    && records.stream().anyMatch(record ->
-                            record.manifest().backupId().equals(
-                                    artifact.manifest().backupId()))) {
+            if (artifact.manifest().worldId().equals(worldId)) {
                 zipArtifacts.put(artifact.manifest().backupId(), artifact);
             }
         }
@@ -387,7 +402,7 @@ public final class ManagedStorageService {
             zipBytes = Math.addExact(zipBytes, artifactBytes(artifact));
         }
         long gitBytes = directoryBytes(git.repositoryFor(worldId));
-        boolean unmetered = config.get().git().legacyRepository().isPresent()
+        boolean unmetered = currentConfig.git().legacyRepository().isPresent()
                 || records.stream()
                         .flatMap(record -> record.result().destinations().stream())
                         .anyMatch(destination ->
@@ -462,20 +477,33 @@ public final class ManagedStorageService {
         throw new IOException("The protected local backup could not be verified");
     }
 
-    private boolean canRemoveCompleteGitHistory(
+    private Optional<Set<BackupId>> protectedRemoteCopiesForGitRemoval(
             Snapshot snapshot,
             Set<BackupId> protectedIds,
             BackupId safetyFloor) {
         if (snapshot.localGitSnapshots().isEmpty()) {
-            return false;
+            return Optional.empty();
+        }
+        for (BackupId backupId : snapshot.localGitSnapshots().keySet()) {
+            Optional<BackupRecord> stored = snapshot.records().stream()
+                    .filter(record -> record.manifest().backupId().equals(backupId))
+                    .findFirst();
+            if (stored.isEmpty()
+                    || destination(stored.orElseThrow(), DestinationType.GIT)
+                            .filter(result ->
+                                    result.ownership() == ArtifactOwnership.MANAGED)
+                            .isEmpty()) {
+                return Optional.empty();
+            }
         }
         BackupRecord safety = record(snapshot, safetyFloor);
         DestinationResult verifiedZip = destination(safety, DestinationType.ZIP)
                 .filter(result -> result.verificationStatus() == VerificationStatus.VERIFIED)
                 .orElse(null);
         if (verifiedZip == null || !snapshot.zipArtifacts().containsKey(safetyFloor)) {
-            return false;
+            return Optional.empty();
         }
+        Set<BackupId> remoteCopies = new HashSet<>();
         for (BackupId backupId : snapshot.localGitSnapshots().keySet()) {
             if (!protectedIds.contains(backupId)) {
                 continue;
@@ -485,28 +513,70 @@ public final class ManagedStorageService {
                             protectedRecord,
                             DestinationType.ZIP)
                     && snapshot.zipArtifacts().containsKey(backupId);
-            boolean remoteOrExternalRemains = protectedRecord.result()
-                    .destinations().stream()
-                    .anyMatch(result -> result.ownership() == ArtifactOwnership.EXTERNAL
-                            || result.syncStatus() == SyncStatus.SYNCED);
-            if (!zipRemains && !remoteOrExternalRemains) {
-                return false;
+            if (!zipRemains) {
+                if (destination(protectedRecord, DestinationType.GIT)
+                        .filter(result ->
+                                result.ownership() == ArtifactOwnership.MANAGED
+                                        && result.syncStatus() == SyncStatus.SYNCED)
+                        .isEmpty()) {
+                    return Optional.empty();
+                }
+                try {
+                    if (!await(git.currentRemoteContainsSnapshot(
+                            snapshot.world().worldId(), backupId))) {
+                        return Optional.empty();
+                    }
+                } catch (Exception exception) {
+                    return Optional.empty();
+                }
+                remoteCopies.add(backupId);
             }
         }
-        return true;
+        return Optional.of(Set.copyOf(remoteCopies));
+    }
+
+    private Set<BackupId> requireCurrentRemoteCopies(
+            CleanupPlan plan,
+            CleanupRequest request,
+            Snapshot snapshot) throws Exception {
+        Set<BackupId> remoteCopies = new HashSet<>();
+        for (CleanupItem item : plan.items()) {
+            if (!request.selectedBackups().contains(item.backupId())
+                    || !item.removeLocalGit()
+                    || !plan.protectedBackups().contains(item.backupId())) {
+                continue;
+            }
+            BackupRecord protectedRecord = record(snapshot, item.backupId());
+            boolean zipRemains = !item.removeZip()
+                    && managedDestination(protectedRecord, DestinationType.ZIP)
+                    && snapshot.zipArtifacts().containsKey(item.backupId());
+            if (zipRemains) {
+                continue;
+            }
+            DestinationResult gitDestination = destination(
+                            protectedRecord, DestinationType.GIT)
+                    .filter(result ->
+                            result.ownership() == ArtifactOwnership.MANAGED)
+                    .orElseThrow(() -> new IOException(
+                            "Protected Git ownership changed after the preview"));
+            if (gitDestination.syncStatus() != SyncStatus.SYNCED
+                    || !await(git.currentRemoteContainsSnapshot(
+                            plan.worldId(), item.backupId()))) {
+                throw new IOException(
+                        "The configured remote changed after the cleanup preview");
+            }
+            remoteCopies.add(item.backupId());
+        }
+        return Set.copyOf(remoteCopies);
     }
 
     private CleanupItem item(
             BackupRecord record,
             boolean removeGit,
             boolean removeZip,
+            boolean remoteGitRemains,
             long gitBytes,
             long zipBytes) {
-        boolean remoteGitRemains = destination(record, DestinationType.GIT)
-                .filter(result -> result.syncStatus() == SyncStatus.SYNCED)
-                .isPresent();
-        boolean externalRemains = record.result().destinations().stream()
-                .anyMatch(result -> result.ownership() == ArtifactOwnership.EXTERNAL);
         boolean localGitRemains = managedDestination(record, DestinationType.GIT)
                 && !removeGit;
         boolean localZipRemains = managedDestination(record, DestinationType.ZIP)
@@ -529,7 +599,6 @@ public final class ManagedStorageService {
                 gitBytes,
                 zipBytes,
                 !remoteGitRemains
-                        && !externalRemains
                         && !localGitRemains
                         && !localZipRemains);
     }
@@ -543,15 +612,11 @@ public final class ManagedStorageService {
         removeDestination(backupId, DestinationType.ZIP, false);
     }
 
-    private void removeGitCatalogCopy(BackupId backupId) throws IOException {
-        BackupRecord record = catalog.find(backupId)
-                .orElseThrow(() -> new IOException("Cleanup catalog record disappeared"));
-        boolean remoteRemains = destination(record, DestinationType.GIT)
-                .filter(result -> result.syncStatus() == SyncStatus.SYNCED)
-                .isPresent();
-        if (!remoteRemains) {
-            removeDestination(backupId, DestinationType.GIT, false);
-        }
+    private void removeGitCatalogCopy(
+            BackupId backupId,
+            boolean verifiedRemoteRemains) throws IOException {
+        removeDestination(
+                backupId, DestinationType.GIT, verifiedRemoteRemains);
     }
 
     private void removeDestination(
@@ -623,7 +688,9 @@ public final class ManagedStorageService {
         }
         long total = 0;
         try (Stream<Path> paths = Files.walk(root)) {
-            for (Path path : paths.toList()) {
+            var iterator = paths.iterator();
+            while (iterator.hasNext()) {
+                Path path = iterator.next();
                 if (Files.isSymbolicLink(path)) {
                     throw new IOException("Managed Git repository contains a symbolic link");
                 }
@@ -707,12 +774,27 @@ public final class ManagedStorageService {
                 !now.isBefore(entry.getValue().expiresAt()));
     }
 
+    private CleanupPlan claimConfirmation(OperationId token) {
+        expireConfirmations();
+        for (Map.Entry<WorldId, CleanupPlan> entry : confirmations.entrySet()) {
+            CleanupPlan plan = entry.getValue();
+            if (plan.confirmationToken().equals(token)
+                    && confirmations.remove(entry.getKey(), plan)) {
+                return plan;
+            }
+        }
+        return null;
+    }
+
     private static String safeMessage(Exception exception) {
         String message = exception.getMessage();
         if (message == null || message.isBlank()) {
             return exception.getClass().getSimpleName();
         }
-        return message.length() > 200 ? message.substring(0, 199) + "…" : message;
+        String redacted = SensitiveDataRedactor.redact(message);
+        return redacted.length() > 200
+                ? redacted.substring(0, 199) + "…"
+                : redacted;
     }
 
     private record Snapshot(

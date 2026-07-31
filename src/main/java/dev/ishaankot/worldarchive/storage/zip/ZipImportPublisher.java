@@ -5,15 +5,10 @@ import dev.ishaankot.worldarchive.storage.zip.ZipArchiveInspector.Inspection;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Objects;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.locks.ReentrantLock;
 
 /** Atomically publishes exact external ZIP copies into a managed archive root. */
 final class ZipImportPublisher {
-    private static final ConcurrentMap<Path, ReentrantLock> PROCESS_LOCKS =
-            new ConcurrentHashMap<>();
-
     private final Path root;
 
     ZipImportPublisher(Path root) {
@@ -36,8 +31,7 @@ final class ZipImportPublisher {
         String checksumName = archiveName + ".sha256";
         Path archivePath = worldDirectory.resolve(archiveName);
         Path checksumPath = worldDirectory.resolve(checksumName);
-        ReentrantLock processLock = PROCESS_LOCKS.computeIfAbsent(
-                worldDirectory, ignored -> new ReentrantLock());
+        ReentrantLock processLock = ZipBackupStore.processLock(worldDirectory);
         ZipBackupStore.acquireProcessLock(processLock);
         try {
             return importLocked(
@@ -67,11 +61,14 @@ final class ZipImportPublisher {
                 ExactArchiveCopy copy = ExactArchiveCopy.capture(
                         source, candidate.archivePath().getFileName().toString());
                 ManagedDirectoryAccess destination = ManagedDirectoryAccess.open(
-                        root, worldDirectory)) {
+                        root, worldDirectory);
+                ManagedDirectoryAccess.LockedFile ignored =
+                        destination.acquireLock(ZipBackupStore.OPERATION_LOCK_NAME)) {
             requireCandidate(candidate, copy);
             if (destination.exists(archiveName) || destination.exists(checksumName)) {
                 return existing(
                         destination,
+                        copy,
                         candidate,
                         archiveName,
                         checksumName,
@@ -137,12 +134,34 @@ final class ZipImportPublisher {
 
     private static ZipBackupArtifact existing(
             ManagedDirectoryAccess destination,
+            ExactArchiveCopy copy,
             ZipImportCandidate candidate,
             String archiveName,
             String checksumName,
             Path archivePath,
             Path checksumPath) throws IOException {
-        if (!destination.exists(archiveName) || !destination.exists(checksumName)) {
+        boolean archiveExists = destination.exists(archiveName);
+        boolean checksumExists = destination.exists(checksumName);
+        if (!archiveExists && checksumExists) {
+            String checksum = ZipBackupStore.readChecksum(
+                    destination, checksumName, archiveName);
+            if (!checksum.equals(candidate.archiveSha256())) {
+                throw new ZipBackupException(
+                        "Managed ZIP import destination contains an incomplete conflict");
+            }
+            String archivePartial = archiveName + ".importing";
+            destination.deleteIfExists(archivePartial);
+            try {
+                copy.copyTo(destination, archivePartial);
+                ZipBackupStore.atomicPublish(destination, archivePartial, archiveName);
+                return new ZipBackupArtifact(
+                        candidate.manifest(), archivePath, checksumPath, checksum);
+            } catch (IOException | RuntimeException exception) {
+                ZipBackupStore.cleanupFailure(exception, destination, archivePartial);
+                throw exception;
+            }
+        }
+        if (!archiveExists || !checksumExists) {
             throw new ZipBackupException(
                     "Managed ZIP import destination contains an incomplete conflict");
         }

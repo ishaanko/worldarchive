@@ -43,16 +43,27 @@ public final class RemoteUrlPolicy {
         String validationUrl = placeholders == 1
                 ? remoteUrl.replace(WORLD_ID_PLACEHOLDER, VALIDATION_WORLD_ID.toString())
                 : remoteUrl;
-        validateConcrete(validationUrl);
+        validateConcrete(validationUrl, false);
         return remoteUrl;
     }
 
+    /** Validates one configured per-world remote without a template. */
+    public static String validateConfiguredPlain(String remoteUrl) {
+        Objects.requireNonNull(remoteUrl, "remoteUrl");
+        if (countWorldIdPlaceholders(remoteUrl) != 0) {
+            throw new IllegalArgumentException("Git remote URL must not contain {worldId}");
+        }
+        validateConcrete(remoteUrl, false);
+        return remoteUrl;
+    }
+
+    /** Validates an import source, including the read-only Git transport. */
     public static String validatePlain(String remoteUrl) {
         Objects.requireNonNull(remoteUrl, "remoteUrl");
         if (countWorldIdPlaceholders(remoteUrl) != 0) {
-            throw new IllegalArgumentException("Legacy Git remote URL must not contain {worldId}");
+            throw new IllegalArgumentException("Git import URL must not contain {worldId}");
         }
-        validateConcrete(remoteUrl);
+        validateConcrete(remoteUrl, true);
         return remoteUrl;
     }
 
@@ -80,7 +91,7 @@ public final class RemoteUrlPolicy {
         return count;
     }
 
-    private static void validateConcrete(String remoteUrl) {
+    private static void validateConcrete(String remoteUrl, boolean allowReadOnlyGitProtocol) {
         if (remoteUrl.isBlank()
                 || remoteUrl.length() > 2_048
                 || !remoteUrl.equals(remoteUrl.strip())) {
@@ -91,7 +102,7 @@ public final class RemoteUrlPolicy {
         }
         rejectSensitiveData(remoteUrl);
         if (remoteUrl.contains("://")) {
-            validateUri(remoteUrl);
+            validateUri(remoteUrl, allowReadOnlyGitProtocol);
             return;
         }
         Matcher scp = SCP_REMOTE.matcher(remoteUrl);
@@ -113,7 +124,7 @@ public final class RemoteUrlPolicy {
         }
     }
 
-    private static void validateUri(String remoteUrl) {
+    private static void validateUri(String remoteUrl, boolean allowReadOnlyGitProtocol) {
         try {
             URI uri = new URI(remoteUrl);
             if (uri.getRawUserInfo() != null || uri.getRawQuery() != null || uri.getRawFragment() != null) {
@@ -121,7 +132,7 @@ public final class RemoteUrlPolicy {
                         "Git remote URL must not contain user information, a query, or a fragment");
             }
             String scheme = uri.getScheme();
-            if (scheme == null || !isSupportedScheme(scheme)) {
+            if (scheme == null || !isSupportedScheme(scheme, allowReadOnlyGitProtocol)) {
                 throw new IllegalArgumentException("Unsupported Git remote URL scheme");
             }
             if ("file".equalsIgnoreCase(scheme)) {
@@ -162,9 +173,12 @@ public final class RemoteUrlPolicy {
         }
     }
 
-    private static boolean isSupportedScheme(String scheme) {
+    private static boolean isSupportedScheme(
+            String scheme,
+            boolean allowReadOnlyGitProtocol) {
         return switch (scheme.toLowerCase(Locale.ROOT)) {
-            case "https", "ssh", "git", "file" -> true;
+            case "https", "ssh", "file" -> true;
+            case "git" -> allowReadOnlyGitProtocol;
             default -> false;
         };
     }
