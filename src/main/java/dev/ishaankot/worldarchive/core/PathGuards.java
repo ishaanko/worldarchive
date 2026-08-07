@@ -24,11 +24,38 @@ public final class PathGuards {
         BasicFileAttributes read(Path path) throws IOException, E;
     }
 
+    /**
+     * Creates every missing component of {@code directory}, validating only the component just
+     * created or observed after each step.
+     */
     public static <E extends Exception> void createDirectories(
             Path directory,
             Supplier<E> onMissingRoot,
             AttributeReader<E> reader,
             Supplier<E> onInvalidComponent) throws IOException, E {
+        create(directory, onMissingRoot, reader, onInvalidComponent, false);
+    }
+
+    /**
+     * Creates every missing component of {@code directory}, re-validating the whole prefix after
+     * each step. Path resolution follows links in every component except the last, so checking
+     * only the newest component cannot see an already-validated ancestor that was swapped for a
+     * link mid-walk; re-walking the prefix rejects that race.
+     */
+    public static <E extends Exception> void createDirectoriesRevalidatingPrefix(
+            Path directory,
+            Supplier<E> onMissingRoot,
+            AttributeReader<E> reader,
+            Supplier<E> onInvalidComponent) throws IOException, E {
+        create(directory, onMissingRoot, reader, onInvalidComponent, true);
+    }
+
+    private static <E extends Exception> void create(
+            Path directory,
+            Supplier<E> onMissingRoot,
+            AttributeReader<E> reader,
+            Supplier<E> onInvalidComponent,
+            boolean revalidatePrefix) throws IOException, E {
         Path absolute = directory.toAbsolutePath().normalize();
         Path current = absolute.getRoot();
         if (current == null) {
@@ -44,7 +71,11 @@ public final class PathGuards {
                     // A racing creator is accepted only after validation below.
                 }
             }
-            requireDirectoryComponent(current, reader, onInvalidComponent);
+            if (revalidatePrefix) {
+                requireDirectory(current, onMissingRoot, reader, onInvalidComponent);
+            } else {
+                requireDirectoryComponent(current, reader, onInvalidComponent);
+            }
         }
     }
 

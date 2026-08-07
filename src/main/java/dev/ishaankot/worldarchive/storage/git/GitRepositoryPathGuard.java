@@ -21,7 +21,7 @@ final class GitRepositoryPathGuard {
     }
 
     static void createDirectories(Path directory) throws IOException, GitStorageException {
-        PathGuards.createDirectories(
+        PathGuards.createDirectoriesRevalidatingPrefix(
                 directory,
                 () -> new GitStorageException("Git repository path has no filesystem root"),
                 ATTRIBUTE_READER,
