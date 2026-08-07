@@ -1,16 +1,22 @@
 package dev.ishaankot.worldarchive.ui;
 
 import dev.ishaankot.worldarchive.ui.model.ConfirmationState;
+import dev.ishaankot.worldarchive.ui.model.ScreenGeometry;
 import java.util.Objects;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.MultiLineTextWidget;
-import net.minecraft.client.gui.components.StringWidget;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 
 /** Small native confirmation screen shared by deletion and copy-only restoration. */
 final class BackupConfirmationScreen extends Screen {
+    private static final int CONTENT_MIN = 180;
+
+    private static final int CONTENT_MAX = 420;
+
+    private static final int CONTENT_MARGIN = 24;
+
     private final Screen parent;
 
     private final ConfirmationState state;
@@ -28,18 +34,18 @@ final class BackupConfirmationScreen extends Screen {
 
     @Override
     protected void init() {
-        int contentWidth = Math.min(420, Math.max(180, width - 24));
-        int contentX = (width - contentWidth) / 2;
-        addRenderableOnly(new StringWidget(
+        int contentWidth = ScreenGeometry.contentWidth(width, CONTENT_MIN, CONTENT_MAX, CONTENT_MARGIN);
+        int contentX = ScreenGeometry.centerX(width, contentWidth);
+        addRenderableOnly(Widgets.title(
+                font,
                 contentX,
-                Math.max(12, height / 2 - 72),
+                ScreenGeometry.anchorMiddle(12, height, -72),
                 contentWidth,
                 20,
-                title.copy().withStyle(ChatFormatting.BOLD),
-                font));
+                title));
         MultiLineTextWidget prompt = new MultiLineTextWidget(
                         contentX,
-                        Math.max(38, height / 2 - 44),
+                        ScreenGeometry.anchorMiddle(38, height, -44),
                         Component.literal(state.prompt()),
                         font)
                 .setMaxWidth(contentWidth)

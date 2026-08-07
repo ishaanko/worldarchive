@@ -8,6 +8,7 @@ import dev.ishaankot.worldarchive.model.SensitiveDataRedactor;
 import dev.ishaankot.worldarchive.ui.model.BackupOutcomeSummary;
 import dev.ishaankot.worldarchive.ui.model.DestinationOutcomeView;
 import dev.ishaankot.worldarchive.ui.model.ProgressState;
+import dev.ishaankot.worldarchive.ui.model.ScreenGeometry;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -30,6 +31,12 @@ final class BackupOperationScreen<T> extends Screen {
     private static final int BAR_PROGRESS = 0xFF5AAE61;
 
     private static final int BAR_BORDER = 0xFFA0A0A0;
+
+    private static final int CONTENT_MIN = 180;
+
+    private static final int CONTENT_MAX = 440;
+
+    private static final int CONTENT_MARGIN = 24;
 
     private final Screen parent;
 
@@ -117,20 +124,20 @@ final class BackupOperationScreen<T> extends Screen {
 
     @Override
     protected void init() {
-        int contentWidth = Math.min(440, Math.max(180, width - 24));
-        int contentX = (width - contentWidth) / 2;
-        addRenderableOnly(new StringWidget(
+        int contentWidth = ScreenGeometry.contentWidth(width, CONTENT_MIN, CONTENT_MAX, CONTENT_MARGIN);
+        int contentX = ScreenGeometry.centerX(width, contentWidth);
+        addRenderableOnly(Widgets.title(
+                font,
                 contentX,
-                Math.max(10, height / 2 - 88),
+                ScreenGeometry.anchorMiddle(10, height, -88),
                 contentWidth,
                 20,
-                title.copy().withStyle(ChatFormatting.BOLD),
-                font));
+                title));
         Component headline = Component.literal(presentation.headline())
                 .withStyle(presentation.color());
         addRenderableOnly(new StringWidget(
                 contentX,
-                Math.max(34, height / 2 - 62),
+                ScreenGeometry.anchorMiddle(34, height, -62),
                 contentWidth,
                 20,
                 headline,
@@ -140,7 +147,7 @@ final class BackupOperationScreen<T> extends Screen {
         if (!details.isBlank()) {
             MultiLineTextWidget detailWidget = new MultiLineTextWidget(
                             contentX,
-                            Math.max(58, height / 2 - 36),
+                            ScreenGeometry.anchorMiddle(58, height, -36),
                             Component.literal(details),
                             font)
                     .setMaxWidth(contentWidth)

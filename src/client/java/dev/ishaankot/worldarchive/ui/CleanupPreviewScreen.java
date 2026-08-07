@@ -3,6 +3,7 @@ package dev.ishaankot.worldarchive.ui;
 import dev.ishaankot.worldarchive.model.BackupId;
 import dev.ishaankot.worldarchive.storage.management.CleanupItem;
 import dev.ishaankot.worldarchive.storage.management.CleanupPlan;
+import dev.ishaankot.worldarchive.ui.model.ScreenGeometry;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.HashSet;
@@ -22,6 +23,12 @@ final class CleanupPreviewScreen extends Screen {
     private static final DateTimeFormatter DATE = DateTimeFormatter
             .ofPattern("uuuu-MM-dd HH:mm")
             .withZone(ZoneId.systemDefault());
+
+    private static final int CONTENT_MIN = 240;
+
+    private static final int CONTENT_MAX = 440;
+
+    private static final int CONTENT_MARGIN = 20;
 
     private final Screen parent;
 
@@ -50,15 +57,9 @@ final class CleanupPreviewScreen extends Screen {
 
     @Override
     protected void init() {
-        int contentWidth = Math.min(440, Math.max(240, width - 20));
-        int x = (width - contentWidth) / 2;
-        addRenderableOnly(new StringWidget(
-                x,
-                9,
-                contentWidth,
-                20,
-                title.copy().withStyle(ChatFormatting.BOLD),
-                font));
+        int contentWidth = ScreenGeometry.contentWidth(width, CONTENT_MIN, CONTENT_MAX, CONTENT_MARGIN);
+        int x = ScreenGeometry.centerX(width, contentWidth);
+        addRenderableOnly(Widgets.title(font, x, 9, contentWidth, 20, title));
         String summary = plan.items().isEmpty()
                 ? "No eligible local copies can be removed under this policy."
                 : "Select the exact local copies to remove. Remote Git refs and linked imports are untouched.";

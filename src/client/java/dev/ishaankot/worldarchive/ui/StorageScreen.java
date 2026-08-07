@@ -4,6 +4,7 @@ import dev.ishaankot.worldarchive.config.StoragePolicy;
 import dev.ishaankot.worldarchive.model.SensitiveDataRedactor;
 import dev.ishaankot.worldarchive.storage.management.StorageForecast;
 import dev.ishaankot.worldarchive.storage.management.StorageOverview;
+import dev.ishaankot.worldarchive.ui.model.ScreenGeometry;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.Objects;
@@ -19,6 +20,12 @@ import net.minecraft.network.chat.Component;
 /** Calm per-world storage budget, forecast, and cleanup entry point. */
 final class StorageScreen extends Screen {
     private static final BigDecimal GIBIBYTE = BigDecimal.valueOf(1_073_741_824L);
+
+    private static final int CONTENT_MIN = 230;
+
+    private static final int CONTENT_MAX = 430;
+
+    private static final int CONTENT_MARGIN = 24;
 
     private final Screen parent;
 
@@ -73,15 +80,9 @@ final class StorageScreen extends Screen {
 
     @Override
     protected void init() {
-        int contentWidth = Math.min(430, Math.max(230, width - 24));
-        int x = (width - contentWidth) / 2;
-        addRenderableOnly(new StringWidget(
-                x,
-                10,
-                contentWidth,
-                20,
-                title.copy().withStyle(ChatFormatting.BOLD),
-                font));
+        int contentWidth = ScreenGeometry.contentWidth(width, CONTENT_MIN, CONTENT_MAX, CONTENT_MARGIN);
+        int x = ScreenGeometry.centerX(width, contentWidth);
+        addRenderableOnly(Widgets.title(font, x, 10, contentWidth, 20, title));
         if (overview == null) {
             addRenderableOnly(new MultiLineTextWidget(
                             x,
@@ -135,13 +136,7 @@ final class StorageScreen extends Screen {
 
     private void addPolicyFields(int x, int contentWidth) {
         int labelWidth = Math.min(105, contentWidth / 3);
-        addRenderableOnly(new StringWidget(
-                x,
-                106,
-                labelWidth,
-                20,
-                Component.literal("Budget (GiB)"),
-                font));
+        addRenderableOnly(Widgets.label(font, x, 106, labelWidth, 20, "Budget (GiB)"));
         EditBox budgetField = field(
                 x + labelWidth,
                 106,
@@ -188,13 +183,7 @@ final class StorageScreen extends Screen {
             String label,
             String value,
             java.util.function.Consumer<String> update) {
-        addRenderableOnly(new StringWidget(
-                x,
-                y,
-                width,
-                16,
-                Component.literal(label),
-                font));
+        addRenderableOnly(Widgets.label(font, x, y, width, 16, label));
         field(x, y + 17, width, 20, value, next -> {
             update.accept(next);
             edited = true;
@@ -251,7 +240,7 @@ final class StorageScreen extends Screen {
                 .build());
         StringWidget statusWidget = new StringWidget(
                 x,
-                Math.max(204, y - 20),
+                ScreenGeometry.anchorBottom(204, y, 20),
                 contentWidth,
                 16,
                 status,

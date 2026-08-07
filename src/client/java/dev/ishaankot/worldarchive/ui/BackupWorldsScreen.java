@@ -1,6 +1,7 @@
 package dev.ishaankot.worldarchive.ui;
 
 import dev.ishaankot.worldarchive.settings.ClientSettingsAccess;
+import dev.ishaankot.worldarchive.ui.model.ScreenGeometry;
 import java.util.List;
 import java.util.Objects;
 import java.util.HashSet;
@@ -8,7 +9,6 @@ import java.util.Set;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.MultiLineTextWidget;
-import net.minecraft.client.gui.components.StringWidget;
 import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
@@ -16,6 +16,12 @@ import net.minecraft.network.chat.Component;
 /** Recovery-aware chooser containing both live saves and catalog-only archived worlds. */
 public final class BackupWorldsScreen extends Screen {
     private static final int ROW_HEIGHT = 24;
+
+    private static final int CONTENT_MIN = 220;
+
+    private static final int CONTENT_MAX = 420;
+
+    private static final int CONTENT_MARGIN = 20;
 
     private final Screen parent;
 
@@ -59,15 +65,9 @@ public final class BackupWorldsScreen extends Screen {
 
     @Override
     protected void init() {
-        int contentWidth = Math.min(420, Math.max(220, width - 20));
-        int x = (width - contentWidth) / 2;
-        addRenderableOnly(new StringWidget(
-                x,
-                12,
-                contentWidth,
-                20,
-                title.copy().withStyle(ChatFormatting.BOLD),
-                font));
+        int contentWidth = ScreenGeometry.contentWidth(width, CONTENT_MIN, CONTENT_MAX, CONTENT_MARGIN);
+        int x = ScreenGeometry.centerX(width, contentWidth);
+        addRenderableOnly(Widgets.title(font, x, 12, contentWidth, 20, title));
         int pageSize = Math.max(1, Math.min(8, (height - 116) / ROW_HEIGHT));
         int pageCount = Math.max(1, (worlds.size() + pageSize - 1) / pageSize);
         page = Math.min(page, pageCount - 1);

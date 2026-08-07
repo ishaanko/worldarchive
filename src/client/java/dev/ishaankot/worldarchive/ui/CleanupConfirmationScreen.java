@@ -4,6 +4,7 @@ import dev.ishaankot.worldarchive.model.BackupId;
 import dev.ishaankot.worldarchive.storage.management.CleanupItem;
 import dev.ishaankot.worldarchive.storage.management.CleanupPlan;
 import dev.ishaankot.worldarchive.storage.management.CleanupRequest;
+import dev.ishaankot.worldarchive.ui.model.ScreenGeometry;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -16,6 +17,12 @@ import net.minecraft.network.chat.Component;
 
 /** Final explicit confirmation repeating every selected destructive action. */
 final class CleanupConfirmationScreen extends Screen {
+    private static final int CONTENT_MIN = 240;
+
+    private static final int CONTENT_MAX = 440;
+
+    private static final int CONTENT_MARGIN = 20;
+
     private final Screen preview;
 
     private final Screen returnTo;
@@ -60,15 +67,9 @@ final class CleanupConfirmationScreen extends Screen {
     @Override
     protected void init() {
         active = true;
-        int contentWidth = Math.min(440, Math.max(240, width - 20));
-        int x = (width - contentWidth) / 2;
-        addRenderableOnly(new StringWidget(
-                x,
-                9,
-                contentWidth,
-                20,
-                title.copy().withStyle(ChatFormatting.BOLD),
-                font));
+        int contentWidth = ScreenGeometry.contentWidth(width, CONTENT_MIN, CONTENT_MAX, CONTENT_MARGIN);
+        int x = ScreenGeometry.centerX(width, contentWidth);
+        addRenderableOnly(Widgets.title(font, x, 9, contentWidth, 20, title));
         addRenderableOnly(new StringWidget(
                 x,
                 31,
