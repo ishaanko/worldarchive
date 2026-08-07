@@ -192,86 +192,70 @@ public final class WorldArchiveSettingsScreen extends Screen {
     }
 
     private void addGitPage(int x, int contentWidth) {
-        if (!layout.compact() && contentWidth >= 300) {
-            addFullGitPage(x, contentWidth, 54);
+        boolean full = !layout.compact() && contentWidth >= 300;
+        int section = full ? 0 : gitSection;
+        addGitHeader(x, contentWidth, full, section);
+
+        if (full || section == 0) {
+            addGitRepositoryRow(x, layout.gitRowY(section, full ? 1 : 0), contentWidth);
+        }
+        if (full || section == 1) {
+            int firstIndex = full ? 2 : 0;
+            addGitRemoteNameRow(x, layout.gitRowY(section, firstIndex), contentWidth);
+            addGitPatternsRow(x, layout.gitRowY(section, firstIndex + 1), contentWidth);
+        }
+        if (full || section == 2) {
+            addTriggerRow(
+                    x,
+                    layout.gitRowY(section, full ? 4 : 0),
+                    contentWidth,
+                    draft.gitManualEnabled(),
+                    draft.gitWorldExitEnabled(),
+                    draft.gitScheduledEnabled(),
+                    draft::setGitManualEnabled,
+                    draft::setGitWorldExitEnabled,
+                    draft::setGitScheduledEnabled);
+        }
+    }
+
+    private void addGitHeader(int x, int contentWidth, boolean full, int section) {
+        int headerY = full ? layout.gitRowY(0, 0) : layout.compactHeaderY();
+        if (full) {
+            addCheckbox(
+                    "screen.worldarchive.settings.git_enabled",
+                    draft.gitEnabled(),
+                    x,
+                    headerY,
+                    contentWidth,
+                    enabled -> {
+                        draft.setGitEnabled(enabled);
+                        requestHealthProbe();
+                    });
             return;
         }
-        switch (gitSection) {
-            case 0 -> addCompactGitLocationPage(x, contentWidth, 77);
-            case 1 -> addCompactGitRemotePage(x, contentWidth, 77);
-            case 2 -> addCompactGitTimingPage(x, contentWidth, 77);
-            default -> throw new IllegalStateException("Unknown Git settings section: " + gitSection);
+        switch (section) {
+            case 0 -> {
+                addCheckbox(
+                        "screen.worldarchive.settings.git_enabled",
+                        draft.gitEnabled(),
+                        x,
+                        headerY,
+                        contentWidth - 68,
+                        enabled -> {
+                            draft.setGitEnabled(enabled);
+                            requestHealthProbe();
+                        });
+                addGitSectionButton(
+                        x + contentWidth - 64, headerY, "screen.worldarchive.settings.more", 1);
+            }
+            case 1 -> {
+                addGitSectionButton(x, headerY, "screen.worldarchive.settings.back", 0);
+                addGitSectionButton(
+                        x + contentWidth - 64, headerY, "screen.worldarchive.settings.timing", 2);
+            }
+            case 2 -> addGitSectionButton(x, headerY, "screen.worldarchive.settings.back", 1);
+            default -> throw new IllegalStateException("Unknown Git settings section: " + section);
         }
-    }
-
-    private void addFullGitPage(int x, int contentWidth, int firstRow) {
-        addCheckbox(
-                "screen.worldarchive.settings.git_enabled",
-                draft.gitEnabled(),
-                x,
-                firstRow,
-                contentWidth,
-                enabled -> {
-                    draft.setGitEnabled(enabled);
-                    requestHealthProbe();
-                });
-        addGitRepositoryRow(x, firstRow + 22, contentWidth);
-        addGitRemoteNameRow(x, firstRow + 44, contentWidth);
-        addGitPatternsRow(x, firstRow + 66, contentWidth);
-        addTriggerRow(
-                x,
-                firstRow + 89,
-                contentWidth,
-                draft.gitManualEnabled(),
-                draft.gitWorldExitEnabled(),
-                draft.gitScheduledEnabled(),
-                draft::setGitManualEnabled,
-                draft::setGitWorldExitEnabled,
-                draft::setGitScheduledEnabled);
-    }
-
-    private void addCompactGitLocationPage(int x, int contentWidth, int firstRow) {
-        addCheckbox(
-                "screen.worldarchive.settings.git_enabled",
-                draft.gitEnabled(),
-                x,
-                54,
-                contentWidth - 68,
-                enabled -> {
-                    draft.setGitEnabled(enabled);
-                    requestHealthProbe();
-                });
-        addGitSectionButton(
-                x + contentWidth - 64,
-                54,
-                "screen.worldarchive.settings.more",
-                1);
-        addGitRepositoryRow(x, firstRow, contentWidth);
-    }
-
-    private void addCompactGitRemotePage(int x, int contentWidth, int firstRow) {
-        addGitSectionButton(x, 54, "screen.worldarchive.settings.back", 0);
-        addGitSectionButton(
-                x + contentWidth - 64,
-                54,
-                "screen.worldarchive.settings.timing",
-                2);
-        addGitRemoteNameRow(x, firstRow, contentWidth);
-        addGitPatternsRow(x, firstRow + 22, contentWidth);
-    }
-
-    private void addCompactGitTimingPage(int x, int contentWidth, int firstRow) {
-        addGitSectionButton(x, 54, "screen.worldarchive.settings.back", 1);
-        addTriggerRow(
-                x,
-                firstRow,
-                contentWidth,
-                draft.gitManualEnabled(),
-                draft.gitWorldExitEnabled(),
-                draft.gitScheduledEnabled(),
-                draft::setGitManualEnabled,
-                draft::setGitWorldExitEnabled,
-                draft::setGitScheduledEnabled);
     }
 
     private void addGitSectionButton(int x, int y, String key, int section) {
@@ -345,34 +329,69 @@ public final class WorldArchiveSettingsScreen extends Screen {
     }
 
     private void addZipPage(int x, int contentWidth) {
-        if (!layout.compact() && contentWidth >= 300) {
-            addFullZipPage(x, contentWidth);
+        boolean full = !layout.compact() && contentWidth >= 300;
+        int section = full ? 0 : zipSection;
+        addZipHeader(x, contentWidth, full, section);
+
+        if (full || section == 0) {
+            addZipDestinationRow(x, layout.zipRowY(section, full ? 1 : 0), contentWidth);
+        }
+        if (full || section == 1) {
+            addTriggerRow(
+                    x,
+                    layout.zipRowY(section, full ? 2 : 0),
+                    contentWidth,
+                    draft.zipManualEnabled(),
+                    draft.zipWorldExitEnabled(),
+                    draft.zipScheduledEnabled(),
+                    draft::setZipManualEnabled,
+                    draft::setZipWorldExitEnabled,
+                    draft::setZipScheduledEnabled);
+        }
+    }
+
+    private void addZipHeader(int x, int contentWidth, boolean full, int section) {
+        int headerY = full ? layout.zipRowY(0, 0) : layout.compactHeaderY();
+        if (full) {
+            addCheckbox(
+                    "screen.worldarchive.settings.zip_enabled",
+                    draft.zipEnabled(),
+                    x,
+                    headerY,
+                    contentWidth,
+                    enabled -> {
+                        draft.setZipEnabled(enabled);
+                        requestHealthProbe();
+                    });
             return;
         }
-        if (zipSection == 0) {
-            addCompactZipLocationPage(x, contentWidth);
-        } else {
-            addCompactZipTimingPage(x, contentWidth);
+        switch (section) {
+            case 0 -> {
+                addCheckbox(
+                        "screen.worldarchive.settings.zip_enabled",
+                        draft.zipEnabled(),
+                        x,
+                        headerY,
+                        contentWidth - 68,
+                        enabled -> {
+                            draft.setZipEnabled(enabled);
+                            requestHealthProbe();
+                        });
+                addZipSectionButton(
+                        x + contentWidth - 64, headerY, "screen.worldarchive.settings.timing", 1);
+            }
+            case 1 -> addZipSectionButton(x, headerY, "screen.worldarchive.settings.back", 0);
+            default -> throw new IllegalStateException("Unknown Zip settings section: " + section);
         }
     }
 
-    private void addFullZipPage(int x, int contentWidth) {
-        addCheckbox(
-                "screen.worldarchive.settings.zip_enabled",
-                draft.zipEnabled(),
-                x,
-                53,
-                contentWidth,
-                enabled -> {
-                    draft.setZipEnabled(enabled);
-                    requestHealthProbe();
-                });
+    private void addZipDestinationRow(int x, int y, int contentWidth) {
         EditBox destination = addTextRow(
                 "screen.worldarchive.settings.archive_folder",
                 draft.zipDestination(),
                 SettingsField.ZIP_DESTINATION,
                 x,
-                76,
+                y,
                 contentWidth - 68,
                 2048,
                 value -> {
@@ -384,73 +403,10 @@ public final class WorldArchiveSettingsScreen extends Screen {
         zipBrowseButton = Button.builder(
                         Component.translatable("screen.worldarchive.settings.browse"),
                         ignored -> chooseZipFolder())
-                .bounds(x + contentWidth - 64, 76, 64, 20)
+                .bounds(x + contentWidth - 64, y, 64, 20)
                 .build();
         zipBrowseButton.active = !controlsLocked();
         addRenderableWidget(zipBrowseButton);
-        addTriggerRow(
-                x,
-                102,
-                contentWidth,
-                draft.zipManualEnabled(),
-                draft.zipWorldExitEnabled(),
-                draft.zipScheduledEnabled(),
-                draft::setZipManualEnabled,
-                draft::setZipWorldExitEnabled,
-                draft::setZipScheduledEnabled);
-    }
-
-    private void addCompactZipLocationPage(int x, int contentWidth) {
-        addCheckbox(
-                "screen.worldarchive.settings.zip_enabled",
-                draft.zipEnabled(),
-                x,
-                54,
-                contentWidth - 68,
-                enabled -> {
-                    draft.setZipEnabled(enabled);
-                    requestHealthProbe();
-                });
-        addZipSectionButton(
-                x + contentWidth - 64,
-                54,
-                "screen.worldarchive.settings.timing",
-                1);
-        EditBox destination = addTextRow(
-                "screen.worldarchive.settings.archive_folder",
-                draft.zipDestination(),
-                SettingsField.ZIP_DESTINATION,
-                x,
-                77,
-                contentWidth - 68,
-                2048,
-                value -> {
-                    zipFolderPicker.noteManualEdit();
-                    draft.setZipDestination(value);
-                    requestHealthProbe();
-                });
-        destination.setHint(Component.translatable("screen.worldarchive.settings.path_hint"));
-        zipBrowseButton = Button.builder(
-                        Component.translatable("screen.worldarchive.settings.browse"),
-                        ignored -> chooseZipFolder())
-                .bounds(x + contentWidth - 64, 77, 64, 20)
-                .build();
-        zipBrowseButton.active = !controlsLocked();
-        addRenderableWidget(zipBrowseButton);
-    }
-
-    private void addCompactZipTimingPage(int x, int contentWidth) {
-        addZipSectionButton(x, 54, "screen.worldarchive.settings.back", 0);
-        addTriggerRow(
-                x,
-                77,
-                contentWidth,
-                draft.zipManualEnabled(),
-                draft.zipWorldExitEnabled(),
-                draft.zipScheduledEnabled(),
-                draft::setZipManualEnabled,
-                draft::setZipWorldExitEnabled,
-                draft::setZipScheduledEnabled);
     }
 
     private void addZipSectionButton(int x, int y, String key, int section) {
