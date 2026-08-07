@@ -39,13 +39,13 @@ class SettingsLayoutTest {
     // Row positions below are derived from the pre-refactor
     // WorldArchiveSettingsScreen#addFullGitPage/addCompact*Page/addFullZipPage/addCompact*Page
     // hard-coded y-values, at a compact height (180, below COMPACT_HEIGHT_THRESHOLD=240) and a
-    // full height (240, at the threshold). compactHeaderY() (54) is the checkbox/nav-button row
-    // shared by every compact section, independent of layout height.
+    // full height (240, at the threshold). pagedHeaderY() (54) is the checkbox/nav-button row
+    // shared by every paged section, independent of layout height.
 
     @Test
-    void compactHeaderRowIsFixedRegardlessOfHeight() {
-        assertEquals(54, SettingsLayout.forHeight(180).compactHeaderY());
-        assertEquals(54, SettingsLayout.forHeight(400).compactHeaderY());
+    void pagedHeaderRowIsFixedRegardlessOfHeight() {
+        assertEquals(54, SettingsLayout.forHeight(180).pagedHeaderY());
+        assertEquals(54, SettingsLayout.forHeight(400).pagedHeaderY());
     }
 
     @Test
@@ -103,5 +103,57 @@ class SettingsLayoutTest {
         assertEquals(77, layout.zipRowY(1, 0));
 
         assertThrows(IllegalArgumentException.class, () -> layout.zipRowY(2, 0));
+    }
+
+    // A tall but narrow screen (content width below FULL_CONTENT_WIDTH) still renders the paged
+    // git/zip pages, exactly as the pre-refactor screen did: its addGitPage/addZipPage chose the
+    // full page only when the screen was both tall AND at least 300 content units wide. The row
+    // geometry must therefore follow the paged grid (header 54, rows from 77) and expose all
+    // three git / two zip sections, not the full-page grid.
+    @Test
+    void tallButNarrowScreensUseThePagedGitAndZipGrids() {
+        SettingsLayout layout = SettingsLayout.forScreen(
+                SettingsLayout.COMPACT_HEIGHT_THRESHOLD, SettingsLayout.FULL_CONTENT_WIDTH - 1);
+
+        assertFalse(layout.compact());
+        assertTrue(layout.paged());
+        assertEquals(3, layout.gitSectionCount());
+        assertEquals(2, layout.zipSectionCount());
+        assertEquals(54, layout.pagedHeaderY());
+
+        assertEquals(1, layout.gitSectionRowCount(0));
+        assertEquals(77, layout.gitRowY(0, 0));
+        assertEquals(2, layout.gitSectionRowCount(1));
+        assertEquals(77, layout.gitRowY(1, 0));
+        assertEquals(99, layout.gitRowY(1, 1));
+        assertEquals(1, layout.gitSectionRowCount(2));
+        assertEquals(77, layout.gitRowY(2, 0));
+
+        assertEquals(1, layout.zipSectionRowCount(0));
+        assertEquals(77, layout.zipRowY(0, 0));
+        assertEquals(1, layout.zipSectionRowCount(1));
+        assertEquals(77, layout.zipRowY(1, 0));
+    }
+
+    @Test
+    void tallAndWideScreensUseTheFullGitAndZipGrids() {
+        SettingsLayout layout = SettingsLayout.forScreen(
+                SettingsLayout.COMPACT_HEIGHT_THRESHOLD, SettingsLayout.FULL_CONTENT_WIDTH);
+
+        assertFalse(layout.paged());
+        assertEquals(1, layout.gitSectionCount());
+        assertEquals(1, layout.zipSectionCount());
+        assertEquals(54, layout.gitRowY(0, 0));
+        assertEquals(53, layout.zipRowY(0, 0));
+    }
+
+    @Test
+    void shortScreensStayPagedRegardlessOfWidth() {
+        SettingsLayout layout = SettingsLayout.forScreen(180, 1000);
+
+        assertTrue(layout.compact());
+        assertTrue(layout.paged());
+        assertEquals(3, layout.gitSectionCount());
+        assertEquals(77, layout.gitRowY(2, 0));
     }
 }

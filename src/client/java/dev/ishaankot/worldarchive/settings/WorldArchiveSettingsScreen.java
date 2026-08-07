@@ -124,11 +124,10 @@ public final class WorldArchiveSettingsScreen extends Screen {
 
     @Override
     protected void init() {
-        layout = SettingsLayout.forHeight(Math.max(height, 120));
         int contentWidth = ScreenGeometry.contentWidth(width, CONTENT_MIN, CONTENT_MAX, CONTENT_MARGIN);
-        boolean pagedDestinations = layout.compact() || contentWidth < 300;
-        gitSection = Math.min(gitSection, pagedDestinations ? 2 : 0);
-        zipSection = Math.min(zipSection, pagedDestinations ? 1 : 0);
+        layout = SettingsLayout.forScreen(Math.max(height, 120), contentWidth);
+        gitSection = Math.min(gitSection, layout.paged() ? 2 : 0);
+        zipSection = Math.min(zipSection, layout.paged() ? 1 : 0);
         validatedFields.clear();
         saveButton = null;
         gitBrowseButton = null;
@@ -192,7 +191,7 @@ public final class WorldArchiveSettingsScreen extends Screen {
     }
 
     private void addGitPage(int x, int contentWidth) {
-        boolean full = !layout.compact() && contentWidth >= 300;
+        boolean full = !layout.paged();
         int section = full ? 0 : gitSection;
         addGitHeader(x, contentWidth, full, section);
 
@@ -219,7 +218,7 @@ public final class WorldArchiveSettingsScreen extends Screen {
     }
 
     private void addGitHeader(int x, int contentWidth, boolean full, int section) {
-        int headerY = full ? layout.gitRowY(0, 0) : layout.compactHeaderY();
+        int headerY = full ? layout.gitRowY(0, 0) : layout.pagedHeaderY();
         if (full) {
             addCheckbox(
                     "screen.worldarchive.settings.git_enabled",
@@ -329,7 +328,7 @@ public final class WorldArchiveSettingsScreen extends Screen {
     }
 
     private void addZipPage(int x, int contentWidth) {
-        boolean full = !layout.compact() && contentWidth >= 300;
+        boolean full = !layout.paged();
         int section = full ? 0 : zipSection;
         addZipHeader(x, contentWidth, full, section);
 
@@ -351,7 +350,7 @@ public final class WorldArchiveSettingsScreen extends Screen {
     }
 
     private void addZipHeader(int x, int contentWidth, boolean full, int section) {
-        int headerY = full ? layout.zipRowY(0, 0) : layout.compactHeaderY();
+        int headerY = full ? layout.zipRowY(0, 0) : layout.pagedHeaderY();
         if (full) {
             addCheckbox(
                     "screen.worldarchive.settings.zip_enabled",
