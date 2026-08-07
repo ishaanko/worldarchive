@@ -4,6 +4,7 @@ import dev.ishaankot.worldarchive.core.BackupCapture;
 import dev.ishaankot.worldarchive.core.BackupOperation;
 import dev.ishaankot.worldarchive.core.OperationId;
 import dev.ishaankot.worldarchive.core.OperationPhase;
+import dev.ishaankot.worldarchive.core.Observers;
 import dev.ishaankot.worldarchive.core.OperationProgress;
 import dev.ishaankot.worldarchive.core.ProgressListener;
 import dev.ishaankot.worldarchive.model.BackupId;
@@ -939,19 +940,15 @@ public final class GitBackupBackend implements GitSnapshotStore {
             BackupManifest manifest,
             OperationPhase phase,
             String message) {
-        try {
-            listener.onProgress(new OperationProgress(
-                    operationId,
-                    manifest.worldId(),
-                    Optional.of(manifest.backupId()),
-                    BackupOperation.CREATE,
-                    phase,
-                    0,
-                    0,
-                    message));
-        } catch (RuntimeException ignored) {
-            // Storage integrity must not depend on an observer.
-        }
+        Observers.safely(() -> listener.onProgress(new OperationProgress(
+                operationId,
+                manifest.worldId(),
+                Optional.of(manifest.backupId()),
+                BackupOperation.CREATE,
+                phase,
+                0,
+                0,
+                message)));
     }
 
     private <T> CompletableFuture<T> submit(InterruptibleOperation<T> operation) {

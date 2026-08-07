@@ -3,7 +3,6 @@ package dev.ishaankot.worldarchive.core;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -137,17 +136,17 @@ public record WorldInventory(
     }
 
     private static String contentDigest(List<Entry> entries) {
-        MessageDigest digest = sha256();
+        MessageDigest digest = Digests.sha256();
         ByteBuffer number = ByteBuffer.allocate(Long.BYTES);
         for (Entry entry : entries) {
             putLong(digest, number, entry.size);
             digest.update(HexFormat.of().parseHex(entry.sha256));
         }
-        return HexFormat.of().formatHex(digest.digest());
+        return Digests.hex(digest.digest());
     }
 
     private static String inventoryDigest(List<Entry> entries) {
-        MessageDigest digest = sha256();
+        MessageDigest digest = Digests.sha256();
         ByteBuffer number = ByteBuffer.allocate(Long.BYTES);
         for (Entry entry : entries) {
             byte[] path = entry.path.getBytes(StandardCharsets.UTF_8);
@@ -156,15 +155,7 @@ public record WorldInventory(
             putLong(digest, number, entry.size);
             digest.update(HexFormat.of().parseHex(entry.sha256));
         }
-        return HexFormat.of().formatHex(digest.digest());
-    }
-
-    private static MessageDigest sha256() {
-        try {
-            return MessageDigest.getInstance("SHA-256");
-        } catch (NoSuchAlgorithmException exception) {
-            throw new IllegalStateException("The Java runtime does not provide SHA-256", exception);
-        }
+        return Digests.hex(digest.digest());
     }
 
     private static void putLong(MessageDigest digest, ByteBuffer number, long value) {

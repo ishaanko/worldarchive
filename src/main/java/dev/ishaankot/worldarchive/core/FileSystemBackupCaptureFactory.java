@@ -15,13 +15,11 @@ import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -186,7 +184,7 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
     }
 
     private static CopyResult copyAndHash(InputStream input, OutputStream output) throws IOException {
-        MessageDigest digest = sha256();
+        MessageDigest digest = Digests.sha256();
         byte[] buffer = new byte[COPY_BUFFER_BYTES];
         long size = 0;
         int read;
@@ -206,15 +204,7 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
                 throw new IOException("World file exceeds the capture size limit");
             }
         }
-        return new CopyResult(size, HexFormat.of().formatHex(digest.digest()));
-    }
-
-    private static MessageDigest sha256() {
-        try {
-            return MessageDigest.getInstance("SHA-256");
-        } catch (NoSuchAlgorithmException exception) {
-            throw new IllegalStateException("The Java runtime does not provide SHA-256", exception);
-        }
+        return new CopyResult(size, Digests.hex(digest.digest()));
     }
 
     private static void safeProgress(

@@ -112,11 +112,7 @@ public final class PreparedBackup implements AutoCloseable {
     }
 
     private static void safeNotify(Runnable observer) {
-        try {
-            observer.run();
-        } catch (RuntimeException ignored) {
-            // Resource ownership does not depend on an observer.
-        }
+        Observers.safely(observer);
     }
 
     record Resources(CapturedBackup capturedBackup) implements AutoCloseable {

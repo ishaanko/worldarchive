@@ -6,6 +6,7 @@ import dev.ishaankot.worldarchive.core.BackupCapture;
 import dev.ishaankot.worldarchive.core.BackupOperation;
 import dev.ishaankot.worldarchive.core.OperationId;
 import dev.ishaankot.worldarchive.core.OperationPhase;
+import dev.ishaankot.worldarchive.core.Observers;
 import dev.ishaankot.worldarchive.core.OperationProgress;
 import dev.ishaankot.worldarchive.core.ProgressListener;
 import dev.ishaankot.worldarchive.model.DestinationResult;
@@ -102,11 +103,7 @@ public final class ZipBackupBackend implements BackupBackend {
     }
 
     private static void report(ProgressListener listener, OperationProgress progress) {
-        try {
-            listener.onProgress(progress);
-        } catch (RuntimeException exception) {
-            // Observers cannot turn a durable destination outcome into a false failure.
-        }
+        Observers.safely(() -> listener.onProgress(progress));
     }
 
     private static long boundedProgress(long completed, long total) {

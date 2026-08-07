@@ -1,10 +1,10 @@
 package dev.ishaankot.worldarchive.storage.git;
 
+import dev.ishaankot.worldarchive.core.Digests;
 import dev.ishaankot.worldarchive.model.BackupManifest;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.HexFormat;
@@ -77,7 +77,7 @@ record GitInventory(
             putLong(digest, number, entry.size());
             digest.update(HexFormat.of().parseHex(entry.sha256()));
         }
-        return HexFormat.of().formatHex(digest.digest());
+        return Digests.hex(digest.digest());
     }
 
     private static String inventoryDigest(List<GitInventoryEntry> entries) {
@@ -90,7 +90,7 @@ record GitInventory(
             putLong(digest, number, entry.size());
             digest.update(HexFormat.of().parseHex(entry.sha256()));
         }
-        return HexFormat.of().formatHex(digest.digest());
+        return Digests.hex(digest.digest());
     }
 
     private static void putLong(MessageDigest digest, ByteBuffer number, long value) {
@@ -100,10 +100,6 @@ record GitInventory(
     }
 
     static MessageDigest sha256() {
-        try {
-            return MessageDigest.getInstance("SHA-256");
-        } catch (NoSuchAlgorithmException exception) {
-            throw new IllegalStateException("The Java runtime does not provide SHA-256", exception);
-        }
+        return Digests.sha256();
     }
 }

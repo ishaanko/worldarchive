@@ -813,11 +813,7 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
     private static void safeNotify(
             ProgressListener listener,
             OperationProgress progress) {
-        try {
-            listener.onProgress(progress);
-        } catch (RuntimeException ignored) {
-            // Operation correctness never depends on an observer.
-        }
+        Observers.safely(() -> listener.onProgress(progress));
     }
 
     private static void closeAfterFailure(

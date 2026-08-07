@@ -6,6 +6,7 @@ import dev.ishaankot.worldarchive.config.StoragePolicy;
 import dev.ishaankot.worldarchive.config.WorldArchiveConfig;
 import dev.ishaankot.worldarchive.config.WorldConfig;
 import dev.ishaankot.worldarchive.core.AsyncTasks;
+import dev.ishaankot.worldarchive.core.Digests;
 import dev.ishaankot.worldarchive.core.OperationId;
 import dev.ishaankot.worldarchive.core.WorldOperationGate;
 import dev.ishaankot.worldarchive.model.ArtifactOwnership;
@@ -29,7 +30,6 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -38,7 +38,6 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -718,12 +717,7 @@ public final class ManagedStorageService {
             Map<BackupId, GitSnapshot> gitSnapshots,
             long gitBytes,
             long zipBytes) throws IOException {
-        MessageDigest digest;
-        try {
-            digest = MessageDigest.getInstance("SHA-256");
-        } catch (NoSuchAlgorithmException exception) {
-            throw new IllegalStateException("Java does not provide SHA-256", exception);
-        }
+        MessageDigest digest = Digests.sha256();
         update(digest, world.storagePolicy().toString());
         update(digest, Long.toString(gitBytes));
         update(digest, Long.toString(zipBytes));
@@ -742,7 +736,7 @@ public final class ManagedStorageService {
                     update(digest, entry.getKey().toString());
                     update(digest, entry.getValue().commitId());
                 });
-        return HexFormat.of().formatHex(digest.digest());
+        return Digests.hex(digest.digest());
     }
 
     private static void update(MessageDigest digest, String value) {
