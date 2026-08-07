@@ -2,6 +2,7 @@ package dev.ishaankot.worldarchive.settings;
 
 import dev.ishaankot.worldarchive.config.WorldConfig;
 import dev.ishaankot.worldarchive.model.WorldId;
+import dev.ishaankot.worldarchive.ui.Widgets;
 import java.util.List;
 import java.util.Objects;
 import net.minecraft.ChatFormatting;
@@ -118,14 +119,13 @@ final class WorldSettingsPage {
     }
 
     private void addEditor(WorldConfig world, int x, int y, int contentWidth) {
-        screen.addSettingsText(new StringWidget(
+        screen.addSettingsText(Widgets.title(
+                screen.settingsFont(),
                 x,
                 y,
                 contentWidth,
                 20,
-                Component.literal(folderName(world) + "  [" + world.worldId().displayCode() + "]")
-                        .withStyle(ChatFormatting.BOLD),
-                screen.settingsFont()));
+                Component.literal(folderName(world) + "  [" + world.worldId().displayCode() + "]")));
         Checkbox checkbox = screen.addCheckbox(
                 Component.translatable("screen.worldarchive.settings.world_enabled"),
                 screen.draft().worldEnabled(world.worldId()),

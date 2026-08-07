@@ -5,12 +5,15 @@ import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.components.StringWidget;
 import net.minecraft.network.chat.Component;
 
-/** Small reusable factories for the StringWidget idioms repeated across backup/cleanup screens. */
-final class Widgets {
+/**
+ * Small reusable factories for the StringWidget idioms repeated across backup/cleanup/settings
+ * screens.
+ */
+public final class Widgets {
     private Widgets() {}
 
     /** Bold title row, the screen's own {@code title} restyled and laid out at the top of the page. */
-    static StringWidget title(
+    public static StringWidget title(
             Font font,
             int x,
             int y,
@@ -21,7 +24,7 @@ final class Widgets {
     }
 
     /** Plain left-aligned label built from a literal string, unstyled. */
-    static StringWidget label(
+    public static StringWidget label(
             Font font,
             int x,
             int y,
@@ -32,7 +35,7 @@ final class Widgets {
     }
 
     /** Muted (gray) status or footer line built from a literal string. */
-    static StringWidget muted(
+    public static StringWidget muted(
             Font font,
             int x,
             int y,

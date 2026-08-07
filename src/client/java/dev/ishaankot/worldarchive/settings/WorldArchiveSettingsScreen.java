@@ -1,6 +1,8 @@
 package dev.ishaankot.worldarchive.settings;
 
 import dev.ishaankot.worldarchive.config.WorldArchiveConfig;
+import dev.ishaankot.worldarchive.ui.Widgets;
+import dev.ishaankot.worldarchive.ui.model.ScreenGeometry;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.EnumMap;
@@ -10,7 +12,6 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
-import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.Checkbox;
 import net.minecraft.client.gui.components.EditBox;
@@ -27,6 +28,12 @@ public final class WorldArchiveSettingsScreen extends Screen {
     private static final int ERROR_TEXT_COLOR = 0xFFFF7777;
 
     private static final int ROW_HEIGHT = 22;
+
+    private static final int CONTENT_MIN = 180;
+
+    private static final int CONTENT_MAX = 640;
+
+    private static final int CONTENT_MARGIN = 20;
 
     private final Screen parent;
 
@@ -118,7 +125,7 @@ public final class WorldArchiveSettingsScreen extends Screen {
     @Override
     protected void init() {
         layout = SettingsLayout.forHeight(Math.max(height, 120));
-        int contentWidth = Math.min(640, Math.max(180, width - 20));
+        int contentWidth = ScreenGeometry.contentWidth(width, CONTENT_MIN, CONTENT_MAX, CONTENT_MARGIN);
         boolean pagedDestinations = layout.compact() || contentWidth < 300;
         gitSection = Math.min(gitSection, pagedDestinations ? 2 : 0);
         zipSection = Math.min(zipSection, pagedDestinations ? 1 : 0);
@@ -128,14 +135,8 @@ public final class WorldArchiveSettingsScreen extends Screen {
         zipBrowseButton = null;
         statusWidget = null;
 
-        int contentX = (width - contentWidth) / 2;
-        addRenderableOnly(new StringWidget(
-                contentX,
-                5,
-                contentWidth,
-                18,
-                title.copy().withStyle(ChatFormatting.BOLD),
-                font));
+        int contentX = ScreenGeometry.centerX(width, contentWidth);
+        addRenderableOnly(Widgets.title(font, contentX, 5, contentWidth, 18, title));
         addTabs(contentX, contentWidth);
         switch (page) {
             case GIT -> addGitPage(contentX, contentWidth);
