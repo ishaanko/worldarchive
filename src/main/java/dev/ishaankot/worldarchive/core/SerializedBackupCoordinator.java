@@ -6,7 +6,6 @@ import dev.ishaankot.worldarchive.model.BackupManifest;
 import dev.ishaankot.worldarchive.model.BackupRecord;
 import dev.ishaankot.worldarchive.model.BackupResult;
 import dev.ishaankot.worldarchive.model.BackupTrigger;
-import dev.ishaankot.worldarchive.model.DestinationHealth;
 import dev.ishaankot.worldarchive.model.DestinationResult;
 import dev.ishaankot.worldarchive.model.DestinationStatus;
 import dev.ishaankot.worldarchive.model.DestinationType;
@@ -15,14 +14,10 @@ import dev.ishaankot.worldarchive.model.WorldId;
 import java.io.IOException;
 import java.time.Clock;
 import java.time.Instant;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Deque;
-import java.util.EnumSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -62,7 +57,7 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
 
     private final Clock clock;
 
-    private final ConcurrentMap<WorldId, WorldLane> lanes = new ConcurrentHashMap<>();
+    private final ConcurrentMap<WorldId, WorldLane<CreateOperation>> lanes = new ConcurrentHashMap<>();
 
     private final ConcurrentMap<WorldId, OperationProgress> capturePreparations = new ConcurrentHashMap<>();
 
@@ -295,7 +290,7 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
         if (preparation != null && preparation.phase() != OperationPhase.QUEUED) {
             return Optional.of(preparation);
         }
-        WorldLane lane = lanes.get(worldId);
+        WorldLane<CreateOperation> lane = lanes.get(worldId);
         if (lane != null) {
             synchronized (lane) {
                 if (lane.active != null) {
@@ -306,56 +301,14 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
         return Optional.ofNullable(preparation);
     }
 
-    @Override
-    public CompletionStage<List<BackupRecord>> listBackups(Optional<WorldId> worldId) {
-        return maintenanceService.listBackups(worldId);
-    }
-
-    @Override
-    public CompletionStage<Optional<BackupRecord>> findBackup(BackupId backupId) {
-        return maintenanceService.findBackup(backupId);
-    }
-
-    @Override
-    public CompletionStage<RestoreBackupResult> restoreBackup(
-            RestoreBackupRequest request,
-            ProgressListener progressListener) {
-        return maintenanceService.restoreBackup(request, progressListener);
-    }
-
-    @Override
-    public CompletionStage<DeletePreparation> prepareDelete(BackupId backupId) {
-        return maintenanceService.prepareDelete(backupId);
-    }
-
-    @Override
-    public CompletionStage<BackupResult> deleteBackup(
-            DeleteBackupRequest request,
-            ProgressListener progressListener) {
-        return maintenanceService.deleteBackup(request, progressListener);
-    }
-
-    @Override
-    public CompletionStage<BackupResult> verifyBackup(
-            BackupId backupId,
-            ProgressListener progressListener) {
-        return maintenanceService.verifyBackup(backupId, progressListener);
-    }
-
-    @Override
-    public CompletionStage<BackupResult> syncBackup(
-            BackupId backupId,
-            ProgressListener progressListener) {
-        return maintenanceService.syncBackup(backupId, progressListener);
-    }
-
-    @Override
-    public CompletionStage<List<DestinationHealth>> health(Optional<WorldId> worldId) {
-        return maintenanceService.health(worldId);
+    /** Non-create operations composed with this coordinator; exposed for direct routing by callers. */
+    public BackupMaintenanceService maintenanceService() {
+        return maintenanceService;
     }
 
     private CompletionStage<BackupResult> enqueue(CreateOperation operation) {
-        WorldLane lane = lanes.computeIfAbsent(operation.request.worldId(), ignored -> new WorldLane());
+        WorldLane<CreateOperation> lane = lanes.computeIfAbsent(
+                operation.request.worldId(), ignored -> new WorldLane<>());
         operation.lane = lane;
         CreateOperation start = null;
         synchronized (lane) {
@@ -383,7 +336,7 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
     }
 
     private static CreateOperation compatibleOperation(
-            WorldLane lane,
+            WorldLane<CreateOperation> lane,
             CreateOperation requested) {
         if (lane.active != null && lane.active.isCompatibleWith(requested)) {
             return lane.active;
@@ -395,7 +348,7 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
         return null;
     }
 
-    private static CreateOperation activateNext(WorldLane lane) {
+    private static CreateOperation activateNext(WorldLane<CreateOperation> lane) {
         CreateOperation next = lane.queue.pollFirst();
         lane.active = next;
         return next;
@@ -592,7 +545,7 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
     private void cancel(CreateOperation operation, boolean mayInterrupt) {
         operation.cancelled.set(true);
         operation.interruptRequested.compareAndSet(false, mayInterrupt);
-        WorldLane lane = operation.lane;
+        WorldLane<CreateOperation> lane = operation.lane;
         boolean queued = false;
         if (lane != null) {
             synchronized (lane) {
@@ -681,7 +634,7 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
 
     private CreateOperation releaseLane(CreateOperation operation) {
         CreateOperation next = null;
-        WorldLane lane = operation.lane;
+        WorldLane<CreateOperation> lane = operation.lane;
         if (lane != null) {
             synchronized (lane) {
                 if (lane.active == operation) {
@@ -864,7 +817,7 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
 
         private volatile boolean previousInventoryPresent;
 
-        private volatile WorldLane lane;
+        private volatile WorldLane<CreateOperation> lane;
 
         private CreateOperation(
                 CreateBackupRequest request,
@@ -923,28 +876,4 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
         }
     }
 
-    private static final class WorldLane {
-        private final Deque<CreateOperation> queue = new ArrayDeque<>();
-
-        private CreateOperation active;
-    }
-
-    private record DestinationPlan(List<BackupBackend> backends) {
-        private DestinationPlan {
-            backends = List.copyOf(Objects.requireNonNull(backends, "backends"));
-            Set<DestinationType> destinations = EnumSet.noneOf(DestinationType.class);
-            for (BackupBackend backend : backends) {
-                Objects.requireNonNull(backend, "backend");
-                if (!destinations.add(backend.destinationType())) {
-                    throw new IllegalArgumentException("Each destination may be selected only once");
-                }
-            }
-        }
-    }
-
-    private enum CancellationState {
-        CANCELLABLE,
-        CANCELLATION_REQUESTED,
-        COMMITTING
-    }
 }

@@ -116,6 +116,8 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
 
     private final BackupCoordinator coordinatorView = new RuntimeBackupCoordinator(this);
 
+    private final BackupService serviceView = new RuntimeBackupService(this, coordinatorView);
+
     private final BackupImportService importsView = new RuntimeBackupImportService(this);
 
     private final RuntimeStorageCoordinator storageView = new RuntimeStorageCoordinator(this);
@@ -388,7 +390,7 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
 
     @Override
     public BackupService backupService() {
-        return coordinatorView;
+        return serviceView;
     }
 
     @Override
