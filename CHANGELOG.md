@@ -19,6 +19,12 @@
 - Allow synchronized Git snapshots to be evicted locally and rehydrated from
   their unchanged remote ref when a later verification or restore needs them.
 
+### Removed
+
+- Remove zip link-in-place import mode; only copy-into-managed-storage import
+  remains. Existing link-imported records are reported as missing (not a
+  crash) and can be re-imported with copy.
+
 ## 0.3.1 (2026-07-22)
 
 ### Changed

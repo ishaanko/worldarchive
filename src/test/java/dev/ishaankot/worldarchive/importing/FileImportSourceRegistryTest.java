@@ -18,18 +18,25 @@ final class FileImportSourceRegistryTest {
 
     @Test
     void roundTripsAndUnlinksExternalArtifactsWithoutTouchingTheirFolder() throws Exception {
+        // ZIP_LINK sources are no longer created (zip link-in-place import was
+        // removed), but a registry written by an older release may still contain
+        // one; the registry must keep decoding and unlinking it correctly.
         Path linkedFolder = temporaryDirectory.resolve("linked").toAbsolutePath().normalize();
         java.nio.file.Files.createDirectories(linkedFolder);
         BackupId backupId = BackupId.create();
         WorldId worldId = WorldId.create();
         ImportSourceId sourceId = ImportSourceId.derived("ZIP_LINK\0" + linkedFolder);
-        ImportSource source = ImportSource.zipLink(sourceId, linkedFolder, Map.of(
-                backupId,
-                new ImportArtifactBinding(
-                        worldId,
+        ImportSource source = new ImportSource(
+                sourceId,
+                ImportSourceMode.ZIP_LINK,
+                linkedFolder.toString(),
+                Map.of(
                         backupId,
-                        "nested/archive.zip",
-                        "a".repeat(64))));
+                        new ImportArtifactBinding(
+                                worldId,
+                                backupId,
+                                "nested/archive.zip",
+                                "a".repeat(64))));
         FileImportSourceRegistry registry = new FileImportSourceRegistry(
                 temporaryDirectory.resolve("sources.json"));
 

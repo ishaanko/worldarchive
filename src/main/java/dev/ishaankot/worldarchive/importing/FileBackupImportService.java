@@ -131,14 +131,13 @@ public final class FileBackupImportService implements BackupImportService, AutoC
     }
 
     @Override
-    public CompletionStage<ImportPreview> previewZip(Path folder, ZipImportMode mode) {
+    public CompletionStage<ImportPreview> previewZip(Path folder) {
         Path selected = Objects.requireNonNull(folder, "folder").toAbsolutePath().normalize();
-        Objects.requireNonNull(mode, "mode");
         return AsyncTasks.supply(executor, () -> {
             try {
                 ZipImportScan scan = new ZipImportScanner().scan(selected);
                 UUID token = UUID.randomUUID();
-                ZipPlan plan = new ZipPlan(token, selected, mode, scan);
+                ZipPlan plan = new ZipPlan(token, selected, scan);
                 ImportPreview preview = zipPreview(plan);
                 retain(plan);
                 return preview;
@@ -301,24 +300,10 @@ public final class FileBackupImportService implements BackupImportService, AutoC
     private ImportPreview zipPreview(ZipPlan plan) throws IOException {
         List<ImportPreviewItem> items = new ArrayList<>();
         for (ZipImportCandidate candidate : plan.scan().candidates()) {
-            ImportSourceId previewSource = zipSourceId(plan.folder());
-            DestinationResult destination = plan.mode() == ZipImportMode.COPY
-                    ? DestinationResult.success(
+            DestinationResult destination = DestinationResult.success(
                             DestinationType.ZIP,
-                            zipPreviewArtifactId(
-                                    candidate.manifest(),
-                                    candidate.archivePath(),
-                                    plan.mode()))
-                            .withVerification(VerificationStatus.VERIFIED)
-                    : DestinationResult.externalSuccess(
-                            DestinationType.ZIP,
-                            zipPreviewArtifactId(
-                                    candidate.manifest(),
-                                    candidate.archivePath(),
-                                    plan.mode()),
-                            previewSource,
-                            VerificationStatus.VERIFIED,
-                            SyncStatus.NOT_CONFIGURED);
+                            zipPreviewArtifactId(candidate.manifest()))
+                    .withVerification(VerificationStatus.VERIFIED);
             items.add(previewItem(candidate.manifest(), destination));
         }
         List<String> issues = plan.scan().issues().stream()
@@ -450,47 +435,24 @@ public final class FileBackupImportService implements BackupImportService, AutoC
 
     private ImportSummary executeZip(ZipPlan plan, Set<BackupId> selected) throws IOException {
         MutableSummary summary = new MutableSummary(ImportKind.ZIP, plan.scan().issues().size());
-        ImportSourceId sourceId = zipSourceId(plan.folder());
-        Map<BackupId, ImportArtifactBinding> bindings = new LinkedHashMap<>();
         List<ZipImportCandidate> candidates = selectedZipCandidates(plan, selected);
         for (ZipImportCandidate candidate : candidates) {
             dev.ishaankot.worldarchive.storage.zip.ZipBackupStore
                     .requireUnchangedImportCandidate(candidate);
         }
-        if (plan.mode() == ZipImportMode.LINK && !candidates.isEmpty()) {
-            for (ZipImportCandidate candidate : candidates) {
-                bindings.put(candidate.manifest().backupId(), new ImportArtifactBinding(
-                        candidate.manifest().worldId(),
-                        candidate.manifest().backupId(),
-                        relativeLocator(plan.folder(), candidate.archivePath()),
-                        candidate.archiveSha256()));
-            }
-            sources.put(ImportSource.zipLink(sourceId, plan.folder(), bindings));
-        }
         for (ZipImportCandidate candidate : candidates) {
-            DestinationResult destination = importZipDestination(plan, sourceId, candidate);
+            DestinationResult destination = importZipDestination(candidate);
             deletions.restore(candidate.manifest().backupId());
             merge(summary, record(candidate.manifest(), destination));
         }
         return summary.finish(Map.of());
     }
 
-    private DestinationResult importZipDestination(
-            ZipPlan plan,
-            ImportSourceId sourceId,
-            ZipImportCandidate candidate) throws IOException {
-        if (plan.mode() == ZipImportMode.COPY) {
-            ZipBackupArtifact artifact = zipStores.store(
-                    candidate.manifest().worldId()).importCopy(candidate);
-            return DestinationResult.success(DestinationType.ZIP, artifact.artifactId())
-                    .withVerification(VerificationStatus.VERIFIED);
-        }
-        return DestinationResult.externalSuccess(
-                DestinationType.ZIP,
-                managedZipArtifactId(candidate.manifest(), candidate.archivePath()),
-                sourceId,
-                VerificationStatus.VERIFIED,
-                SyncStatus.NOT_CONFIGURED);
+    private DestinationResult importZipDestination(ZipImportCandidate candidate) throws IOException {
+        ZipBackupArtifact artifact = zipStores.store(
+                candidate.manifest().worldId()).importCopy(candidate);
+        return DestinationResult.success(DestinationType.ZIP, artifact.artifactId())
+                .withVerification(VerificationStatus.VERIFIED);
     }
 
     private static List<ZipImportCandidate> selectedZipCandidates(
@@ -709,34 +671,12 @@ public final class FileBackupImportService implements BackupImportService, AutoC
                         manifest.createdAt()));
     }
 
-    private static String managedZipArtifactId(BackupManifest manifest, Path archive) {
-        return manifest.worldId() + "/" + archive.getFileName();
-    }
-
-    static String zipPreviewArtifactId(
-            BackupManifest manifest,
-            Path archive,
-            ZipImportMode mode) {
-        Objects.requireNonNull(mode, "mode");
-        return mode == ZipImportMode.COPY
-                ? manifest.worldId() + "/" + ZipBackupStore.archiveFilename(manifest)
-                : managedZipArtifactId(manifest, archive);
-    }
-
-    private static String relativeLocator(Path root, Path archive) throws IOException {
-        Path relative = root.relativize(archive.toAbsolutePath().normalize());
-        if (relative.toString().isBlank() || relative.startsWith("..")) {
-            throw new IOException("ZIP import path escapes its selected folder");
-        }
-        return relative.toString().replace('\\', '/');
+    static String zipPreviewArtifactId(BackupManifest manifest) {
+        return manifest.worldId() + "/" + ZipBackupStore.archiveFilename(manifest);
     }
 
     private static String zipIssue(ZipImportIssue issue) {
         return issue.path() + ": " + issue.message();
-    }
-
-    private static ImportSourceId zipSourceId(Path folder) {
-        return ImportSourceId.derived("ZIP_LINK\0" + folder.toAbsolutePath().normalize());
     }
 
     private static ImportSourceId gitSourceId(
@@ -772,7 +712,6 @@ public final class FileBackupImportService implements BackupImportService, AutoC
     private record ZipPlan(
             UUID token,
             Path folder,
-            ZipImportMode mode,
             ZipImportScan scan) implements PreparedPlan {
         @Override
         public Set<BackupId> backupIds() {

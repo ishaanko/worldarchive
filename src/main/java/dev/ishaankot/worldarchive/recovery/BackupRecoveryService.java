@@ -923,7 +923,7 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
         gitBackend.ifPresent(backend -> result.put(
                 DestinationType.GIT, new GitRecoveryDestination(backend, clock, sources)));
         zipStore.ifPresent(store -> result.put(
-                DestinationType.ZIP, new ZipRecoveryDestination(store, clock, sources)));
+                DestinationType.ZIP, new ZipRecoveryDestination(store, clock)));
         return result;
     }
 

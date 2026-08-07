@@ -43,7 +43,7 @@ final class FileBackupImportServiceRetentionTest {
 
         try (Fixture fixture = fixture(clock)) {
             ImportPreview preview = fixture.imports()
-                    .previewZip(source, ZipImportMode.COPY)
+                    .previewZip(source)
                     .toCompletableFuture()
                     .join();
             clock.advance(FileBackupImportService.PREVIEW_LIFETIME);
@@ -64,7 +64,7 @@ final class FileBackupImportServiceRetentionTest {
                     index <= FileBackupImportService.MAXIMUM_PREPARED_PREVIEWS;
                     index++) {
                 previews.add(fixture.imports()
-                        .previewZip(source, ZipImportMode.COPY)
+                        .previewZip(source)
                         .toCompletableFuture()
                         .join());
                 clock.advance(Duration.ofNanos(1));
@@ -94,7 +94,7 @@ final class FileBackupImportServiceRetentionTest {
 
         try (Fixture fixture = fixture(clock, executor)) {
             ImportPreview preview = fixture.imports()
-                    .previewZip(source, ZipImportMode.COPY)
+                    .previewZip(source)
                     .toCompletableFuture()
                     .join();
             reject.set(true);
@@ -123,7 +123,7 @@ final class FileBackupImportServiceRetentionTest {
 
         try (Fixture fixture = fixture(clock, executor)) {
             var preview = assertDoesNotThrow(
-                    () -> fixture.imports().previewZip(source, ZipImportMode.COPY));
+                    () -> fixture.imports().previewZip(source));
             CompletionException failure = assertThrows(
                     CompletionException.class,
                     () -> preview.toCompletableFuture().join());

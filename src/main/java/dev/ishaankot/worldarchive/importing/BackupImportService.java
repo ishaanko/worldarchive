@@ -7,7 +7,7 @@ import java.util.concurrent.CompletionStage;
 
 /** Preview-first import and local catalog reconstruction API. */
 public interface BackupImportService {
-    CompletionStage<ImportPreview> previewZip(Path folder, ZipImportMode mode);
+    CompletionStage<ImportPreview> previewZip(Path folder);
 
     CompletionStage<ImportPreview> previewGit(
             String remote,

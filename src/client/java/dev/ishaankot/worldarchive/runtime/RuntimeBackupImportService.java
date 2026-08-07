@@ -5,7 +5,6 @@ import dev.ishaankot.worldarchive.importing.GitConnectionMode;
 import dev.ishaankot.worldarchive.importing.GitHydrationMode;
 import dev.ishaankot.worldarchive.importing.ImportPreview;
 import dev.ishaankot.worldarchive.importing.ImportSummary;
-import dev.ishaankot.worldarchive.importing.ZipImportMode;
 import dev.ishaankot.worldarchive.settings.ClientSettingsAccess;
 import java.nio.file.Path;
 import java.util.Objects;
@@ -28,8 +27,8 @@ final class RuntimeBackupImportService implements BackupImportService {
     }
 
     @Override
-    public CompletionStage<ImportPreview> previewZip(Path folder, ZipImportMode mode) {
-        return preview(service -> service.previewZip(folder, mode));
+    public CompletionStage<ImportPreview> previewZip(Path folder) {
+        return preview(service -> service.previewZip(folder));
     }
 
     @Override

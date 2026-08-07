@@ -200,6 +200,56 @@ class BackupRecoveryServiceTest extends BackupRecoveryServiceTestSupport {
     }
 
     @Test
+    void legacyLinkedZipDestinationDegradesLikeAMissingArtifactInsteadOfCrashing()
+            throws IOException {
+        // Zip link-in-place import was removed. A record persisted by an older
+        // release can still carry an EXTERNAL-owned ZIP destination; recovery must
+        // treat it exactly like a managed archive whose file is missing, not throw.
+        Fixture fixture = fixture(DestinationType.ZIP);
+        DestinationResult legacyLinked = DestinationResult.externalSuccess(
+                DestinationType.ZIP,
+                fixture.destination(DestinationType.ZIP).artifactId().orElseThrow(),
+                dev.ishaankot.worldarchive.model.ImportSourceId.derived("legacy linked folder"),
+                dev.ishaankot.worldarchive.model.VerificationStatus.VERIFIED,
+                dev.ishaankot.worldarchive.model.SyncStatus.NOT_CONFIGURED);
+        BackupRecord legacyRecord = new BackupRecord(
+                fixture.record().manifest(),
+                BackupResult.aggregate(
+                        fixture.backupId(),
+                        fixture.worldId(),
+                        List.of(legacyLinked),
+                        CREATED_AT.plusSeconds(1)));
+        ZipRecoveryDestination adapter = new ZipRecoveryDestination(
+                new ZipBackupStore(temporaryDirectory.resolve("legacy-linked-store")),
+                Clock.systemUTC());
+
+        VerificationOutcome outcome = adapter.verify(legacyRecord, legacyLinked);
+
+        assertFalse(outcome.valid());
+        assertEquals(
+                "The selected ZIP archive is missing or is not a regular file.",
+                outcome.message());
+
+        BackupRecoveryService service = service(
+                new InMemoryCatalog(legacyRecord),
+                Map.of(DestinationType.ZIP, adapter),
+                Clock.systemUTC());
+        Path worlds = Files.createDirectory(
+                temporaryDirectory.resolve("legacy-linked-worlds"));
+
+        CompletionException failure = assertThrows(
+                CompletionException.class,
+                () -> service.restoreBackup(
+                                new RestoreBackupRequest(
+                                        fixture.backupId(), worlds, "Legacy Linked"),
+                                ProgressListener.NO_OP)
+                        .toCompletableFuture().join());
+        assertInstanceOf(BackupRecoveryException.class, failure.getCause());
+        assertEquals(
+                "No valid destination can restore this backup", failure.getCause().getMessage());
+    }
+
+    @Test
     void gitVerificationRejectsManifestThatDiffersFromCatalog() {
         Fixture fixture = fixture(DestinationType.GIT);
         BackupManifest original = fixture.record().manifest();

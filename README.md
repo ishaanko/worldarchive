@@ -20,7 +20,7 @@ always restores backups as new worlds without modifying the original.
 - Per-world storage budgets, Git/ZIP usage, and growth forecasts
 - Previewed daily/weekly/monthly cleanup that preserves labeled story milestones
 - Previewed recovery of existing WorldArchive Git histories
-- Copy or read-only link import for folders of WorldArchive ZIP archives
+- Copy import for folders of WorldArchive ZIP archives
 - Offline catalog and Git-ref rebuilding from managed backup storage
 - Recovery-only access to backups for worlds whose save folders are gone
 - Partial-success reporting when one destination fails
@@ -117,11 +117,8 @@ source when verifying or restoring. Imports are recovery-only; configure a
 world's repository separately in Settings for future backups. WorldArchive
 never contacts imported repositories automatically at startup.
 
-For backup folders, **Folder files: Copy into WorldArchive** publishes verified
-archives into managed storage. **Folder files: Leave in selected folder** keeps
-archives where they are and records a pinned checksum and relative path.
-Deleting a linked backup only removes WorldArchive's catalog link—the source ZIP
-is untouched.
+For backup folders, choosing a folder and clicking **Choose Backup Folder**
+publishes verified archives into managed storage.
 
 Use **Find Stored Backups** to recover catalog entries and missing Git snapshot
 refs from local managed repository histories and ZIP archives. This search is

@@ -11,7 +11,6 @@ import dev.ishaankot.worldarchive.model.DestinationResult;
 import dev.ishaankot.worldarchive.model.DestinationType;
 import dev.ishaankot.worldarchive.model.WorldId;
 import dev.ishaankot.worldarchive.storage.zip.ZipBackupStore;
-import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -53,16 +52,10 @@ class FileBackupImportServicePreviewTest {
     @Test
     void copyPreviewUsesTheCanonicalManagedArchiveName() {
         BackupManifest manifest = manifest();
-        Path renamedArchive = Path.of("renamed-backup.zip");
 
         assertEquals(
                 manifest.worldId() + "/" + ZipBackupStore.archiveFilename(manifest),
-                FileBackupImportService.zipPreviewArtifactId(
-                        manifest, renamedArchive, ZipImportMode.COPY));
-        assertEquals(
-                manifest.worldId() + "/renamed-backup.zip",
-                FileBackupImportService.zipPreviewArtifactId(
-                        manifest, renamedArchive, ZipImportMode.LINK));
+                FileBackupImportService.zipPreviewArtifactId(manifest));
     }
 
     private static BackupManifest manifest() {
