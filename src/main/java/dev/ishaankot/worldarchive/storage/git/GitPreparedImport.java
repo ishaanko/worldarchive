@@ -60,7 +60,7 @@ public final class GitPreparedImport implements AutoCloseable {
     @Override
     public void close() {
         if (closed.compareAndSet(false, true)) {
-            GitTemporaryDirectory.deleteUnlessLocked(cleanupRoot);
+            GitTemporaryFiles.deleteUnlessLocked(cleanupRoot);
         }
     }
 }

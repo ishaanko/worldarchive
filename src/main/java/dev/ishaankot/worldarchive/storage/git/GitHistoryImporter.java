@@ -63,7 +63,7 @@ final class GitHistoryImporter {
             return prepared;
         } finally {
             if (!retained) {
-                GitTemporaryDirectory.deleteUnlessLocked(workspace);
+                GitTemporaryFiles.deleteUnlessLocked(workspace);
             }
         }
     }

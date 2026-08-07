@@ -1,6 +1,7 @@
 package dev.ishaankot.worldarchive.storage.zip;
 
 import dev.ishaankot.worldarchive.core.FileSystemSafety;
+import dev.ishaankot.worldarchive.core.PathGuards;
 import java.io.IOException;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
@@ -15,35 +16,20 @@ final class ManagedPathGuard {
 
     static void createDirectories(Path directory, String message) throws IOException {
         Path absolute = requireAbsolute(directory);
-        Path current = absolute.getRoot();
-        if (current == null) {
-            throw new ZipBackupException(message);
-        }
-        requireDirectoryComponent(current, message);
-        for (Path segment : absolute) {
-            current = current.resolve(segment);
-            if (!Files.exists(current, LinkOption.NOFOLLOW_LINKS)) {
-                try {
-                    Files.createDirectory(current);
-                } catch (FileAlreadyExistsException exception) {
-                    // A racing creator is accepted only after the same no-link validation.
-                }
-            }
-            requireDirectoryComponent(current, message);
-        }
+        PathGuards.createDirectories(
+                absolute,
+                () -> new ZipBackupException(message),
+                attributeReader(message),
+                () -> new ZipBackupException(message));
     }
 
     static void requireDirectory(Path directory, String message) throws IOException {
         Path absolute = requireAbsolute(directory);
-        Path current = absolute.getRoot();
-        if (current == null) {
-            throw new ZipBackupException(message);
-        }
-        requireDirectoryComponent(current, message);
-        for (Path segment : absolute) {
-            current = current.resolve(segment);
-            requireDirectoryComponent(current, message);
-        }
+        PathGuards.requireDirectory(
+                absolute,
+                () -> new ZipBackupException(message),
+                attributeReader(message),
+                () -> new ZipBackupException(message));
     }
 
     static void requireExistingAncestors(Path path, String message) throws IOException {
@@ -128,5 +114,9 @@ final class ManagedPathGuard {
         } catch (IOException exception) {
             throw new ZipBackupException(message, exception);
         }
+    }
+
+    private static PathGuards.AttributeReader<ZipBackupException> attributeReader(String message) {
+        return path -> read(path, message);
     }
 }

@@ -113,7 +113,7 @@ final class GitSnapshotCreator {
             refs.updateWithRollback(snapshotRef, commit, Optional.empty());
             return snapshot;
         } finally {
-            GitTemporaryDirectory.deleteUnlessLocked(temporary);
+            GitTemporaryFiles.deleteUnlessLocked(temporary);
         }
     }
 

@@ -533,7 +533,7 @@ public final class GitBackupBackend implements GitSnapshotStore {
                 // Re-hash the fully materialized restore before returning it to its publisher.
             }
         } finally {
-            GitTemporaryDirectory.deleteUnlessLocked(temporary);
+            GitTemporaryFiles.deleteUnlessLocked(temporary);
         }
     }
 
