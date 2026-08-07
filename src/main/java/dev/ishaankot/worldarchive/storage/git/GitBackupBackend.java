@@ -22,8 +22,6 @@ import java.util.concurrent.Executors;
 public final class GitBackupBackend implements GitSnapshotStore {
     static final String MANIFEST_PATH = ".worldarchive-manifest.json";
 
-    private static final String ZERO_OBJECT_ID = "0000000000000000000000000000000000000000";
-
     private final GitBackendSettings settings;
 
     private final GitCommandRunner runner;

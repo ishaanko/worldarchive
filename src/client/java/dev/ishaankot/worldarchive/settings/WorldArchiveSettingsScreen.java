@@ -27,8 +27,6 @@ public final class WorldArchiveSettingsScreen extends Screen {
 
     private static final int ERROR_TEXT_COLOR = 0xFFFF7777;
 
-    private static final int ROW_HEIGHT = 22;
-
     private static final int CONTENT_MIN = 180;
 
     private static final int CONTENT_MAX = 640;

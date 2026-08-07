@@ -59,10 +59,6 @@ public final class WorldArchiveSettingsRepository {
         return current;
     }
 
-    public List<Path> currentKnownWorldPaths() {
-        return snapshotWorldPaths();
-    }
-
     public Path file() {
         return store.file();
     }

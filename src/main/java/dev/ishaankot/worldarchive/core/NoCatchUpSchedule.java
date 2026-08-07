@@ -46,10 +46,6 @@ public final class NoCatchUpSchedule {
         return nextRunAt;
     }
 
-    public Duration interval() {
-        return interval;
-    }
-
     private static Duration requireInterval(Duration interval) {
         Objects.requireNonNull(interval, "interval");
         if (interval.isZero() || interval.isNegative()) {

@@ -145,10 +145,6 @@ final class RuntimeLifecycle {
         }
     }
 
-    Optional<WorldId> activeWorldId() {
-        return Optional.ofNullable(liveWorld()).map(BackupWorldContext::worldId);
-    }
-
     IntegratedServer matchingServer(BackupWorldContext world) {
         synchronized (lock) {
             if (activeServer == null

@@ -62,15 +62,6 @@ final class ManagedPathGuard {
         return attributes;
     }
 
-    static boolean isSafeRegularFile(Path file) {
-        try {
-            requireRegularFile(file, "Managed file is not a safe regular file");
-            return true;
-        } catch (IOException | RuntimeException exception) {
-            return false;
-        }
-    }
-
     static void createChildDirectories(Path trustedRoot, Path directory, String message)
             throws IOException {
         Path root = requireAbsolute(trustedRoot);

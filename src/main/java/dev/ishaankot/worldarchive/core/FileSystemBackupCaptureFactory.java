@@ -45,10 +45,6 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
         this.observer = Objects.requireNonNull(observer, "observer");
     }
 
-    public Path captureDirectory() {
-        return workspace.directory();
-    }
-
     @Override
     public CapturedBackup capture(
             CreateBackupRequest request,

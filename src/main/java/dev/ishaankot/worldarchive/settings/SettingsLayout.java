@@ -49,6 +49,18 @@ public record SettingsLayout(
         }
     }
 
+    private static final int MINIMUM_HEIGHT = 120;
+
+    private static final int WORLD_LIST_CHROME_HEIGHT = 116;
+
+    private static final int WORLD_ROW_HEIGHT = 22;
+
+    private static final int MAXIMUM_WORLD_PAGE_SIZE = 5;
+
+    private static final int STATUS_BOTTOM_OFFSET = 50;
+
+    private static final int BUTTONS_BOTTOM_OFFSET = 28;
+
     public static SettingsLayout forHeight(int height) {
         return forScreen(height, FULL_CONTENT_WIDTH);
     }
@@ -58,17 +70,18 @@ public record SettingsLayout(
      * their paged layout when the screen is either too short or too narrow for the single page.
      */
     public static SettingsLayout forScreen(int height, int contentWidth) {
-        if (height < 120) {
+        if (height < MINIMUM_HEIGHT) {
             throw new IllegalArgumentException("Settings screen height is too small");
         }
         boolean compact = height < COMPACT_HEIGHT_THRESHOLD;
         boolean paged = compact || contentWidth < FULL_CONTENT_WIDTH;
-        int pageSize = Math.max(1, Math.min(5, (height - 116) / 22));
+        int pageSize = Math.max(1, Math.min(MAXIMUM_WORLD_PAGE_SIZE,
+                (height - WORLD_LIST_CHROME_HEIGHT) / WORLD_ROW_HEIGHT));
         return new SettingsLayout(
                 compact,
                 paged,
-                height - 50,
-                height - 28,
+                height - STATUS_BOTTOM_OFFSET,
+                height - BUTTONS_BOTTOM_OFFSET,
                 pageSize,
                 paged ? 3 : 1,
                 paged ? 2 : 1);
@@ -77,23 +90,6 @@ public record SettingsLayout(
     /** Fixed y of the paged-page header row shared by both the git and zip pages. */
     public int pagedHeaderY() {
         return PAGED_HEADER_Y;
-    }
-
-    public int gitFirstRow(int section) {
-        if (section < 0 || section >= gitSectionCount) {
-            throw new IllegalArgumentException("Git settings section is out of range");
-        }
-        return paged ? GIT_PAGED_FIRST_ROW : GIT_FULL_FIRST_ROW;
-    }
-
-    public int gitLastRow(int section) {
-        if (section < 0 || section >= gitSectionCount) {
-            throw new IllegalArgumentException("Git settings section is out of range");
-        }
-        if (!paged) {
-            return 165;
-        }
-        return 99;
     }
 
     /** Number of content rows rendered by the given git section. */
@@ -130,10 +126,6 @@ public record SettingsLayout(
             return ZIP_FULL_FIRST_ROW + ZIP_FULL_ROW_OFFSETS[index];
         }
         return ZIP_PAGED_FIRST_ROW + index * ROW_HEIGHT;
-    }
-
-    public boolean contentClearsStatus(int lastRow, int widgetHeight) {
-        return lastRow + widgetHeight <= statusY - 4;
     }
 
     private void validateGitSection(int section) {

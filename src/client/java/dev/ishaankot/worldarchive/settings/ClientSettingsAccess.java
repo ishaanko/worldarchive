@@ -135,11 +135,6 @@ public final class ClientSettingsAccess {
         return initialization;
     }
 
-    public static boolean isLoading() {
-        initialize();
-        return !initialization.isDone();
-    }
-
     public static CompletionStage<WorldArchiveConfig> save(WorldArchiveConfig config) {
         Objects.requireNonNull(config, "config");
         initialize();
