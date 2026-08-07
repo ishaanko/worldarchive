@@ -109,13 +109,10 @@ safely; a conflicting backup
 identity is reported and never overwrites the existing catalog or artifact.
 
 For repository histories, paste any supported credential-free HTTPS, SSH, Git,
-file, or absolute local repository location. **Repository files: Copy to this
-device** copies and verifies the selected Git and Git LFS objects in
-WorldArchive's managed storage. **Repository files: Keep in repository** keeps
-only pinned local metadata and downloads required Git LFS objects from the
-source when verifying or restoring. Imports are recovery-only; configure a
-world's repository separately in Settings for future backups. WorldArchive
-never contacts imported repositories automatically at startup.
+file, or absolute local repository location. WorldArchive copies and verifies
+the selected Git and Git LFS objects into its managed storage, and connects
+the repository as that world's remote for future backups. WorldArchive never
+contacts imported repositories automatically at startup.
 
 For backup folders, choosing a folder and clicking **Choose Backup Folder**
 publishes verified archives into managed storage.

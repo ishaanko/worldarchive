@@ -148,15 +148,10 @@ public final class FileBackupImportService implements BackupImportService, AutoC
     }
 
     @Override
-    public CompletionStage<ImportPreview> previewGit(
-            String remote,
-            GitHydrationMode hydration,
-            GitConnectionMode connection) {
-        Objects.requireNonNull(hydration, "hydration");
-        Objects.requireNonNull(connection, "connection");
+    public CompletionStage<ImportPreview> previewGit(String remote) {
         return git.prepareImport(remote).thenApply(fetched -> {
             UUID token = UUID.randomUUID();
-            GitPlan plan = new GitPlan(token, hydration, connection, fetched);
+            GitPlan plan = new GitPlan(token, fetched);
             try {
                 ImportPreview preview = gitPreview(plan);
                 retain(plan);
@@ -314,25 +309,16 @@ public final class FileBackupImportService implements BackupImportService, AutoC
 
     private ImportPreview gitPreview(GitPlan plan) throws IOException {
         List<ImportPreviewItem> items = new ArrayList<>();
+        ImportSourceId previewSource = gitSourceId(plan.fetched().remote());
         for (GitImportCandidate candidate : plan.fetched().candidates()) {
-            ImportSourceId previewSource = gitSourceId(plan.fetched().remote(), plan.hydration());
-            DestinationResult destination = plan.hydration() == GitHydrationMode.FULL_DOWNLOAD
-                    ? DestinationResult.importedSuccess(
-                            DestinationType.GIT,
-                            GitSnapshot.refName(
-                                    candidate.manifest().worldId(),
-                                    candidate.manifest().backupId()),
-                            previewSource,
-                            VerificationStatus.VERIFIED,
-                            SyncStatus.SYNCED)
-                    : DestinationResult.externalSuccess(
-                            DestinationType.GIT,
-                            GitSnapshot.refName(
-                                    candidate.manifest().worldId(),
-                                    candidate.manifest().backupId()),
-                            previewSource,
-                            VerificationStatus.NOT_VERIFIED,
-                            SyncStatus.SYNCED);
+            DestinationResult destination = DestinationResult.importedSuccess(
+                    DestinationType.GIT,
+                    GitSnapshot.refName(
+                            candidate.manifest().worldId(),
+                            candidate.manifest().backupId()),
+                    previewSource,
+                    VerificationStatus.VERIFIED,
+                    SyncStatus.SYNCED);
             items.add(previewItem(candidate.manifest(), destination));
         }
         List<String> issues = plan.fetched().issues().stream()
@@ -464,15 +450,14 @@ public final class FileBackupImportService implements BackupImportService, AutoC
     }
 
     private ImportSummary executeGit(GitPlan plan, Set<BackupId> selected) throws Exception {
-        boolean fullDownload = plan.hydration() == GitHydrationMode.FULL_DOWNLOAD;
         List<GitImportCandidate> candidates = plan.fetched().candidates().stream()
                 .filter(candidate -> selected.contains(candidate.manifest().backupId()))
                 .toList();
         Map<BackupId, GitImportInstallStatus> installs = git.installImport(
-                plan.fetched(), candidates, fullDownload).toCompletableFuture().get();
+                plan.fetched(), candidates, true).toCompletableFuture().get();
         MutableSummary summary = new MutableSummary(
                 ImportKind.GIT, plan.fetched().issues().size());
-        ImportSourceId sourceId = gitSourceId(plan.fetched().remote(), plan.hydration());
+        ImportSourceId sourceId = gitSourceId(plan.fetched().remote());
         Map<BackupId, ImportArtifactBinding> bindings = new LinkedHashMap<>();
         for (GitImportCandidate candidate : candidates) {
             if (installs.get(candidate.manifest().backupId()) != GitImportInstallStatus.CONFLICT) {
@@ -484,8 +469,7 @@ public final class FileBackupImportService implements BackupImportService, AutoC
             }
         }
         if (!bindings.isEmpty()) {
-            sources.put(ImportSource.git(
-                    sourceId, plan.fetched().remote(), fullDownload, bindings));
+            sources.put(ImportSource.git(sourceId, plan.fetched().remote(), bindings));
         }
         for (GitImportCandidate candidate : candidates) {
             if (installs.get(candidate.manifest().backupId()) == GitImportInstallStatus.CONFLICT) {
@@ -493,38 +477,28 @@ public final class FileBackupImportService implements BackupImportService, AutoC
                 summary.worlds.add(candidate.manifest().worldId());
                 continue;
             }
-            DestinationResult destination = gitDestination(candidate, sourceId, fullDownload);
+            DestinationResult destination = gitDestination(candidate, sourceId);
             deletions.restore(candidate.manifest().backupId());
             merge(summary, record(candidate.manifest(), destination));
         }
-        Map<WorldId, String> connections = plan.connection() == GitConnectionMode.CONNECT
-                ? candidates.stream().collect(java.util.stream.Collectors.toMap(
-                        candidate -> candidate.manifest().worldId(),
-                        ignored -> plan.fetched().remote(),
-                        (first, ignored) -> first))
-                : Map.of();
+        Map<WorldId, String> connections = candidates.stream().collect(java.util.stream.Collectors.toMap(
+                candidate -> candidate.manifest().worldId(),
+                ignored -> plan.fetched().remote(),
+                (first, ignored) -> first));
         return summary.finish(connections);
     }
 
     private static DestinationResult gitDestination(
             GitImportCandidate candidate,
-            ImportSourceId sourceId,
-            boolean fullDownload) {
+            ImportSourceId sourceId) {
         String artifact = GitSnapshot.refName(
                 candidate.manifest().worldId(), candidate.manifest().backupId());
-        return fullDownload
-                ? DestinationResult.importedSuccess(
-                        DestinationType.GIT,
-                        artifact,
-                        sourceId,
-                        VerificationStatus.VERIFIED,
-                        SyncStatus.SYNCED)
-                : DestinationResult.externalSuccess(
-                        DestinationType.GIT,
-                        artifact,
-                        sourceId,
-                        VerificationStatus.NOT_VERIFIED,
-                        SyncStatus.SYNCED);
+        return DestinationResult.importedSuccess(
+                DestinationType.GIT,
+                artifact,
+                sourceId,
+                VerificationStatus.VERIFIED,
+                SyncStatus.SYNCED);
     }
 
     private ImportSummary rebuildLocalBlocking() throws Exception {
@@ -679,10 +653,11 @@ public final class FileBackupImportService implements BackupImportService, AutoC
         return issue.path() + ": " + issue.message();
     }
 
-    private static ImportSourceId gitSourceId(
-            String remote,
-            GitHydrationMode hydration) {
-        return ImportSourceId.derived(hydration + "\0" + remote);
+    private static ImportSourceId gitSourceId(String remote) {
+        // The literal prefix matches the historical GitHydrationMode.FULL_DOWNLOAD
+        // derivation so that already-imported full-download sources keep the same
+        // identity and continue to merge instead of duplicating on re-import.
+        return ImportSourceId.derived("FULL_DOWNLOAD" + "\0" + remote);
     }
 
     private record RetainedPlan(
@@ -723,8 +698,6 @@ public final class FileBackupImportService implements BackupImportService, AutoC
 
     private record GitPlan(
             UUID token,
-            GitHydrationMode hydration,
-            GitConnectionMode connection,
             GitPreparedImport fetched) implements PreparedPlan {
         @Override
         public Set<BackupId> backupIds() {

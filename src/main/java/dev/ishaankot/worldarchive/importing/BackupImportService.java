@@ -9,10 +9,7 @@ import java.util.concurrent.CompletionStage;
 public interface BackupImportService {
     CompletionStage<ImportPreview> previewZip(Path folder);
 
-    CompletionStage<ImportPreview> previewGit(
-            String remote,
-            GitHydrationMode hydration,
-            GitConnectionMode connection);
+    CompletionStage<ImportPreview> previewGit(String remote);
 
     /** Finds locally managed backups without adding them to the catalog yet. */
     CompletionStage<ImportPreview> previewLocal();

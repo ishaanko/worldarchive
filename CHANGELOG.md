@@ -24,6 +24,10 @@
 - Remove zip link-in-place import mode; only copy-into-managed-storage import
   remains. Existing link-imported records are reported as missing (not a
   crash) and can be re-imported with copy.
+- Remove the recovery-only and remote-backed Git import options. Repository
+  imports now always copy and verify Git and Git LFS objects into managed
+  storage and connect the repository as that world's remote. Already-imported
+  remote-backed records keep working for verification, restore, and deletion.
 
 ## 0.3.1 (2026-07-22)
 

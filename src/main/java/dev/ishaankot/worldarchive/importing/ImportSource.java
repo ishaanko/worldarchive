@@ -30,13 +30,8 @@ public record ImportSource(
     public static ImportSource git(
             ImportSourceId id,
             String remote,
-            boolean fullDownload,
             Map<BackupId, ImportArtifactBinding> artifacts) {
-        return new ImportSource(
-                id,
-                fullDownload ? ImportSourceMode.GIT_FULL_DOWNLOAD : ImportSourceMode.GIT_REMOTE_BACKED,
-                remote,
-                artifacts);
+        return new ImportSource(id, ImportSourceMode.GIT_FULL_DOWNLOAD, remote, artifacts);
     }
 
     public Optional<ImportArtifactBinding> artifact(BackupId backupId) {
