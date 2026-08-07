@@ -6,6 +6,7 @@ import dev.ishaankot.worldarchive.config.StoragePolicy;
 import dev.ishaankot.worldarchive.config.WorldArchiveConfig;
 import dev.ishaankot.worldarchive.config.WorldConfig;
 import dev.ishaankot.worldarchive.core.AsyncTasks;
+import dev.ishaankot.worldarchive.core.ConfirmationLedger;
 import dev.ishaankot.worldarchive.core.Digests;
 import dev.ishaankot.worldarchive.core.OperationId;
 import dev.ishaankot.worldarchive.core.WorldOperationGate;
@@ -46,7 +47,6 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
@@ -79,7 +79,8 @@ public final class ManagedStorageService {
 
     private final ZoneId zoneId;
 
-    private final Map<WorldId, CleanupPlan> confirmations = new ConcurrentHashMap<>();
+    private final ConfirmationLedger<WorldId, CleanupPlan> confirmations =
+            new ConfirmationLedger<>(CleanupPlan::expiresAt);
 
     public ManagedStorageService(
             Supplier<WorldArchiveConfig> config,
@@ -234,7 +235,7 @@ public final class ManagedStorageService {
                 safetyFloor,
                 projected <= target,
                 snapshot.fingerprint());
-        expireConfirmations();
+        confirmations.expireStaleEntries(clock.instant());
         confirmations.put(worldId, plan);
         return plan;
     }
@@ -762,22 +763,11 @@ public final class ManagedStorageService {
         }
     }
 
-    private void expireConfirmations() {
-        Instant now = clock.instant();
-        confirmations.entrySet().removeIf(entry ->
-                !now.isBefore(entry.getValue().expiresAt()));
-    }
-
     private CleanupPlan claimConfirmation(OperationId token) {
-        expireConfirmations();
-        for (Map.Entry<WorldId, CleanupPlan> entry : confirmations.entrySet()) {
-            CleanupPlan plan = entry.getValue();
-            if (plan.confirmationToken().equals(token)
-                    && confirmations.remove(entry.getKey(), plan)) {
-                return plan;
-            }
-        }
-        return null;
+        return confirmations.claimMatching(
+                clock.instant(),
+                plan -> plan.confirmationToken().equals(token))
+                .orElse(null);
     }
 
     private static String safeMessage(Exception exception) {

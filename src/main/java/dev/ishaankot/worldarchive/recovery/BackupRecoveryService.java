@@ -6,6 +6,7 @@ import dev.ishaankot.worldarchive.config.WorldIdentityStore;
 import dev.ishaankot.worldarchive.importing.ImportSourceRegistry;
 import dev.ishaankot.worldarchive.core.BackupMaintenanceService;
 import dev.ishaankot.worldarchive.core.BackupOperation;
+import dev.ishaankot.worldarchive.core.ConfirmationLedger;
 import dev.ishaankot.worldarchive.core.DeleteBackupRequest;
 import dev.ishaankot.worldarchive.core.DeletePreparation;
 import dev.ishaankot.worldarchive.core.OperationId;
@@ -44,8 +45,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletionStage;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.function.UnaryOperator;
@@ -76,8 +75,8 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
 
     private final DirectoryMove directoryMove;
 
-    private final ConcurrentMap<OperationId, DeleteConfirmation> confirmations =
-            new ConcurrentHashMap<>();
+    private final ConfirmationLedger<OperationId, DeleteConfirmation> confirmations =
+            new ConfirmationLedger<>(DeleteConfirmation::expiresAt);
 
     public BackupRecoveryService(
             BackupCatalog catalog,
@@ -451,22 +450,15 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
     private DeletePreparation prepareDeleteBlocking(BackupId backupId) throws IOException {
         BackupRecord record = requireRecord(backupId);
         Instant now = clock.instant();
-        confirmations.forEach((token, confirmation) -> {
-            if (!now.isBefore(confirmation.expiresAt())) {
-                confirmations.remove(token, confirmation);
-            }
-        });
-        OperationId token;
-        DeleteConfirmation confirmation;
-        do {
-            token = OperationId.create();
-            confirmation = DeleteConfirmation.create(
-                    record, now.plus(confirmationLifetime));
-        } while (confirmations.putIfAbsent(token, confirmation) != null);
+        confirmations.expireStaleEntries(now);
+        ConfirmationLedger.Issued<OperationId, DeleteConfirmation> issued = confirmations.putUnique(
+                OperationId::create,
+                token -> DeleteConfirmation.create(record, now.plus(confirmationLifetime)));
         long artifacts = presentDestinations(record).size();
         String description = "Delete backup " + backupId + " for "
                 + record.manifest().worldName() + " from " + artifacts + " destination(s)";
-        return new DeletePreparation(backupId, token, description, confirmation.expiresAt());
+        return new DeletePreparation(
+                backupId, issued.key(), description, issued.value().expiresAt());
     }
 
     private BackupResult deleteBlocking(
@@ -474,7 +466,8 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
             ProgressListener progressListener,
             OperationCancellation cancellation) throws Exception {
         cancellation.checkpoint();
-        DeleteConfirmation confirmation = confirmations.remove(request.confirmationToken());
+        DeleteConfirmation confirmation = confirmations.claim(request.confirmationToken())
+                .orElse(null);
         Instant now = clock.instant();
         if (confirmation == null
                 || !confirmation.backupId().equals(request.backupId())
