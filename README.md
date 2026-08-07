@@ -84,9 +84,10 @@ a separate ZIP root, such as a different drive or synced folder.
 
 Each world's backup browser also has a **Storage** screen. It measures managed
 local Git and ZIP files separately, learns the world's recent growth rate, and
-estimates when the configured budget will be reached. Remote Git refs, linked
-imports, and legacy shared repositories are shown as unmetered and are never
-removed by guided cleanup.
+estimates when the configured budget will be reached. Remote Git refs, imports
+from earlier releases that reference storage WorldArchive does not own, and
+legacy shared repositories are shown as unmetered and are never removed by
+guided cleanup.
 
 The balanced cleanup policy keeps one representative backup for each of 7
 recent days, 4 earlier weeks, and 12 earlier months. Labeled backups are always

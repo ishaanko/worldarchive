@@ -657,7 +657,7 @@ public final class FileBackupImportService implements BackupImportService, AutoC
         // The literal prefix matches the historical GitHydrationMode.FULL_DOWNLOAD
         // derivation so that already-imported full-download sources keep the same
         // identity and continue to merge instead of duplicating on re-import.
-        return ImportSourceId.derived("FULL_DOWNLOAD" + "\0" + remote);
+        return ImportSourceId.derived("FULL_DOWNLOAD\0" + remote);
     }
 
     private record RetainedPlan(

@@ -10,8 +10,10 @@ import dev.ishaankot.worldarchive.catalog.FileBackupDeletionRegistry;
 import dev.ishaankot.worldarchive.core.BackupCapture;
 import dev.ishaankot.worldarchive.importing.FileBackupImportService;
 import dev.ishaankot.worldarchive.importing.FileImportSourceRegistry;
+import dev.ishaankot.worldarchive.importing.ImportDisposition;
 import dev.ishaankot.worldarchive.importing.ImportPreview;
 import dev.ishaankot.worldarchive.importing.ImportSummary;
+import dev.ishaankot.worldarchive.model.ArtifactOwnership;
 import dev.ishaankot.worldarchive.model.BackupId;
 import dev.ishaankot.worldarchive.model.BackupManifest;
 import dev.ishaankot.worldarchive.model.BackupTrigger;
@@ -20,6 +22,7 @@ import dev.ishaankot.worldarchive.storage.git.GitBackendSettings;
 import dev.ishaankot.worldarchive.storage.git.WorldGitSnapshotStore;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -139,6 +142,69 @@ final class FileBackupImportServiceIntegrationTest {
             assertTrue(catalog.listAll().isEmpty());
             assertEquals(0, imports.rebuildLocal().toCompletableFuture().join().added());
             assertTrue(catalog.listAll().isEmpty());
+        }
+    }
+
+    @Test
+    void zipChangedAfterPreviewIsRejectedBeforeAnyImportMutation() throws Exception {
+        ZipBackupStore sourceStore = new ZipBackupStore(
+                temporaryDirectory.resolve("changed-source"));
+        ZipBackupArtifact first = sourceBackup(sourceStore, "changed-first");
+        ZipBackupArtifact second = sourceBackup(sourceStore, "changed-second");
+        FileBackupCatalog catalog = new FileBackupCatalog(
+                temporaryDirectory.resolve("changed-catalog.json"));
+        FileImportSourceRegistry sources = new FileImportSourceRegistry(
+                temporaryDirectory.resolve("changed-sources.json"));
+        ZipBackupStore managed = new ZipBackupStore(
+                temporaryDirectory.resolve("changed-managed"));
+        try (WorldGitSnapshotStore git = gitStore("changed-git");
+                FileBackupImportService imports = imports(catalog, sources, git, managed)) {
+            ImportPreview preview = imports.previewZip(sourceStore.root())
+                    .toCompletableFuture().join();
+            // Corrupting whichever archive the import visits last proves the pinned
+            // contents of every candidate are rechecked before the first copy runs.
+            BackupId lastVisited = preview.items().getLast().manifest().backupId();
+            ZipBackupArtifact changed =
+                    lastVisited.equals(first.manifest().backupId()) ? first : second;
+            Files.write(changed.archivePath(), new byte[] {1}, StandardOpenOption.APPEND);
+
+            assertThrows(
+                    java.util.concurrent.CompletionException.class,
+                    () -> imports.execute(preview.token()).toCompletableFuture().join());
+            assertTrue(catalog.listAll().isEmpty());
+            assertTrue(managed.listCompleteArchives().isEmpty());
+            assertTrue(Files.isRegularFile(first.archivePath()));
+            assertTrue(Files.isRegularFile(second.archivePath()));
+        }
+    }
+
+    @Test
+    void repeatedCopyImportIsIdempotentAndNeverTouchesTheSourceArchive() throws Exception {
+        ZipBackupArtifact source = sourceBackup("idempotent-source");
+        Path sourceRoot = source.archivePath().getParent().getParent();
+        FileBackupCatalog catalog = new FileBackupCatalog(
+                temporaryDirectory.resolve("idempotent-catalog.json"));
+        FileImportSourceRegistry registry = new FileImportSourceRegistry(
+                temporaryDirectory.resolve("idempotent-sources.json"));
+        ZipBackupStore managed = new ZipBackupStore(
+                temporaryDirectory.resolve("idempotent-managed"));
+        try (WorldGitSnapshotStore git = gitStore("idempotent-git");
+                FileBackupImportService imports = imports(catalog, registry, git, managed)) {
+            ImportPreview preview = imports.previewZip(sourceRoot).toCompletableFuture().join();
+            assertEquals(ImportDisposition.ADD, preview.items().getFirst().disposition());
+            assertEquals(1, imports.execute(preview.token()).toCompletableFuture().join().added());
+            assertEquals(
+                    ArtifactOwnership.MANAGED,
+                    catalog.find(source.manifest().backupId())
+                            .orElseThrow().result().destinations().getFirst().ownership());
+
+            ImportPreview repeated = imports.previewZip(sourceRoot).toCompletableFuture().join();
+            assertEquals(ImportDisposition.UNCHANGED, repeated.items().getFirst().disposition());
+            assertEquals(
+                    1,
+                    imports.execute(repeated.token()).toCompletableFuture().join().unchanged());
+            assertTrue(Files.isRegularFile(source.archivePath()));
+            assertEquals(1, managed.listCompleteArchives().size());
         }
     }
 

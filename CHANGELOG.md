@@ -14,8 +14,9 @@
 
 ### Changed
 
-- Treat configured Git remotes, linked imports, and legacy shared repositories
-  as unmetered storage that guided cleanup never deletes.
+- Treat configured Git remotes, imports from earlier releases that reference
+  storage WorldArchive does not own, and legacy shared repositories as
+  unmetered storage that guided cleanup never deletes.
 - Allow synchronized Git snapshots to be evicted locally and rehydrated from
   their unchanged remote ref when a later verification or restore needs them.
 
