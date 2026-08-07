@@ -65,7 +65,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.Screen;
-import net.minecraft.client.server.IntegratedServer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -132,6 +131,10 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
 
     private final Object stateLock = new Object();
 
+    private final RuntimeServices services;
+
+    private final RuntimeClientFacade clientFacade;
+
     private WorldArchiveRuntime(Minecraft minecraft) {
         this.minecraft = Objects.requireNonNull(minecraft, "minecraft");
         this.configurationGate = new RuntimeConfigurationGate(this::retireInactiveStates);
@@ -147,6 +150,25 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
         this.catalog = new FileBackupCatalog(storageRoot.resolve("catalog.json"));
         this.inventoryStore = new FileWorldInventoryStore(storageRoot.resolve("inventories"));
         this.captureFactory = new FileSystemBackupCaptureFactory(storageRoot.resolve("capture-temp"));
+        this.services = new RuntimeServices(
+                minecraft,
+                storageRoot,
+                catalog,
+                inventoryStore,
+                captureFactory,
+                identityStore,
+                captureMutex,
+                operationGate,
+                workerExecutor,
+                clock);
+        this.clientFacade = new RuntimeClientFacade(
+                this,
+                serviceView,
+                importsView,
+                storageView,
+                navigation,
+                lifecycle,
+                backgroundBackups);
     }
 
     /** Starts the singleton and returns immediately; settings finish loading asynchronously. */
@@ -336,44 +358,8 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
         return closed.get();
     }
 
-    Minecraft minecraft() {
-        return minecraft;
-    }
-
-    ExecutorService workerExecutor() {
-        return workerExecutor;
-    }
-
-    Path storageRoot() {
-        return storageRoot;
-    }
-
-    BackupCatalog catalog() {
-        return catalog;
-    }
-
-    FileWorldInventoryStore inventoryStore() {
-        return inventoryStore;
-    }
-
-    FileSystemBackupCaptureFactory captureFactory() {
-        return captureFactory;
-    }
-
-    WorldIdentityStore identityStore() {
-        return identityStore;
-    }
-
-    LockingWorldOperationGate captureMutex() {
-        return captureMutex;
-    }
-
-    LockingWorldOperationGate operationGate() {
-        return operationGate;
-    }
-
-    Clock clock() {
-        return clock;
+    RuntimeServices services() {
+        return services;
     }
 
     RuntimeActionContextRegistry actionContexts() {
@@ -390,30 +376,23 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
 
     @Override
     public BackupService backupService() {
-        return serviceView;
+        return clientFacade.backupService();
     }
 
     @Override
     public BackupImportService importService() {
-        return importsView;
+        return clientFacade.importService();
     }
 
     @Override
     public CompletionStage<List<BackupWorldEntry>> backupWorlds() {
-        if (unavailable()) {
-            return failedStage("WorldArchive is still loading");
-        }
-        return submit(() -> new RuntimeBackupWorlds(this, catalog).list());
+        return clientFacade.backupWorlds();
     }
 
     @Override
     public CompletionStage<Optional<BackupWorldContext>> resolveWorld(
             BackupWorldSelection selection) {
-        Objects.requireNonNull(selection, "selection");
-        if (unavailable()) {
-            return failedStage("WorldArchive is still loading");
-        }
-        return submit(() -> resolveWorldBlocking(selection));
+        return clientFacade.resolveWorld(selection);
     }
 
     @Override
@@ -421,130 +400,67 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
             BackupWorldContext world,
             Optional<String> label,
             ProgressListener progressListener) {
-        Objects.requireNonNull(world, "world");
-        Objects.requireNonNull(label, "label");
-        Objects.requireNonNull(progressListener, "progressListener");
-        return withBackupPermit(() -> {
-            if (!actionContexts.sourceActionsAllowed(world)) {
-                return failedStage("The original world is unavailable for backup creation");
-            }
-            RuntimeState state = stateRegistry.currentOrNull();
-            if (state == null || closed.get()) {
-                return failedStage("WorldArchive is still loading");
-            }
-            Optional<String> storageIssue = storageIssue(state);
-            if (storageIssue.isPresent()) {
-                return failedStage(storageIssue.orElseThrow());
-            }
-            CreateBackupRequest request = request(world, label, BackupTrigger.MANUAL);
-            if (!registerWorldPath(world.worldId(), world.worldDirectory(), state)) {
-                return failedStage("The world identity is already registered to a different folder");
-            }
-            if (!state.enabledDestinations(request)) {
-                return failedStage("Manual backups are disabled for this world");
-            }
-            if (busyAcrossStates(world.worldId())) {
-                return failedStage("A backup is already running for this world");
-            }
-            IntegratedServer server = lifecycle.matchingServer(world);
-            if (server != null) {
-                return lifecycle.queueRequestedSave(
-                        state,
-                        server,
-                        request,
-                        progressListener);
-            }
-            return state.coordinator().createBackup(request, progressListener);
-        });
+        return clientFacade.createManualBackup(world, label, progressListener);
     }
 
     @Override
     public CompletionStage<BackupBrowserCapabilities> browserCapabilities(
             BackupWorldContext world) {
-        Objects.requireNonNull(world, "world");
-        RuntimeState state = stateRegistry.currentOrNull();
-        if (state == null || closed.get()) {
-            return failedStage("WorldArchive is still loading");
-        }
-        CreateBackupRequest request = request(world, Optional.empty(), BackupTrigger.MANUAL);
-        WorldArchiveConfig config = state.config();
-        boolean sourceAvailable = navigation.sourceDirectoryAvailable(world);
-        boolean createAvailable = false;
-        if (sourceAvailable) {
-            try {
-                createAvailable = state.enabledDestinations(request);
-            } catch (IllegalArgumentException exception) {
-                sourceAvailable = false;
-            }
-        }
-        boolean folderAvailable = config.zip().destination().isPresent()
-                || config.git().repository().isPresent();
-        Optional<String> storageIssue = storageIssue(state);
-        return CompletableFuture.completedFuture(new BackupBrowserCapabilities(
-                busyAcrossStates(world.worldId()),
-                storageIssue.isEmpty() && sourceAvailable && createAvailable,
-                config.git().enabled() && state.gitBackend().remoteConfigured(world.worldId()),
-                storageIssue.isEmpty() && folderAvailable,
-                storageIssue.or(() -> worldSettingsWarning()
-                        .or(() -> backgroundBackups.warning()
-                                .or(state.selector()::warning)))));
+        return clientFacade.browserCapabilities(world);
     }
 
     @Override
     public CompletionStage<StorageOverview> storageOverview(WorldId worldId) {
-        return storageView.overview(Objects.requireNonNull(worldId, "worldId"));
+        return clientFacade.storageOverview(worldId);
     }
 
     @Override
     public CompletionStage<Boolean> claimStorageReviewNotice(WorldId worldId) {
-        return storageView.claimReviewNotice(Objects.requireNonNull(worldId, "worldId"));
+        return clientFacade.claimStorageReviewNotice(worldId);
     }
 
     @Override
     public CompletionStage<CleanupPlan> prepareCleanup(WorldId worldId) {
-        return storageView.prepareCleanup(Objects.requireNonNull(worldId, "worldId"));
+        return clientFacade.prepareCleanup(worldId);
     }
 
     @Override
     public CompletionStage<CleanupResult> applyCleanup(CleanupRequest request) {
-        return storageView.applyCleanup(Objects.requireNonNull(request, "request"));
+        return clientFacade.applyCleanup(request);
     }
 
     @Override
     public CompletionStage<Void> discardCleanup(OperationId confirmationToken) {
-        return storageView.discardCleanup(
-                Objects.requireNonNull(confirmationToken, "confirmationToken"));
+        return clientFacade.discardCleanup(confirmationToken);
     }
 
     @Override
     public CompletionStage<Void> saveStoragePolicy(
             WorldId worldId,
             StoragePolicy policy) {
-        return storageView.savePolicy(
-                Objects.requireNonNull(worldId, "worldId"),
-                Objects.requireNonNull(policy, "policy"));
+        return clientFacade.saveStoragePolicy(worldId, policy);
     }
 
     @Override
     public void openManagedFolder(
             BackupWorldContext world,
             Optional<BackupRow> selectedBackup) {
-        navigation.openManagedFolder(world, selectedBackup);
+        clientFacade.openManagedFolder(world, selectedBackup);
     }
 
     @Override
     public void openSettings(Screen returnTo) {
-        navigation.openSettings(returnTo);
+        clientFacade.openSettings(returnTo);
     }
 
     @Override
     public void selectRestoredWorld(Screen returnTo, RestoreBackupResult result) {
-        navigation.selectRestoredWorld(returnTo, result);
+        clientFacade.selectRestoredWorld(returnTo, result);
     }
 
     @Override
     public void playRestoredWorld(Screen returnTo, RestoreBackupResult result) {
-        navigation.playRestoredWorld(returnTo, result);
+        clientFacade.playRestoredWorld(returnTo, result);
     }
 
     public void openBrowser() {
@@ -552,7 +468,7 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
     }
 
     private RuntimeState buildState(WorldArchiveConfig config) {
-        return new RuntimeStateFactory(this).build(config);
+        return new RuntimeStateFactory(this).build(config, services);
     }
 
     Optional<BackupWorldContext> resolveWorldBlocking(
@@ -693,7 +609,7 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
         });
     }
 
-    private Optional<String> worldSettingsWarning() {
+    Optional<String> worldSettingsWarning() {
         return worldSettingsFailures.isEmpty()
                 ? Optional.empty()
                 : Optional.of("World settings could not be saved; review WorldArchive settings");

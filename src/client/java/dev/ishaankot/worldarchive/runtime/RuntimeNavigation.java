@@ -43,7 +43,7 @@ final class RuntimeNavigation {
                 throw new IllegalStateException(issue);
             });
             Path destination = managedPath(state, world, selectedBackup);
-            runtime.workerExecutor().execute(
+            runtime.services().workerExecutor().execute(
                     () -> openManagedFolder(destination, permit));
             transferred = true;
         } catch (RejectedExecutionException exception) {
@@ -58,7 +58,7 @@ final class RuntimeNavigation {
     void openSettings(Screen returnTo) {
         Objects.requireNonNull(returnTo, "returnTo");
         if (!runtime.isClosed()) {
-            Minecraft minecraft = runtime.minecraft();
+            Minecraft minecraft = runtime.services().minecraft();
             minecraft.execute(() -> minecraft.setScreenAndShow(
                     ClientSettingsAccess.createScreen(returnTo)));
         }
@@ -77,7 +77,7 @@ final class RuntimeNavigation {
         if (world == null || runtime.unavailable()) {
             return;
         }
-        Minecraft minecraft = runtime.minecraft();
+        Minecraft minecraft = runtime.services().minecraft();
         minecraft.execute(() -> {
             if (!runtime.isClosed()) {
                 minecraft.setScreenAndShow(new BackupBrowserScreen(
@@ -109,7 +109,7 @@ final class RuntimeNavigation {
         try {
             Files.createDirectories(destination);
             if (!runtime.isClosed()) {
-                runtime.minecraft().execute(() -> {
+                runtime.services().minecraft().execute(() -> {
                     try {
                         if (!runtime.isClosed()) {
                             Util.getPlatform().openPath(destination);
@@ -139,7 +139,7 @@ final class RuntimeNavigation {
             boolean playImmediately) {
         Objects.requireNonNull(returnTo, "returnTo");
         Objects.requireNonNull(result, "result");
-        Minecraft minecraft = runtime.minecraft();
+        Minecraft minecraft = runtime.services().minecraft();
         minecraft.execute(() -> {
             if (runtime.isClosed()) {
                 return;
@@ -173,14 +173,14 @@ final class RuntimeNavigation {
     }
 
     private boolean hasActiveWorldSession() {
-        Minecraft minecraft = runtime.minecraft();
+        Minecraft minecraft = runtime.services().minecraft();
         return minecraft.hasSingleplayerServer()
                 || minecraft.level != null
                 || minecraft.getConnection() != null;
     }
 
     private void showRestoredWorldSelection(Screen returnTo, String storageName) {
-        Minecraft minecraft = runtime.minecraft();
+        Minecraft minecraft = runtime.services().minecraft();
         SelectWorldScreen screen = new SelectWorldScreen(returnTo);
         minecraft.setScreenAndShow(screen);
         RestoredWorldSelection.install(screen, storageName);
@@ -190,7 +190,7 @@ final class RuntimeNavigation {
             Screen returnTo,
             String storageName,
             boolean selectOnFailure) {
-        Minecraft minecraft = runtime.minecraft();
+        Minecraft minecraft = runtime.services().minecraft();
         try (LevelStorageSource.LevelStorageAccess ignored =
                 minecraft.getLevelSource().validateAndCreateAccess(storageName)) {
             // Validation and a clean session close happen before vanilla starts the world.
@@ -214,14 +214,14 @@ final class RuntimeNavigation {
         if (selectRestoredWorld) {
             showRestoredWorldSelection(returnTo, storageName);
         } else {
-            runtime.minecraft().setScreenAndShow(returnTo);
+            runtime.services().minecraft().setScreenAndShow(returnTo);
         }
     }
 
     private Optional<String> validatedRestoredStorageName(RestoreBackupResult result) {
         try {
             Path restored = result.restoredWorldDirectory().toAbsolutePath().normalize();
-            Path base = runtime.minecraft().getLevelSource().getBaseDir()
+            Path base = runtime.services().minecraft().getLevelSource().getBaseDir()
                     .toAbsolutePath()
                     .normalize();
             Path fileName = restored.getFileName();

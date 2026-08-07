@@ -34,61 +34,61 @@ final class RuntimeStateFactory {
         this.runtime = Objects.requireNonNull(runtime, "runtime");
     }
 
-    RuntimeState build(WorldArchiveConfig config) {
+    RuntimeState build(WorldArchiveConfig config, RuntimeServices services) {
         RuntimeStoragePaths storagePaths = RuntimeStoragePaths.from(
-                config, runtime.storageRoot());
-        WorldGitSnapshotStore gitBackend = gitBackend(config, storagePaths);
+                config, services.storageRoot());
+        WorldGitSnapshotStore gitBackend = gitBackend(config, storagePaths, services);
         ZipBackupStoreResolver zipStores = new RuntimeZipBackupStores(storagePaths);
         FileImportSourceRegistry importSources = new FileImportSourceRegistry(
-                runtime.storageRoot().resolve("import-sources.json"));
+                services.storageRoot().resolve("import-sources.json"));
         FileBackupDeletionRegistry deletions = new FileBackupDeletionRegistry(
-                runtime.storageRoot().resolve("deleted-backups.txt"));
+                services.storageRoot().resolve("deleted-backups.txt"));
         Set<WorldId> configuredWorldIds = config.worlds().stream()
                 .map(WorldConfig::worldId)
                 .collect(java.util.stream.Collectors.toUnmodifiableSet());
         FileBackupImportService imports = new FileBackupImportService(
-                runtime.catalog(),
+                services.catalog(),
                 importSources,
                 deletions,
                 gitBackend,
                 zipStores,
                 () -> configuredWorldIds,
-                runtime.workerExecutor());
-        RuntimeDestinationSelector selector = selector(config, gitBackend, zipStores);
+                services.workerExecutor());
+        RuntimeDestinationSelector selector = selector(config, gitBackend, zipStores, services);
         BackupRecoveryService recovery = new BackupRecoveryService(
-                runtime.catalog(),
+                services.catalog(),
                 Optional.of(gitBackend),
                 Optional.of(zipStores),
                 importSources,
                 deletions,
-                runtime.identityStore(),
+                services.identityStore(),
                 new MinecraftRestoredWorldMetadataFinalizer(),
-                runtime.workerExecutor(),
-                runtime.operationGate());
+                services.workerExecutor(),
+                services.operationGate());
         SerializedBackupCoordinator coordinator = new SerializedBackupCoordinator(
-                runtime.catalog(),
-                runtime.captureFactory(),
-                runtime.inventoryStore(),
+                services.catalog(),
+                services.captureFactory(),
+                services.inventoryStore(),
                 selector,
                 recovery,
                 BackupCaptureGate.DIRECT,
-                runtime.captureMutex(),
-                runtime.operationGate(),
-                runtime.workerExecutor(),
-                runtime.clock());
+                services.captureMutex(),
+                services.operationGate(),
+                services.workerExecutor(),
+                services.clock());
         ManagedStorageService storage = new ManagedStorageService(
                 () -> config,
-                runtime.catalog(),
+                services.catalog(),
                 deletions,
                 gitBackend,
                 zipStores,
                 new FileStorageHistoryStore(
-                        runtime.storageRoot().resolve("storage-history")),
+                        services.storageRoot().resolve("storage-history")),
                 new FileStorageReviewStore(
-                        runtime.storageRoot().resolve("storage-reviews")),
-                runtime.operationGate(),
-                runtime.workerExecutor(),
-                runtime.clock(),
+                        services.storageRoot().resolve("storage-reviews")),
+                services.operationGate(),
+                services.workerExecutor(),
+                services.clock(),
                 java.time.ZoneId.systemDefault());
         return new RuntimeState(
                 config,
@@ -102,7 +102,8 @@ final class RuntimeStateFactory {
 
     private WorldGitSnapshotStore gitBackend(
             WorldArchiveConfig config,
-            RuntimeStoragePaths storagePaths) {
+            RuntimeStoragePaths storagePaths,
+            RuntimeServices services) {
         return new WorldGitSnapshotStore(
                 GitBackendSettings.from(config.git(), storagePaths.gitRepository()),
                 GitBackendSettings.legacyFrom(config.git()),
@@ -112,15 +113,16 @@ final class RuntimeStateFactory {
                                 WorldConfig::worldId,
                                 world -> world.remoteUrl().orElseThrow())),
                 new SystemGitCommandRunner(),
-                runtime.workerExecutor());
+                services.workerExecutor());
     }
 
     private RuntimeDestinationSelector selector(
             WorldArchiveConfig config,
             WorldGitSnapshotStore gitBackend,
-            ZipBackupStoreResolver zipStores) {
+            ZipBackupStoreResolver zipStores,
+            RuntimeServices services) {
         ZipBackupBackend zipBackend = new ZipBackupBackend(
-                zipStores, runtime.workerExecutor());
+                zipStores, services.workerExecutor());
         List<BackupBackend> backends = List.of(gitBackend, zipBackend);
         return new RuntimeDestinationSelector(new ConfiguredBackupDestinationSelector(
                 () -> config, backends));

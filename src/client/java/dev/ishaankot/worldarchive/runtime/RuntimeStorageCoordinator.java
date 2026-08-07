@@ -76,7 +76,7 @@ final class RuntimeStorageCoordinator {
                 long delayMillis = Math.max(
                         0,
                         java.time.Duration.between(
-                                        runtime.clock().instant(),
+                                        runtime.services().clock().instant(),
                                         plan.expiresAt())
                                 .toMillis());
                 CompletableFuture.delayedExecutor(delayMillis, TimeUnit.MILLISECONDS)
