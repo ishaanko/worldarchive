@@ -1,18 +1,15 @@
 package dev.ishaankot.worldarchive.storage.git;
 
+import dev.ishaankot.worldarchive.core.Digests;
 import dev.ishaankot.worldarchive.model.BackupManifest;
 import java.io.IOException;
-import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -283,23 +280,7 @@ final class GitSnapshotVerifier {
     }
 
     private static String sha256(Path path) throws IOException {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            try (InputStream input = Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS)) {
-                byte[] buffer = new byte[64 * 1_024];
-                int read;
-                while ((read = input.read(buffer)) >= 0) {
-                    if (read > 0) {
-                        digest.update(buffer, 0, read);
-                    }
-                }
-            }
-            return HexFormat.of().formatHex(digest.digest());
-        } catch (NoSuchAlgorithmException exception) {
-            throw new IllegalStateException(
-                    "The Java runtime does not provide SHA-256",
-                    exception);
-        }
+        return Digests.sha256(path);
     }
 
     record VerifiedSnapshot(

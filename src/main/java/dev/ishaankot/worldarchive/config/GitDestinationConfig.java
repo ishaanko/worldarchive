@@ -53,7 +53,7 @@ public record GitDestinationConfig(
         legacyRepository = Objects.requireNonNull(legacyRepository, "legacyRepository")
                 .map(path -> path.toAbsolutePath().normalize());
         legacyRemoteUrl = Objects.requireNonNull(legacyRemoteUrl, "legacyRemoteUrl")
-                .map(RemoteUrlPolicy::validatePlain);
+                .map(RemoteUrlPolicy::validateConfiguredPlain);
     }
 
     /** Compatibility constructor for callers that predate isolated-repository migration fields. */

@@ -58,7 +58,7 @@ public final class FileWorldInventoryStore implements WorldInventoryStore {
             }
             requireRegularFile(file, "World inventory is not a regular file");
             try {
-                JsonElement parsed = JsonParser.parseString(Files.readString(file));
+                JsonElement parsed = JsonParser.parseString(AtomicFiles.readUtf8(file));
                 if (!parsed.isJsonObject()) {
                     throw new IOException("World inventory root must be a JSON object");
                 }

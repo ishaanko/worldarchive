@@ -18,6 +18,7 @@ import dev.ishaankot.worldarchive.ui.model.BackupRow;
 import dev.ishaankot.worldarchive.ui.model.BackupSort;
 import dev.ishaankot.worldarchive.ui.model.ConfirmationKind;
 import dev.ishaankot.worldarchive.ui.model.ConfirmationState;
+import dev.ishaankot.worldarchive.ui.model.ScreenGeometry;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -38,6 +39,12 @@ public final class BackupBrowserScreen extends Screen {
     private static final int ROW_GAP = 2;
 
     private static final int ACTION_GAP = 3;
+
+    private static final int CONTENT_MIN = 180;
+
+    private static final int CONTENT_MAX = 620;
+
+    private static final int CONTENT_MARGIN = 20;
 
     private static final int CAPABILITY_POLL_INTERVAL_TICKS = 20;
 
@@ -153,22 +160,10 @@ public final class BackupBrowserScreen extends Screen {
     @Override
     protected void init() {
         filterWidget = null;
-        int contentWidth = Math.min(620, Math.max(180, width - 20));
-        int contentX = (width - contentWidth) / 2;
-        addRenderableOnly(new StringWidget(
-                contentX,
-                5,
-                contentWidth,
-                18,
-                title.copy().withStyle(ChatFormatting.BOLD),
-                font));
-        addRenderableOnly(new StringWidget(
-                contentX,
-                22,
-                contentWidth,
-                16,
-                Component.literal(world.displayName()).withStyle(ChatFormatting.GRAY),
-                font));
+        int contentWidth = ScreenGeometry.contentWidth(width, CONTENT_MIN, CONTENT_MAX, CONTENT_MARGIN);
+        int contentX = ScreenGeometry.centerX(width, contentWidth);
+        addRenderableOnly(Widgets.title(font, contentX, 5, contentWidth, 18, title));
+        addRenderableOnly(Widgets.muted(font, contentX, 22, contentWidth, 16, world.displayName()));
         addFilterAndSort(contentX, contentWidth);
 
         int paginationY = Math.max(
@@ -311,7 +306,7 @@ public final class BackupBrowserScreen extends Screen {
     private void addStatus(int x, int contentWidth) {
         StringWidget widget = new StringWidget(
                 x,
-                Math.max(108, height - 64),
+                ScreenGeometry.anchorBottom(108, height, 64),
                 contentWidth,
                 14,
                 status,
@@ -325,7 +320,7 @@ public final class BackupBrowserScreen extends Screen {
             Component warning = Component.literal(message).withStyle(ChatFormatting.YELLOW);
             StringWidget widget = new StringWidget(
                     x,
-                    Math.max(94, height - 80),
+                    ScreenGeometry.anchorBottom(94, height, 80),
                     contentWidth,
                     14,
                     warning,
@@ -348,12 +343,17 @@ public final class BackupBrowserScreen extends Screen {
                 selection);
 
         addActionRow(
-                List.of(BackupAction.CREATE, BackupAction.RESTORE, BackupAction.DELETE, BackupAction.SYNC),
+                List.of(
+                        BackupAction.CREATE,
+                        BackupAction.RESTORE,
+                        BackupAction.DELETE,
+                        BackupAction.SYNC,
+                        BackupAction.VERIFY),
                 availability,
                 x,
                 contentWidth,
-                Math.max(128, height - 48));
-        int y = Math.max(150, height - 24);
+                ScreenGeometry.anchorBottom(128, height, 48));
+        int y = ScreenGeometry.anchorBottom(150, height, 24);
         List<BackupAction> secondaryActions = List.of(
                 BackupAction.OPEN_FOLDER,
                 BackupAction.STORAGE,

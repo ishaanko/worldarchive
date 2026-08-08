@@ -3,7 +3,6 @@ package dev.ishaankot.worldarchive.storage.management;
 import dev.ishaankot.worldarchive.core.AtomicFiles;
 import dev.ishaankot.worldarchive.model.WorldId;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
@@ -41,7 +40,7 @@ public final class FileStorageReviewStore {
             }
             try {
                 Instant previous = Instant.parse(
-                        Files.readString(file, StandardCharsets.UTF_8).strip());
+                        AtomicFiles.readUtf8(file, MAXIMUM_FILE_BYTES).strip());
                 if (now.isBefore(previous.plus(CADENCE))) {
                     return false;
                 }
@@ -53,7 +52,10 @@ public final class FileStorageReviewStore {
         if (Files.isSymbolicLink(directory) || Files.isSymbolicLink(file)) {
             throw new IOException("Storage review state path must not be a symbolic link");
         }
-        AtomicFiles.writeUtf8(file, now + System.lineSeparator());
+        AtomicFiles.writeUtf8(
+                file,
+                now + System.lineSeparator(),
+                MAXIMUM_FILE_BYTES);
         return true;
     }
 }

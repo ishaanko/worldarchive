@@ -1,11 +1,8 @@
 package dev.ishaankot.worldarchive.runtime;
 
 import dev.ishaankot.worldarchive.importing.BackupImportService;
-import dev.ishaankot.worldarchive.importing.GitConnectionMode;
-import dev.ishaankot.worldarchive.importing.GitHydrationMode;
 import dev.ishaankot.worldarchive.importing.ImportPreview;
 import dev.ishaankot.worldarchive.importing.ImportSummary;
-import dev.ishaankot.worldarchive.importing.ZipImportMode;
 import dev.ishaankot.worldarchive.settings.ClientSettingsAccess;
 import java.nio.file.Path;
 import java.util.Objects;
@@ -28,16 +25,13 @@ final class RuntimeBackupImportService implements BackupImportService {
     }
 
     @Override
-    public CompletionStage<ImportPreview> previewZip(Path folder, ZipImportMode mode) {
-        return preview(service -> service.previewZip(folder, mode));
+    public CompletionStage<ImportPreview> previewZip(Path folder) {
+        return preview(service -> service.previewZip(folder));
     }
 
     @Override
-    public CompletionStage<ImportPreview> previewGit(
-            String remote,
-            GitHydrationMode hydration,
-            GitConnectionMode connection) {
-        return preview(service -> service.previewGit(remote, hydration, connection));
+    public CompletionStage<ImportPreview> previewGit(String remote) {
+        return preview(service -> service.previewGit(remote));
     }
 
     @Override

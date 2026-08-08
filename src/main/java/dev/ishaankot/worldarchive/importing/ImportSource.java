@@ -27,24 +27,11 @@ public record ImportSource(
         }
     }
 
-    public static ImportSource zipLink(
-            ImportSourceId id,
-            Path root,
-            Map<BackupId, ImportArtifactBinding> artifacts) {
-        Path location = Objects.requireNonNull(root, "root").toAbsolutePath().normalize();
-        return new ImportSource(id, ImportSourceMode.ZIP_LINK, location.toString(), artifacts);
-    }
-
     public static ImportSource git(
             ImportSourceId id,
             String remote,
-            boolean fullDownload,
             Map<BackupId, ImportArtifactBinding> artifacts) {
-        return new ImportSource(
-                id,
-                fullDownload ? ImportSourceMode.GIT_FULL_DOWNLOAD : ImportSourceMode.GIT_REMOTE_BACKED,
-                remote,
-                artifacts);
+        return new ImportSource(id, ImportSourceMode.GIT_FULL_DOWNLOAD, remote, artifacts);
     }
 
     public Optional<ImportArtifactBinding> artifact(BackupId backupId) {
@@ -67,21 +54,18 @@ public record ImportSource(
         return new ImportSource(id, mode, location, updated);
     }
 
-    public Path folder() {
-        if (mode != ImportSourceMode.ZIP_LINK) {
-            throw new IllegalStateException("Import source is not a linked ZIP folder");
-        }
-        return Path.of(location).toAbsolutePath().normalize();
-    }
-
     private static String validateLocation(ImportSourceMode mode, String location) {
         Objects.requireNonNull(location, "location");
         if (mode == ImportSourceMode.ZIP_LINK) {
-            Path path = Path.of(location).toAbsolutePath().normalize();
+            // Zip link-in-place import was removed, but a catalog upgraded from an
+            // older release may still reference a ZIP_LINK source on disk. Keep this
+            // branch so that legacy entry can still be decoded instead of corrupting
+            // the whole registry file for every other (still-supported) source.
+            Path path = Path.of(location);
             if (!path.isAbsolute()) {
                 throw new IllegalArgumentException("Linked ZIP source must be absolute");
             }
-            return path.toString();
+            return path.normalize().toString();
         }
         return RemoteUrlPolicy.validatePlain(location);
     }

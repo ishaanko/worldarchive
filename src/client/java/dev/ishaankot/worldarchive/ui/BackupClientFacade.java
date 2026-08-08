@@ -1,6 +1,7 @@
 package dev.ishaankot.worldarchive.ui;
 
 import dev.ishaankot.worldarchive.core.BackupService;
+import dev.ishaankot.worldarchive.core.OperationId;
 import dev.ishaankot.worldarchive.core.ProgressListener;
 import dev.ishaankot.worldarchive.core.RestoreBackupResult;
 import dev.ishaankot.worldarchive.config.StoragePolicy;
@@ -43,6 +44,8 @@ public interface BackupClientFacade {
     CompletionStage<CleanupPlan> prepareCleanup(WorldId worldId);
 
     CompletionStage<CleanupResult> applyCleanup(CleanupRequest request);
+
+    CompletionStage<Void> discardCleanup(OperationId confirmationToken);
 
     CompletionStage<Void> saveStoragePolicy(WorldId worldId, StoragePolicy policy);
 

@@ -7,6 +7,7 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.util.stream.Stream;
 
 /** Bounded, no-follow cleanup for WorldArchive-owned temporary trees. */
 final class GitTemporaryFiles {
@@ -16,7 +17,23 @@ final class GitTemporaryFiles {
     }
 
     static void deleteTree(Path root) {
+        deleteTree(root, false);
+    }
+
+    /**
+     * Best-effort cleanup for private Git workspaces that bails entirely, leaving the tree
+     * untouched, when any {@code .lock} file is present anywhere beneath {@code root}. That
+     * short-circuit protects in-flight Git operations racing the repository {@code FileLock}.
+     */
+    static void deleteUnlessLocked(Path root) {
+        deleteTree(root, true);
+    }
+
+    private static void deleteTree(Path root, boolean preserveWhenLocked) {
         if (!Files.exists(root, LinkOption.NOFOLLOW_LINKS)) {
+            return;
+        }
+        if (preserveWhenLocked && containsLockFile(root)) {
             return;
         }
         try {
@@ -25,6 +42,16 @@ final class GitTemporaryFiles {
             Files.walkFileTree(root, new DeletingVisitor());
         } catch (IOException | RuntimeException ignored) {
             // Private temporary data remains for operating-system or user recovery.
+        }
+    }
+
+    private static boolean containsLockFile(Path root) {
+        try (Stream<Path> paths = Files.walk(root)) {
+            return paths.anyMatch(path -> path.getFileName() != null
+                    && path.getFileName().toString().endsWith(".lock"));
+        } catch (IOException exception) {
+            // The tree cannot be safely inspected; treat it as locked and leave it alone.
+            return true;
         }
     }
 

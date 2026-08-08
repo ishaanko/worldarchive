@@ -1,13 +1,11 @@
 package dev.ishaankot.worldarchive.ui;
 
 import dev.ishaankot.worldarchive.importing.BackupImportService;
-import dev.ishaankot.worldarchive.importing.GitConnectionMode;
-import dev.ishaankot.worldarchive.importing.GitHydrationMode;
 import dev.ishaankot.worldarchive.importing.ImportPreview;
-import dev.ishaankot.worldarchive.importing.ZipImportMode;
 import dev.ishaankot.worldarchive.settings.CancellableRequest;
 import dev.ishaankot.worldarchive.settings.ClientSettingsAccess;
 import dev.ishaankot.worldarchive.settings.FolderSelectionResult;
+import dev.ishaankot.worldarchive.ui.model.ScreenGeometry;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletionStage;
@@ -15,21 +13,22 @@ import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.components.MultiLineTextWidget;
-import net.minecraft.client.gui.components.StringWidget;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 
 /** Import entry point for Git histories, WorldArchive ZIP folders, and local rebuilds. */
 public final class BackupImportScreen extends Screen {
+    private static final int CONTENT_MIN = 240;
+
+    private static final int CONTENT_MAX = 430;
+
+    private static final int CONTENT_MARGIN = 24;
+
     private final Screen parent;
 
     private final BackupClientFacade facade;
 
     private final BackupImportService imports;
-
-    private GitHydrationMode hydration = GitHydrationMode.FULL_DOWNLOAD;
-
-    private ZipImportMode zipMode = ZipImportMode.COPY;
 
     private String remote = "";
 
@@ -61,15 +60,11 @@ public final class BackupImportScreen extends Screen {
 
     @Override
     protected void init() {
-        int contentWidth = Math.min(430, Math.max(240, width - 24));
-        int x = (width - contentWidth) / 2;
-        addRenderableOnly(new StringWidget(
-                x, 12, contentWidth, 20,
-                title.copy().withStyle(ChatFormatting.BOLD), font));
-        addRenderableOnly(new StringWidget(
-                x, 34, contentWidth, 14, Component.literal("From a repository"), font));
-        addRenderableOnly(new StringWidget(
-                x, 48, contentWidth, 14, Component.literal("Repository address"), font));
+        int contentWidth = ScreenGeometry.contentWidth(width, CONTENT_MIN, CONTENT_MAX, CONTENT_MARGIN);
+        int x = ScreenGeometry.centerX(width, contentWidth);
+        addRenderableOnly(Widgets.title(font, x, 12, contentWidth, 20, title));
+        addRenderableOnly(Widgets.label(font, x, 34, contentWidth, 14, "From a repository"));
+        addRenderableOnly(Widgets.label(font, x, 48, contentWidth, 14, "Repository address"));
         remoteBox = new EditBox(
                 font, x, 62, contentWidth, 20, Component.literal("Repository address"));
         remoteBox.setMaxLength(2048);
@@ -77,58 +72,28 @@ public final class BackupImportScreen extends Screen {
         remoteBox.setResponder(value -> remote = value);
         remoteBox.active = !busy;
         addRenderableWidget(remoteBox);
-        Button repositoryStorage = Button.builder(
-                        Component.literal(hydration == GitHydrationMode.FULL_DOWNLOAD
-                                ? "Repository files: Copy to this device"
-                                : "Repository files: Keep in repository"),
-                        ignored -> {
-                            hydration = hydration == GitHydrationMode.FULL_DOWNLOAD
-                                    ? GitHydrationMode.REMOTE_BACKED
-                                    : GitHydrationMode.FULL_DOWNLOAD;
-                            rebuildWidgets();
-                        })
-                .bounds(x, 86, contentWidth, 20).build();
-        repositoryStorage.active = !busy;
-        addRenderableWidget(repositoryStorage);
         Button gitPreview = Button.builder(
                         Component.literal("Find Backups from Repository"),
-                        ignored -> preview(imports.previewGit(
-                                remote,
-                                hydration,
-                                GitConnectionMode.RECOVERY_ONLY)))
-                .bounds(x, 110, contentWidth, 20).build();
+                        ignored -> preview(imports.previewGit(remote)))
+                .bounds(x, 86, contentWidth, 20).build();
         gitPreview.active = !busy && !remote.isBlank();
         addRenderableWidget(gitPreview);
-        addRenderableOnly(new StringWidget(
-                x, 138, contentWidth, 14, Component.literal("From a backup folder"), font));
-        Button folderStorage = Button.builder(
-                        Component.literal(zipMode == ZipImportMode.COPY
-                                ? "Folder files: Copy into WorldArchive"
-                                : "Folder files: Leave in selected folder"),
-                        ignored -> {
-                            zipMode = zipMode == ZipImportMode.COPY
-                                    ? ZipImportMode.LINK : ZipImportMode.COPY;
-                            rebuildWidgets();
-                        })
-                .bounds(x, 152, contentWidth, 20).build();
-        folderStorage.active = !busy;
-        addRenderableWidget(folderStorage);
+        addRenderableOnly(Widgets.label(font, x, 114, contentWidth, 14, "From a backup folder"));
         Button chooseZip = Button.builder(
                         Component.literal("Choose Backup Folder"),
                         ignored -> chooseZipFolder())
-                .bounds(x, 176, contentWidth, 20).build();
+                .bounds(x, 128, contentWidth, 20).build();
         chooseZip.active = !busy;
         addRenderableWidget(chooseZip);
-        addRenderableOnly(new StringWidget(
-                x, 204, contentWidth, 14,
-                Component.literal("Already stored by WorldArchive?"), font));
+        addRenderableOnly(Widgets.label(
+                font, x, 156, contentWidth, 14, "Already stored by WorldArchive?"));
         Button rebuild = Button.builder(
                         Component.literal("Find Stored Backups"),
                         ignored -> rebuildLocal())
-                .bounds(x, 218, contentWidth, 20).build();
+                .bounds(x, 170, contentWidth, 20).build();
         rebuild.active = !busy;
         addRenderableWidget(rebuild);
-        addRenderableOnly(new MultiLineTextWidget(x, 240, status, font)
+        addRenderableOnly(new MultiLineTextWidget(x, 192, status, font)
                 .setMaxWidth(contentWidth).setMaxRows(2));
         Button done = Button.builder(Component.literal("Back"), ignored -> onClose())
                 .bounds(x + (contentWidth - 120) / 2, height - 28, 120, 20).build();
@@ -158,7 +123,7 @@ public final class BackupImportScreen extends Screen {
             }
             switch (result) {
                 case FolderSelectionResult.Selected selected ->
-                        preview(imports.previewZip(selected.path(), zipMode));
+                        preview(imports.previewZip(selected.path()));
                 case FolderSelectionResult.Cancelled ignored -> {
                     status = Component.literal("No folder was selected")
                             .withStyle(ChatFormatting.GRAY);

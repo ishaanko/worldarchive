@@ -46,6 +46,7 @@ final class GitHistoryImporter {
             GitCommands commands = new GitCommands(settings, runner);
             GitRepositoryManager repository = new GitRepositoryManager(settings, commands);
             repository.ensure();
+            requireBoundedAdvertisedHeads(settings, commands, repository);
             commands.checked(
                     List.of(
                             "--git-dir=" + temporary,
@@ -62,8 +63,19 @@ final class GitHistoryImporter {
             return prepared;
         } finally {
             if (!retained) {
-                GitTemporaryDirectory.deleteUnlessLocked(workspace);
+                GitTemporaryFiles.deleteUnlessLocked(workspace);
             }
+        }
+    }
+
+    private static void requireBoundedAdvertisedHeads(
+            GitBackendSettings settings,
+            GitCommands commands,
+            GitRepositoryManager repository)
+            throws IOException, InterruptedException, GitStorageException {
+        GitRefStore refs = new GitRefStore(settings, commands, repository);
+        if (refs.resolveRemotePattern("refs/heads/*").size() > MAXIMUM_REFS) {
+            throw new GitStorageException("Git import contains too many branches");
         }
     }
 

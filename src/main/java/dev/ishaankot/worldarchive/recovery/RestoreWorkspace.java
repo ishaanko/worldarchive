@@ -49,25 +49,39 @@ final class RestoreWorkspace {
     }
 
     Staging createStaging() throws IOException {
+        return createStaging(ignored -> {
+        });
+    }
+
+    Staging createStaging(StagingCreationHook stagingCreationHook) throws IOException {
+        Objects.requireNonNull(stagingCreationHook, "stagingCreationHook");
         root.requireUnchanged();
         Path path = Files.createTempDirectory(root.path(), ".worldarchive-restore-");
-        BasicFileAttributes attributes = Files.readAttributes(
-                path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-        if (!FileSystemSafety.isOrdinaryDirectory(path, attributes)) {
-            deleteTree(root.path(), path);
-            throw new IOException("Private restore staging is unsafe");
+        try {
+            stagingCreationHook.afterCreate(path);
+            BasicFileAttributes attributes = Files.readAttributes(
+                    path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+            if (!FileSystemSafety.isOrdinaryDirectory(path, attributes)) {
+                throw new IOException("Private restore staging is unsafe");
+            }
+            Optional<String> identityMarker = DirectoryIdentityMarker.create(path);
+            if (attributes.fileKey() == null && identityMarker.isEmpty()) {
+                throw new IOException("Private restore staging has no stable identity");
+            }
+            root.requireUnchanged();
+            return new Staging(
+                    path,
+                    attributes.fileKey(),
+                    attributes.creationTime(),
+                    identityMarker);
+        } catch (IOException | RuntimeException exception) {
+            try {
+                deleteTree(root.path(), path);
+            } catch (IOException | RuntimeException cleanupFailure) {
+                exception.addSuppressed(cleanupFailure);
+            }
+            throw exception;
         }
-        Optional<String> identityMarker = DirectoryIdentityMarker.create(path);
-        if (attributes.fileKey() == null && identityMarker.isEmpty()) {
-            deleteTree(root.path(), path);
-            throw new IOException("Private restore staging has no stable identity");
-        }
-        root.requireUnchanged();
-        return new Staging(
-                path,
-                attributes.fileKey(),
-                attributes.creationTime(),
-                identityMarker);
     }
 
     Path publish(
@@ -365,5 +379,10 @@ final class RestoreWorkspace {
     @FunctionalInterface
     interface DirectoryMove {
         Path move(Path source, Path target, CopyOption... options) throws IOException;
+    }
+
+    @FunctionalInterface
+    interface StagingCreationHook {
+        void afterCreate(Path path) throws IOException;
     }
 }

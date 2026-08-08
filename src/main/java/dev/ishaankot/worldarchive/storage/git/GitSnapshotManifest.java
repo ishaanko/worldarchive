@@ -1,10 +1,9 @@
 package dev.ishaankot.worldarchive.storage.git;
 
+import dev.ishaankot.worldarchive.core.Digests;
 import dev.ishaankot.worldarchive.model.BackupManifest;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
@@ -57,12 +56,8 @@ record GitSnapshotManifest(
                 + manifest.changedFileCount() + "\n"
                 + manifest.contentSha256() + "\n"
                 + manifest.inventorySha256() + "\n";
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            return HexFormat.of().formatHex(digest.digest(canonical.getBytes(StandardCharsets.UTF_8)));
-        } catch (NoSuchAlgorithmException exception) {
-            throw new IllegalStateException("The Java runtime does not provide SHA-256", exception);
-        }
+        MessageDigest digest = Digests.sha256();
+        return Digests.hex(digest.digest(canonical.getBytes(StandardCharsets.UTF_8)));
     }
 
     static List<String> validatePatterns(List<String> patterns) {

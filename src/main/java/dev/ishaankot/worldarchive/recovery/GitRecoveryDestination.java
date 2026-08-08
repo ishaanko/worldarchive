@@ -56,8 +56,10 @@ final class GitRecoveryDestination implements RecoveryDestination {
         requireArtifact(record, destination);
         GitVerification verification = destination.ownership() == ArtifactOwnership.EXTERNAL
                 ? hydrateExternal(record, destination)
-                : await(backend.verifySnapshot(
-                        record.manifest().worldId(), record.manifest().backupId()));
+                : awaitDrained(backend.verifyRestorableSnapshot(
+                        record.manifest().worldId(),
+                        record.manifest().backupId(),
+                        record.manifest()));
         return verificationOutcome(record, destination, verification);
     }
 
@@ -148,7 +150,7 @@ final class GitRecoveryDestination implements RecoveryDestination {
         if (destination.ownership() != ArtifactOwnership.MANAGED) {
             return destination;
         }
-        DestinationResult result = await(backend.syncSnapshot(
+        DestinationResult result = awaitDrained(backend.syncSnapshot(
                 record.manifest().worldId(), record.manifest().backupId()));
         if (result.destination() != DestinationType.GIT) {
             throw new BackupRecoveryException("Git returned a result for another destination");

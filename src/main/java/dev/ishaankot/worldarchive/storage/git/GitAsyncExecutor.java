@@ -9,6 +9,8 @@ import java.util.concurrent.atomic.AtomicReference;
 
 /** Cancellation-aware executor ownership for Git storage operations. */
 final class GitAsyncExecutor implements AutoCloseable {
+    private static final long SHUTDOWN_WAIT_SECONDS = 5;
+
     private final ExecutorService executor;
 
     private final boolean ownsExecutor;
@@ -24,6 +26,9 @@ final class GitAsyncExecutor implements AutoCloseable {
         Future<?> task = executor.submit(() -> run(operation, result));
         taskReference.set(task);
         result.whenComplete((ignored, throwable) -> cancelSubmitted(result, taskReference));
+        if (result.isCancelled()) {
+            task.cancel(true);
+        }
         return result;
     }
 
@@ -57,16 +62,9 @@ final class GitAsyncExecutor implements AutoCloseable {
             return;
         }
         executor.shutdownNow();
-        boolean interrupted = false;
-        while (!executor.isTerminated()) {
-            try {
-                executor.awaitTermination(1L, TimeUnit.DAYS);
-            } catch (InterruptedException exception) {
-                interrupted = true;
-                executor.shutdownNow();
-            }
-        }
-        if (interrupted) {
+        try {
+            executor.awaitTermination(SHUTDOWN_WAIT_SECONDS, TimeUnit.SECONDS);
+        } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
         }
     }

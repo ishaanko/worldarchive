@@ -66,7 +66,8 @@ final class ZipArchiveInspector {
             throw new IOException("ZIP archive has an invalid size");
         }
         archive.position(0);
-        ArchiveScan scan = new ArchiveScan();
+        ArchiveScan scan = new ArchiveScan(
+                ZipLimits.maximumUncompressedBytes(archiveSize));
         InputStream channelInput = new NonClosingInputStream(Channels.newInputStream(archive));
         try (ZipInputStream zip = new ZipInputStream(channelInput, StandardCharsets.UTF_8)) {
             ZipEntry entry;
@@ -262,7 +263,7 @@ final class ZipArchiveInspector {
         } catch (ArithmeticException exception) {
             throw new IOException("ZIP uncompressed size overflow", exception);
         }
-        if (aggregateBytes[0] > ZipLimits.MAXIMUM_UNCOMPRESSED_BYTES) {
+        if (aggregateBytes[0] > aggregateBytes[1]) {
             throw new IOException("ZIP archive exceeds its uncompressed size limit");
         }
     }
@@ -482,13 +483,17 @@ final class ZipArchiveInspector {
 
         private final List<StreamedEntry> streamedEntries = new ArrayList<>();
 
-        private final long[] uncompressedBytes = new long[] {0};
+        private final long[] uncompressedBytes;
 
         private byte[] manifestBytes;
 
         private byte[] inventoryBytes;
 
         private int entryCount;
+
+        private ArchiveScan(long maximumUncompressedBytes) {
+            uncompressedBytes = new long[] {0, maximumUncompressedBytes};
+        }
 
         private void accept(ZipEntry entry, ZipInputStream zip) throws IOException {
             requireNotInterrupted();

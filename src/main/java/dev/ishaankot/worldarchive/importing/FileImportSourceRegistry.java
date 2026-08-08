@@ -113,7 +113,7 @@ public final class FileImportSourceRegistry implements ImportSourceRegistry {
             throw new IOException("Import source registry is not a safe regular file");
         }
         try {
-            JsonElement parsed = JsonParser.parseString(Files.readString(file));
+            JsonElement parsed = JsonParser.parseString(AtomicFiles.readUtf8(file));
             if (!parsed.isJsonObject()) {
                 throw new IOException("Import source registry root must be an object");
             }

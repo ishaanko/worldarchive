@@ -20,7 +20,7 @@ always restores backups as new worlds without modifying the original.
 - Per-world storage budgets, Git/ZIP usage, and growth forecasts
 - Previewed daily/weekly/monthly cleanup that preserves labeled story milestones
 - Previewed recovery of existing WorldArchive Git histories
-- Copy or read-only link import for folders of WorldArchive ZIP archives
+- Copy import for folders of WorldArchive ZIP archives
 - Offline catalog and Git-ref rebuilding from managed backup storage
 - Recovery-only access to backups for worlds whose save folders are gone
 - Partial-success reporting when one destination fails
@@ -84,9 +84,10 @@ a separate ZIP root, such as a different drive or synced folder.
 
 Each world's backup browser also has a **Storage** screen. It measures managed
 local Git and ZIP files separately, learns the world's recent growth rate, and
-estimates when the configured budget will be reached. Remote Git refs, linked
-imports, and legacy shared repositories are shown as unmetered and are never
-removed by guided cleanup.
+estimates when the configured budget will be reached. Remote Git refs, imports
+from earlier releases that reference storage WorldArchive does not own, and
+legacy shared repositories are shown as unmetered and are never removed by
+guided cleanup.
 
 The balanced cleanup policy keeps one representative backup for each of 7
 recent days, 4 earlier weeks, and 12 earlier months. Labeled backups are always
@@ -109,19 +110,13 @@ safely; a conflicting backup
 identity is reported and never overwrites the existing catalog or artifact.
 
 For repository histories, paste any supported credential-free HTTPS, SSH, Git,
-file, or absolute local repository location. **Repository files: Copy to this
-device** copies and verifies the selected Git and Git LFS objects in
-WorldArchive's managed storage. **Repository files: Keep in repository** keeps
-only pinned local metadata and downloads required Git LFS objects from the
-source when verifying or restoring. Imports are recovery-only; configure a
-world's repository separately in Settings for future backups. WorldArchive
-never contacts imported repositories automatically at startup.
+file, or absolute local repository location. WorldArchive copies and verifies
+the selected Git and Git LFS objects into its managed storage, and connects
+the repository as that world's remote for future backups. WorldArchive never
+contacts imported repositories automatically at startup.
 
-For backup folders, **Folder files: Copy into WorldArchive** publishes verified
-archives into managed storage. **Folder files: Leave in selected folder** keeps
-archives where they are and records a pinned checksum and relative path.
-Deleting a linked backup only removes WorldArchive's catalog link—the source ZIP
-is untouched.
+For backup folders, choosing a folder and clicking **Choose Backup Folder**
+publishes verified archives into managed storage.
 
 Use **Find Stored Backups** to recover catalog entries and missing Git snapshot
 refs from local managed repository histories and ZIP archives. This search is

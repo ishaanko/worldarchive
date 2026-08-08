@@ -2,7 +2,6 @@ package dev.ishaankot.worldarchive.runtime;
 
 import dev.ishaankot.worldarchive.core.AtomicFiles;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
@@ -28,11 +27,15 @@ final class RuntimeNoticeStore {
                 || Files.size(file) > MAXIMUM_NOTICE_BYTES) {
             throw new IOException("Stored background backup notice is unsafe");
         }
-        return Optional.of(requireSafe(Files.readString(file, StandardCharsets.UTF_8)));
+        return Optional.of(requireSafe(
+                AtomicFiles.readUtf8(file, MAXIMUM_NOTICE_BYTES)));
     }
 
     synchronized void save(String message) throws IOException {
-        AtomicFiles.writeUtf8(file, requireSafe(message) + System.lineSeparator());
+        AtomicFiles.writeUtf8(
+                file,
+                requireSafe(message) + System.lineSeparator(),
+                MAXIMUM_NOTICE_BYTES);
     }
 
     synchronized void retain(String message) throws IOException {

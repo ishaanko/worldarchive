@@ -1,16 +1,22 @@
 package dev.ishaankot.worldarchive.ui;
 
 import dev.ishaankot.worldarchive.storage.management.CleanupResult;
+import dev.ishaankot.worldarchive.ui.model.ScreenGeometry;
 import java.util.Objects;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.MultiLineTextWidget;
-import net.minecraft.client.gui.components.StringWidget;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 
 /** Actual cleanup outcome, including partial failures and measured reclaimed bytes. */
 final class CleanupResultScreen extends Screen {
+    private static final int CONTENT_MIN = 220;
+
+    private static final int CONTENT_MAX = 420;
+
+    private static final int CONTENT_MARGIN = 24;
+
     private final Screen parent;
 
     private final BackupWorldContext world;
@@ -36,15 +42,9 @@ final class CleanupResultScreen extends Screen {
 
     @Override
     protected void init() {
-        int contentWidth = Math.min(420, Math.max(220, width - 24));
-        int x = (width - contentWidth) / 2;
-        addRenderableOnly(new StringWidget(
-                x,
-                18,
-                contentWidth,
-                20,
-                title.copy().withStyle(ChatFormatting.BOLD),
-                font));
+        int contentWidth = ScreenGeometry.contentWidth(width, CONTENT_MIN, CONTENT_MAX, CONTENT_MARGIN);
+        int x = ScreenGeometry.centerX(width, contentWidth);
+        addRenderableOnly(Widgets.title(font, x, 18, contentWidth, 20, title));
         Component message;
         if (failure != null) {
             message = failure;
