@@ -20,7 +20,7 @@ classes/
 *.iws
 .classpath
 .project
-*/bin/
+bin/
 *~
 \#*
 

@@ -1,18 +1,23 @@
 package dev.ishaankot.worldarchive.ui;
 
+import dev.ishaankot.worldarchive.ui.model.ScreenGeometry;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Consumer;
-import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.components.MultiLineTextWidget;
-import net.minecraft.client.gui.components.StringWidget;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 
 /** Optional label prompt before the runtime performs a save-gated manual capture. */
 final class BackupCreateScreen extends Screen {
+    private static final int CONTENT_MIN = 180;
+
+    private static final int CONTENT_MAX = 400;
+
+    private static final int CONTENT_MARGIN = 24;
+
     private final Screen parent;
 
     private final Consumer<Optional<String>> confirmed;
@@ -29,16 +34,10 @@ final class BackupCreateScreen extends Screen {
 
     @Override
     protected void init() {
-        int contentWidth = Math.min(400, Math.max(180, width - 24));
-        int contentX = (width - contentWidth) / 2;
-        int top = Math.max(20, height / 2 - 74);
-        addRenderableOnly(new StringWidget(
-                contentX,
-                top,
-                contentWidth,
-                20,
-                title.copy().withStyle(ChatFormatting.BOLD),
-                font));
+        int contentWidth = ScreenGeometry.contentWidth(width, CONTENT_MIN, CONTENT_MAX, CONTENT_MARGIN);
+        int contentX = ScreenGeometry.centerX(width, contentWidth);
+        int top = ScreenGeometry.anchorMiddle(20, height, -74);
+        addRenderableOnly(Widgets.title(font, contentX, top, contentWidth, 20, title));
         MultiLineTextWidget explanation = new MultiLineTextWidget(
                         contentX,
                         top + 24,

@@ -9,7 +9,6 @@ import com.google.gson.JsonParser;
 import dev.ishaankot.worldarchive.core.AtomicFiles;
 import dev.ishaankot.worldarchive.model.WorldId;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
@@ -51,7 +50,7 @@ public final class FileStorageHistoryStore {
         }
         try {
             JsonObject root = JsonParser.parseString(
-                    Files.readString(file, StandardCharsets.UTF_8)).getAsJsonObject();
+                    AtomicFiles.readUtf8(file, MAXIMUM_FILE_BYTES)).getAsJsonObject();
             if (root.get("schemaVersion").getAsInt() != SCHEMA_VERSION
                     || !worldId.toString().equals(root.get("worldId").getAsString())) {
                 throw new IOException("Storage history identity or schema is invalid");
@@ -105,7 +104,10 @@ public final class FileStorageHistoryStore {
             encoded.add(item);
         }
         root.add("samples", encoded);
-        AtomicFiles.writeUtf8(file, GSON.toJson(root) + System.lineSeparator());
+        AtomicFiles.writeUtf8(
+                file,
+                GSON.toJson(root) + System.lineSeparator(),
+                MAXIMUM_FILE_BYTES);
     }
 
     private Path file(WorldId worldId) {

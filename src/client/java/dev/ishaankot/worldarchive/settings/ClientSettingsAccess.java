@@ -5,6 +5,7 @@ import dev.ishaankot.worldarchive.config.WorldArchiveConfig;
 import dev.ishaankot.worldarchive.config.WorldArchiveConfigStore;
 import dev.ishaankot.worldarchive.config.WorldIdentityStore;
 import dev.ishaankot.worldarchive.config.WorldConfig;
+import dev.ishaankot.worldarchive.core.AsyncTasks;
 import dev.ishaankot.worldarchive.model.SensitiveDataRedactor;
 import dev.ishaankot.worldarchive.model.WorldId;
 import java.io.IOException;
@@ -117,9 +118,10 @@ public final class ClientSettingsAccess {
 
         Path savesDirectory = gameDirectory.resolve("saves");
         worldsDirectory = savesDirectory;
-        initialization = CompletableFuture.runAsync(
-                () -> loadAndDiscoverWorlds(savesDirectory),
-                SETTINGS_EXECUTOR);
+        initialization = AsyncTasks.run(
+                        SETTINGS_EXECUTOR,
+                        () -> loadAndDiscoverWorlds(savesDirectory))
+                .toCompletableFuture();
     }
 
     public static WorldArchiveConfig snapshot() {
@@ -131,11 +133,6 @@ public final class ClientSettingsAccess {
     public static CompletionStage<Void> ready() {
         initialize();
         return initialization;
-    }
-
-    public static boolean isLoading() {
-        initialize();
-        return !initialization.isDone();
     }
 
     public static CompletionStage<WorldArchiveConfig> save(WorldArchiveConfig config) {
@@ -173,9 +170,9 @@ public final class ClientSettingsAccess {
             List<Path> knownWorldPaths) {
         Objects.requireNonNull(draft, "draft");
         List<Path> worlds = List.copyOf(Objects.requireNonNull(knownWorldPaths, "knownWorldPaths"));
-        return CompletableFuture.supplyAsync(
-                () -> draft.validate(mergedWorldPaths(worlds, KNOWN_WORLD_PATHS.get())),
-                SETTINGS_EXECUTOR);
+        return AsyncTasks.supply(
+                SETTINGS_EXECUTOR,
+                () -> draft.validate(mergedWorldPaths(worlds, KNOWN_WORLD_PATHS.get())));
     }
 
     public static CancellableRequest<SettingsHealthSnapshot> probeHealth(

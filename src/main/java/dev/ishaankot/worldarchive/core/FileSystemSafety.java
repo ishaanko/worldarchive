@@ -42,9 +42,15 @@ public final class FileSystemSafety {
                     "dos:attributes",
                     LinkOption.NOFOLLOW_LINKS);
             Object raw = attributes.get("attributes");
-            return raw instanceof Integer value && (value & WINDOWS_REPARSE_POINT) != 0;
+            if (!(raw instanceof Integer value)) {
+                throw new IOException(
+                        "Windows reparse-point attributes are unavailable");
+            }
+            return (value & WINDOWS_REPARSE_POINT) != 0;
         } catch (UnsupportedOperationException | IllegalArgumentException exception) {
-            return false;
+            throw new IOException(
+                    "Windows reparse-point attributes are unavailable",
+                    exception);
         }
     }
 }

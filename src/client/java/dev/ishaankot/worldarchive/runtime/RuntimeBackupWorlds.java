@@ -36,6 +36,7 @@ final class RuntimeBackupWorlds {
         Map<WorldId, BackupWorldEntry> entries = new HashMap<>();
         for (WorldConfig world : state.config().worlds()) {
             BackupWorldContext context = configuredContext(world);
+            runtime.actionContexts().allowSourceActions(context);
             boolean live = new RuntimeNavigation(runtime).sourceDirectoryAvailable(context);
             if (!live) {
                 context = runtime.actionContexts().markActionOnly(context);
@@ -91,7 +92,7 @@ final class RuntimeBackupWorlds {
     }
 
     private BackupWorldContext missingSourceContext(BackupRecord record) {
-        Path worldsDirectory = runtime.minecraft().getLevelSource().getBaseDir()
+        Path worldsDirectory = runtime.services().minecraft().getLevelSource().getBaseDir()
                 .toAbsolutePath().normalize();
         String storageName = ".worldarchive-missing-" + record.manifest().worldId();
         return runtime.actionContexts().markActionOnly(new BackupWorldContext(

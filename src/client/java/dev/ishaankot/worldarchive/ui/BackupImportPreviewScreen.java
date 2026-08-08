@@ -4,6 +4,7 @@ import dev.ishaankot.worldarchive.importing.ImportDisposition;
 import dev.ishaankot.worldarchive.importing.ImportPreview;
 import dev.ishaankot.worldarchive.importing.ImportPreviewItem;
 import dev.ishaankot.worldarchive.model.BackupId;
+import dev.ishaankot.worldarchive.ui.model.ScreenGeometry;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.HashSet;
@@ -12,13 +13,18 @@ import java.util.Set;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.MultiLineTextWidget;
-import net.minecraft.client.gui.components.StringWidget;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 
 /** Lets the user choose exact backups before executing a pinned import preview. */
 public final class BackupImportPreviewScreen extends Screen {
     private static final int ROW_HEIGHT = 24;
+
+    private static final int CONTENT_MIN = 240;
+
+    private static final int CONTENT_MAX = 450;
+
+    private static final int CONTENT_MARGIN = 24;
 
     private static final DateTimeFormatter DATE_FORMAT = DateTimeFormatter
             .ofPattern("MMM d, yyyy h:mm a")
@@ -59,11 +65,9 @@ public final class BackupImportPreviewScreen extends Screen {
 
     @Override
     protected void init() {
-        int contentWidth = Math.min(450, Math.max(240, width - 24));
-        int x = (width - contentWidth) / 2;
-        addRenderableOnly(new StringWidget(
-                x, 12, contentWidth, 20,
-                title.copy().withStyle(ChatFormatting.BOLD), font));
+        int contentWidth = ScreenGeometry.contentWidth(width, CONTENT_MIN, CONTENT_MAX, CONTENT_MARGIN);
+        int x = ScreenGeometry.centerX(width, contentWidth);
+        addRenderableOnly(Widgets.title(font, x, 12, contentWidth, 20, title));
         addRenderableOnly(new MultiLineTextWidget(
                 x, 34, Component.literal(summaryText()), font)
                 .setMaxWidth(contentWidth).setMaxRows(2));

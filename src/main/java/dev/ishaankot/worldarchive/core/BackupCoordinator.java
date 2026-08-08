@@ -12,7 +12,11 @@ import java.util.concurrent.CompletionStage;
  * <p>Implementations coalesce compatible concurrent triggers for the same world, serialize
  * incompatible operations, and allow different worlds to proceed independently.</p>
  */
-public interface BackupCoordinator extends BackupService {
+public interface BackupCoordinator {
+    CompletionStage<BackupResult> createBackup(
+            CreateBackupRequest request,
+            ProgressListener progressListener);
+
     /** Captures synchronously on the calling thread, suitable for an integrated-server save hook. */
     PreparedBackup prepareCapture(
             CreateBackupRequest request,

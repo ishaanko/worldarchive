@@ -3,7 +3,6 @@ package dev.ishaankot.worldarchive.storage.git;
 import dev.ishaankot.worldarchive.core.AtomicFiles;
 import dev.ishaankot.worldarchive.model.WorldId;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
@@ -141,7 +140,7 @@ final class GitRepositoryManager {
         Path state = stateDirectory.resolve("lfs-patterns");
         if (Files.exists(state, LinkOption.NOFOLLOW_LINKS)) {
             requireSafeRegularFile(state, "Git LFS pattern state is unsafe");
-            Files.readAllLines(state, StandardCharsets.UTF_8).stream()
+            AtomicFiles.readUtf8(state).lines()
                     .filter(line -> !line.isBlank())
                     .forEach(patterns::add);
         }
@@ -150,7 +149,7 @@ final class GitRepositoryManager {
         if (Files.exists(attributes, LinkOption.NOFOLLOW_LINKS)) {
             requireSafeRegularFile(attributes, "Git attributes file is unsafe");
             String suffix = " filter=lfs diff=lfs merge=lfs -text";
-            for (String line : Files.readAllLines(attributes, StandardCharsets.UTF_8)) {
+            for (String line : AtomicFiles.readUtf8(attributes).lines().toList()) {
                 if (line.endsWith(suffix)) {
                     patterns.add(line.substring(0, line.length() - suffix.length()));
                 }
@@ -200,7 +199,7 @@ final class GitRepositoryManager {
         if (exists) {
             requireSafeRegularFile(path, "Managed Git metadata file is unsafe");
         }
-        String original = exists ? Files.readString(path, StandardCharsets.UTF_8) : "";
+        String original = exists ? AtomicFiles.readUtf8(path) : "";
         String withoutManaged = removeManagedBlock(original).stripTrailing();
         StringBuilder content = new StringBuilder();
         if (!withoutManaged.isEmpty()) {

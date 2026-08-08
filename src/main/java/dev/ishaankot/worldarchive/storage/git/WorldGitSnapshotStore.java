@@ -1,5 +1,6 @@
 package dev.ishaankot.worldarchive.storage.git;
 
+import dev.ishaankot.worldarchive.core.AsyncTasks;
 import dev.ishaankot.worldarchive.core.BackupCapture;
 import dev.ishaankot.worldarchive.core.ProgressListener;
 import dev.ishaankot.worldarchive.model.BackupId;
@@ -315,6 +316,15 @@ public final class WorldGitSnapshotStore implements GitSnapshotStore {
         return child(worldId).deleteLocalSnapshot(worldId, backupId);
     }
 
+    /** Proves that this world's current configured remote has the exact local commit. */
+    public CompletionStage<Boolean> currentRemoteContainsSnapshot(
+            WorldId worldId,
+            BackupId backupId) {
+        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(backupId, "backupId");
+        return child(worldId).currentRemoteContainsSnapshot(worldId, backupId);
+    }
+
     public CompletionStage<Void> compactCurrentStorage(WorldId worldId) {
         Objects.requireNonNull(worldId, "worldId");
         return child(worldId).compactStorage(worldId);
@@ -368,7 +378,7 @@ public final class WorldGitSnapshotStore implements GitSnapshotStore {
 
     /** Fetches remote refs into a private repository without installing or downloading LFS data. */
     public CompletionStage<GitPreparedImport> prepareImport(String remoteUrl) {
-        return CompletableFuture.supplyAsync(() -> {
+        return AsyncTasks.supply(executor, () -> {
             try {
                 return new GitHistoryImporter(currentSettings, runner).prepare(remoteUrl);
             } catch (IOException | InterruptedException | GitStorageException exception) {
@@ -377,7 +387,7 @@ public final class WorldGitSnapshotStore implements GitSnapshotStore {
                 }
                 throw new CompletionException(exception);
             }
-        }, executor);
+        });
     }
 
     /** Installs only the exact commits retained by a prepared preview. */

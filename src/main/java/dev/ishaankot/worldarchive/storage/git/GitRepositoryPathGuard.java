@@ -1,9 +1,9 @@
 package dev.ishaankot.worldarchive.storage.git;
 
 import dev.ishaankot.worldarchive.core.FileSystemSafety;
+import dev.ishaankot.worldarchive.core.PathGuards;
 import java.io.IOException;
 import java.nio.channels.FileChannel;
-import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.OpenOption;
@@ -14,40 +14,26 @@ import java.util.Set;
 
 /** Creates and opens repository control paths without following links. */
 final class GitRepositoryPathGuard {
+    private static final PathGuards.AttributeReader<GitStorageException> ATTRIBUTE_READER =
+            component -> Files.readAttributes(component, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+
     private GitRepositoryPathGuard() {
     }
 
     static void createDirectories(Path directory) throws IOException, GitStorageException {
-        Path absolute = directory.toAbsolutePath().normalize();
-        Path current = absolute.getRoot();
-        if (current == null) {
-            throw new GitStorageException("Git repository path has no filesystem root");
-        }
-        requireDirectory(current);
-        for (Path segment : absolute) {
-            current = current.resolve(segment);
-            if (!Files.exists(current, LinkOption.NOFOLLOW_LINKS)) {
-                try {
-                    Files.createDirectory(current);
-                } catch (FileAlreadyExistsException exception) {
-                    // A racing creator is accepted only after validation below.
-                }
-            }
-            requireDirectory(current);
-        }
+        PathGuards.createDirectoriesRevalidatingPrefix(
+                directory,
+                () -> new GitStorageException("Git repository path has no filesystem root"),
+                ATTRIBUTE_READER,
+                () -> new GitStorageException("Git repository path contains a link or special entry"));
     }
 
     static void requireDirectory(Path directory) throws IOException, GitStorageException {
-        Path absolute = directory.toAbsolutePath().normalize();
-        Path current = absolute.getRoot();
-        if (current == null) {
-            throw new GitStorageException("Git repository path has no filesystem root");
-        }
-        requireDirectoryComponent(current);
-        for (Path segment : absolute) {
-            current = current.resolve(segment);
-            requireDirectoryComponent(current);
-        }
+        PathGuards.requireDirectory(
+                directory,
+                () -> new GitStorageException("Git repository path has no filesystem root"),
+                ATTRIBUTE_READER,
+                () -> new GitStorageException("Git repository path contains a link or special entry"));
     }
 
     static FileChannel openLockFile(Path lockPath) throws IOException, GitStorageException {
@@ -83,17 +69,6 @@ final class GitRepositoryPathGuard {
         } catch (IOException | GitStorageException | RuntimeException exception) {
             channel.close();
             throw exception;
-        }
-    }
-
-    private static void requireDirectoryComponent(Path component)
-            throws IOException, GitStorageException {
-        BasicFileAttributes attributes = Files.readAttributes(
-                component,
-                BasicFileAttributes.class,
-                LinkOption.NOFOLLOW_LINKS);
-        if (!FileSystemSafety.isOrdinaryDirectory(component, attributes)) {
-            throw new GitStorageException("Git repository path contains a link or special entry");
         }
     }
 }

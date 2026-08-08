@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -51,6 +52,16 @@ public final class SystemGitCommandRunner implements GitCommandRunner {
 
     private static final long PROCESS_POLL_MILLIS = 10L;
 
+    private static final Set<String> ALLOWED_COMMAND_GIT_ENVIRONMENT = Set.of(
+            "GIT_AUTHOR_DATE",
+            "GIT_AUTHOR_EMAIL",
+            "GIT_AUTHOR_NAME",
+            "GIT_COMMITTER_DATE",
+            "GIT_COMMITTER_EMAIL",
+            "GIT_COMMITTER_NAME",
+            "GIT_INDEX_FILE",
+            "GIT_LFS_SKIP_SMUDGE");
+
     @Override
     public GitCommandResult run(GitCommand command) throws IOException, InterruptedException {
         Objects.requireNonNull(command, "command");
@@ -59,11 +70,15 @@ public final class SystemGitCommandRunner implements GitCommandRunner {
         builder.directory(command.workingDirectory().toFile());
         builder.redirectErrorStream(false);
         Map<String, String> environment = builder.environment();
-        environment.putAll(command.environment());
+        removeUnsafeGitEnvironment(environment);
+        applyCommandEnvironment(environment, command.environment());
+        environment.put("GIT_CONFIG_NOSYSTEM", "1");
+        environment.put("GIT_ATTR_NOSYSTEM", "1");
         environment.put("GIT_TERMINAL_PROMPT", "0");
         environment.put("GCM_INTERACTIVE", "Never");
         environment.put("GIT_ASKPASS", "");
         environment.put("SSH_ASKPASS", "");
+        environment.remove("SSH_ASKPASS_REQUIRE");
         environment.put("GIT_LFS_FORCE_PROGRESS", "0");
 
         Process process;
@@ -148,6 +163,26 @@ public final class SystemGitCommandRunner implements GitCommandRunner {
                 error.truncated(),
                 output.byteCount(),
                 output.sha256());
+    }
+
+    static void removeUnsafeGitEnvironment(Map<String, String> environment) {
+        Objects.requireNonNull(environment, "environment");
+        environment.keySet().removeIf(name ->
+                name.toUpperCase(Locale.ROOT).startsWith("GIT_"));
+        environment.put("GIT_CONFIG_NOSYSTEM", "1");
+        environment.put("GIT_ATTR_NOSYSTEM", "1");
+    }
+
+    private static void applyCommandEnvironment(
+            Map<String, String> environment,
+            Map<String, String> commandEnvironment) {
+        commandEnvironment.forEach((name, value) -> {
+            String normalized = name.toUpperCase(Locale.ROOT);
+            if (!normalized.startsWith("GIT_")
+                    || ALLOWED_COMMAND_GIT_ENVIRONMENT.contains(normalized)) {
+                environment.put(name, value);
+            }
+        });
     }
 
     private static long deadline(GitCommand command) {

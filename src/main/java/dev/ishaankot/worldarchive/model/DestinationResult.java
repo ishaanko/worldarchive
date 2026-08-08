@@ -201,6 +201,20 @@ public record DestinationResult(
                 importSourceId);
     }
 
+    /** Returns a copy with a new status, message and sync status, keeping identity fields. */
+    public DestinationResult withState(
+            DestinationStatus newStatus, Optional<String> newMessage, SyncStatus sync) {
+        return new DestinationResult(
+                destination,
+                newStatus,
+                artifactId,
+                newMessage,
+                verificationStatus,
+                sync,
+                ownership,
+                importSourceId);
+    }
+
     private static Optional<String> validateOptionalText(Optional<String> value, String name) {
         Objects.requireNonNull(value, name);
         if (value.isEmpty()) {

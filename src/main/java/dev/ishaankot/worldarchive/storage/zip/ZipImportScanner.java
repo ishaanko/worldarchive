@@ -3,12 +3,15 @@ package dev.ishaankot.worldarchive.storage.zip;
 import dev.ishaankot.worldarchive.model.BackupManifest;
 import dev.ishaankot.worldarchive.storage.zip.ZipArchiveInspector.Inspection;
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
+import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -117,15 +120,27 @@ public final class ZipImportScanner {
             return;
         }
         if (Files.isSymbolicLink(sidecar)
-                || !Files.isRegularFile(sidecar, LinkOption.NOFOLLOW_LINKS)
-                || Files.size(sidecar) > ZipLimits.MAXIMUM_CHECKSUM_BYTES) {
+                || !Files.isRegularFile(sidecar, LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("ZIP checksum sidecar is unsafe");
         }
-        Matcher matcher = CHECKSUM.matcher(Files.readString(sidecar, StandardCharsets.UTF_8));
+        Matcher matcher = CHECKSUM.matcher(readSidecar(sidecar));
         if (!matcher.matches()
                 || !matcher.group(1).equals(sha256)
                 || !matcher.group(2).equals(archive.getFileName().toString())) {
             throw new IOException("ZIP checksum sidecar does not match the archive");
+        }
+    }
+
+    static String readSidecar(Path sidecar) throws IOException {
+        try (InputStream input = Files.newInputStream(
+                sidecar, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+            byte[] bytes = input.readNBytes(ZipLimits.MAXIMUM_CHECKSUM_BYTES + 1);
+            if (bytes.length > ZipLimits.MAXIMUM_CHECKSUM_BYTES) {
+                throw new IOException("ZIP checksum sidecar is too large");
+            }
+            return StandardCharsets.UTF_8.newDecoder()
+                    .decode(ByteBuffer.wrap(bytes))
+                    .toString();
         }
     }
 }

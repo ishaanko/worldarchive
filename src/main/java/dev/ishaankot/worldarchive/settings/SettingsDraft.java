@@ -612,11 +612,6 @@ public final class SettingsDraft {
                 parseAbsolutePath(zipDestination));
     }
 
-    public void resetHealth() {
-        resetGitHealth();
-        resetZipHealth();
-    }
-
     public void applyHealth(SettingsHealthSnapshot health, Instant checkedAt) {
         Objects.requireNonNull(health, "health");
         Objects.requireNonNull(checkedAt, "checkedAt");

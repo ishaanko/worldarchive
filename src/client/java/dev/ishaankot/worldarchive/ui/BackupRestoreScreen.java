@@ -6,6 +6,7 @@ import dev.ishaankot.worldarchive.ui.model.ConfirmationKind;
 import dev.ishaankot.worldarchive.ui.model.ConfirmationState;
 import dev.ishaankot.worldarchive.ui.model.RestoreChoice;
 import dev.ishaankot.worldarchive.ui.model.BackupRow;
+import dev.ishaankot.worldarchive.ui.model.ScreenGeometry;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
@@ -24,6 +25,12 @@ final class BackupRestoreScreen extends Screen {
             "CON", "PRN", "AUX", "NUL",
             "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
             "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9");
+
+    private static final int CONTENT_MIN = 180;
+
+    private static final int CONTENT_MAX = 430;
+
+    private static final int CONTENT_MARGIN = 24;
 
     private final Screen parent;
 
@@ -60,16 +67,10 @@ final class BackupRestoreScreen extends Screen {
 
     @Override
     protected void init() {
-        int contentWidth = Math.min(430, Math.max(180, width - 24));
-        int contentX = (width - contentWidth) / 2;
-        int top = Math.max(12, height / 2 - 100);
-        addRenderableOnly(new StringWidget(
-                contentX,
-                top,
-                contentWidth,
-                20,
-                title.copy().withStyle(ChatFormatting.BOLD),
-                font));
+        int contentWidth = ScreenGeometry.contentWidth(width, CONTENT_MIN, CONTENT_MAX, CONTENT_MARGIN);
+        int contentX = ScreenGeometry.centerX(width, contentWidth);
+        int top = ScreenGeometry.anchorMiddle(12, height, -100);
+        addRenderableOnly(Widgets.title(font, contentX, top, contentWidth, 20, title));
         MultiLineTextWidget explanation = new MultiLineTextWidget(
                         contentX,
                         top + 24,

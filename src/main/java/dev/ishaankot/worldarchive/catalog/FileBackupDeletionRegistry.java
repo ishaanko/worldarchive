@@ -69,7 +69,7 @@ public final class FileBackupDeletionRegistry implements BackupDeletionRegistry 
         if (Files.isSymbolicLink(file) || !Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("Backup deletion registry is not a safe regular file");
         }
-        java.util.List<String> lines = Files.readAllLines(file);
+        java.util.List<String> lines = AtomicFiles.readUtf8(file).lines().toList();
         if (lines.isEmpty() || !HEADER.equals(lines.getFirst())) {
             throw new IOException("Backup deletion registry has an unsupported format");
         }

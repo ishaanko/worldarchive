@@ -13,7 +13,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 
-/** Preserves world enablement while merging newly discovered stable identities. */
+/** Preserves settings only when a discovered world has the same stable identity. */
 public final class WorldConfigReconciler {
     private WorldConfigReconciler() {
     }
@@ -49,7 +49,12 @@ public final class WorldConfigReconciler {
                 errors.add("Two save folders share one WorldArchive world identity");
                 continue;
             }
-            WorldConfig stored = existingById.getOrDefault(worldId, existingByPath.get(path));
+            WorldConfig stored = existingById.get(worldId);
+            if (stored == null && existingByPath.containsKey(path)) {
+                errors.add(
+                        "A saved folder has a different WorldArchive identity. "
+                                + "Destination settings were not copied.");
+            }
             boolean enabled = stored == null || stored.enabled();
             result.add(new WorldConfig(
                     worldId,

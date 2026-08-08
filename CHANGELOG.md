@@ -14,10 +14,21 @@
 
 ### Changed
 
-- Treat configured Git remotes, linked imports, and legacy shared repositories
-  as unmetered storage that guided cleanup never deletes.
+- Treat configured Git remotes, imports from earlier releases that reference
+  storage WorldArchive does not own, and legacy shared repositories as
+  unmetered storage that guided cleanup never deletes.
 - Allow synchronized Git snapshots to be evicted locally and rehydrated from
   their unchanged remote ref when a later verification or restore needs them.
+
+### Removed
+
+- Remove zip link-in-place import mode; only copy-into-managed-storage import
+  remains. Existing link-imported records are reported as missing (not a
+  crash) and can be re-imported with copy.
+- Remove the recovery-only and remote-backed Git import options. Repository
+  imports now always copy and verify Git and Git LFS objects into managed
+  storage and connect the repository as that world's remote. Already-imported
+  remote-backed records keep working for verification, restore, and deletion.
 
 ## 0.3.1 (2026-07-22)
 

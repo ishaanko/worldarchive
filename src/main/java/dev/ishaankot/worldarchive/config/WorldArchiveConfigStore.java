@@ -18,7 +18,6 @@ import java.io.IOException;
 import java.math.BigDecimal;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
@@ -87,7 +86,7 @@ public final class WorldArchiveConfigStore {
         if (Files.size(file) > MAXIMUM_CONFIG_BYTES) {
             throw new ConfigurationException("Configuration file is unexpectedly large");
         }
-        JsonObject root = parseObject(Files.readString(file, StandardCharsets.UTF_8));
+        JsonObject root = parseObject(AtomicFiles.readUtf8(file, MAXIMUM_CONFIG_BYTES));
         rejectCredentialData(root);
         int schemaVersion = optionalInteger(root, "schemaVersion").orElse(0);
         if (schemaVersion > WorldArchiveConfig.CURRENT_SCHEMA_VERSION) {
@@ -338,7 +337,10 @@ public final class WorldArchiveConfigStore {
 
     private void writeUnlocked(WorldArchiveConfig config) throws IOException {
         rejectSymlink(file, "Configuration file");
-        AtomicFiles.writeUtf8(file, GSON.toJson(encode(config)) + System.lineSeparator());
+        AtomicFiles.writeUtf8(
+                file,
+                GSON.toJson(encode(config)) + System.lineSeparator(),
+                MAXIMUM_CONFIG_BYTES);
     }
 
     private static JsonObject encode(WorldArchiveConfig config) {

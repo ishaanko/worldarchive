@@ -58,7 +58,7 @@ public final class PreparedBackup implements AutoCloseable {
         while (true) {
             Runnable current = releaseObserver.get();
             if (current == null) {
-                additional.run();
+                safeNotify(additional);
                 return;
             }
             Runnable chained = () -> {
@@ -79,7 +79,16 @@ public final class PreparedBackup implements AutoCloseable {
         if (resources == null) {
             throw new IllegalStateException("Prepared backup ownership was already transferred or closed");
         }
-        notifyReleased();
+        try {
+            notifyReleased();
+        } catch (Error failure) {
+            try {
+                resources.close();
+            } catch (IOException closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
+            throw failure;
+        }
         return resources;
     }
 
@@ -98,8 +107,12 @@ public final class PreparedBackup implements AutoCloseable {
     private void notifyReleased() {
         Runnable observer = releaseObserver.getAndSet(null);
         if (observer != null) {
-            observer.run();
+            safeNotify(observer);
         }
+    }
+
+    private static void safeNotify(Runnable observer) {
+        Observers.safely(observer);
     }
 
     record Resources(CapturedBackup capturedBackup) implements AutoCloseable {

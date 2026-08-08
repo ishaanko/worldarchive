@@ -50,50 +50,6 @@ final class GitRefStore {
                 : Optional.of(GitCommands.objectId(value));
     }
 
-    void publishSnapshotAndHistory(
-            String snapshotRef,
-            String historyRef,
-            String commit,
-            Optional<String> previousHistory)
-            throws IOException, InterruptedException, GitStorageException {
-        List<String> transaction = new ArrayList<>();
-        transaction.add("start");
-        transaction.add("create " + snapshotRef + " " + commit);
-        if (previousHistory.isPresent()) {
-            transaction.add("update " + historyRef + " " + commit + " "
-                    + previousHistory.orElseThrow());
-        } else {
-            transaction.add("create " + historyRef + " " + commit);
-        }
-        transaction.add("prepare");
-        transaction.add("commit");
-        try {
-            commands.checked(
-                    List.of(
-                            "--git-dir=" + settings.repository(),
-                            "update-ref",
-                            "--stdin"),
-                    settings.repository(),
-                    Map.of(),
-                    GitCommand.utf8Input(String.join("\n", transaction) + "\n"));
-        } catch (IOException | GitStorageException exception) {
-            Optional<String> publishedSnapshot = resolve(snapshotRef);
-            Optional<String> publishedHistory = resolve(historyRef);
-            if (publishedSnapshot.equals(Optional.of(commit))
-                    && publishedHistory.equals(Optional.of(commit))) {
-                return;
-            }
-            boolean unchangedSnapshot = publishedSnapshot.isEmpty();
-            boolean unchangedHistory = publishedHistory.equals(previousHistory);
-            if (!unchangedSnapshot || !unchangedHistory) {
-                throw new GitStorageException(
-                        "Git snapshot publication has an ambiguous repository state",
-                        exception);
-            }
-            throw exception;
-        }
-    }
-
     boolean exists(String refName)
             throws IOException, InterruptedException, GitStorageException {
         return resolve(refName).isPresent();

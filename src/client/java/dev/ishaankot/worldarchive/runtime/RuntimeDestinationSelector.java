@@ -32,6 +32,10 @@ final class RuntimeDestinationSelector implements BackupDestinationSelector {
                 .toList();
     }
 
+    boolean hasConfiguredDestination(CreateBackupRequest request) {
+        return !configured.select(Objects.requireNonNull(request, "request")).isEmpty();
+    }
+
     void gitToolsAvailable(boolean available) {
         gitToolsAvailable.set(available);
         warning.set(available
