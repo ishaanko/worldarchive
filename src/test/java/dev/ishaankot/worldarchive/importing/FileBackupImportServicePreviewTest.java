@@ -1,6 +1,8 @@
 package dev.ishaankot.worldarchive.importing;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.ishaankot.worldarchive.model.BackupId;
 import dev.ishaankot.worldarchive.model.BackupManifest;
@@ -56,6 +58,14 @@ class FileBackupImportServicePreviewTest {
         assertEquals(
                 manifest.worldId() + "/" + ZipBackupStore.archiveFilename(manifest),
                 FileBackupImportService.zipPreviewArtifactId(manifest));
+    }
+
+    @Test
+    void readOnlyGitImportRemoteIsNotOfferedAsAConnection() {
+        assertFalse(FileBackupImportService.connectableRemote(
+                "git://example.invalid/team/archive.git"));
+        assertTrue(FileBackupImportService.connectableRemote(
+                "https://example.invalid/team/archive.git"));
     }
 
     private static BackupManifest manifest() {

@@ -458,12 +458,16 @@ final class GitSnapshotOperations {
         String refName = GitSnapshot.refName(worldId, backupId);
         Optional<String> current = refs.resolve(refName);
         if (current.isEmpty()) {
-            if (settings.remoteUrl().isPresent()
-                    && !remoteSnapshots.find(worldId, backupId, Optional.empty()).isEmpty()) {
-                throw new GitStorageException(
-                        "Configured Git remote still contains the snapshot but its exact local commit is unavailable");
+            if (settings.remoteUrl().isEmpty()) {
+                return false;
             }
-            return false;
+            List<RemoteSnapshotRef> remoteRefs = remoteSnapshots.find(
+                    worldId, backupId, Optional.empty());
+            if (remoteRefs.isEmpty()) {
+                return false;
+            }
+            deleteRemoteSnapshotRefs(remoteRefs, remoteRefs.getFirst().commitId());
+            return true;
         }
         if (settings.remoteUrl().isPresent()) {
             GitSnapshot snapshot = refs.snapshotForCommit(worldId, backupId, current.get());

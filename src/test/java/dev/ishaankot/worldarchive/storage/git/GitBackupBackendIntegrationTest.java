@@ -360,7 +360,7 @@ class GitBackupBackendIntegrationTest extends GitBackupBackendIntegrationTestSup
     }
 
     @Test
-    void refusesToReconcileMissingLocalSnapshotWhileExactRemoteRefExists() throws Exception {
+    void deletesRemoteSnapshotWhenItsLocalRefWasEvicted() throws Exception {
         Path remote = temporaryDirectory.resolve("remote-only-delete.git");
         nativeGit("init", "--bare", remote.toString());
         Path world = temporaryDirectory.resolve("remote-only-delete-world");
@@ -384,9 +384,8 @@ class GitBackupBackendIntegrationTest extends GitBackupBackendIntegrationTestSup
                     "-d",
                     snapshotRef);
 
-            assertThrows(GitStorageException.class, () ->
-                    await(backend.deleteSnapshot(worldId, backupId)));
-            assertTrue(remoteRef(remote, remoteSnapshotRef).isPresent());
+            assertTrue(await(backend.deleteSnapshot(worldId, backupId)));
+            assertTrue(remoteRef(remote, remoteSnapshotRef).isEmpty());
         }
     }
 

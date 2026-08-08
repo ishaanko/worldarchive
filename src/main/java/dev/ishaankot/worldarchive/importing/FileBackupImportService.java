@@ -2,6 +2,7 @@ package dev.ishaankot.worldarchive.importing;
 
 import dev.ishaankot.worldarchive.catalog.BackupCatalog;
 import dev.ishaankot.worldarchive.catalog.BackupDeletionRegistry;
+import dev.ishaankot.worldarchive.config.RemoteUrlPolicy;
 import dev.ishaankot.worldarchive.catalog.CatalogMergeResult;
 import dev.ishaankot.worldarchive.core.AsyncTasks;
 import dev.ishaankot.worldarchive.model.BackupId;
@@ -481,14 +482,25 @@ public final class FileBackupImportService implements BackupImportService, AutoC
             deletions.restore(candidate.manifest().backupId());
             merge(summary, record(candidate.manifest(), destination));
         }
-        Map<WorldId, String> connections = candidates.stream()
-                .filter(candidate -> installs.get(candidate.manifest().backupId())
-                        != GitImportInstallStatus.CONFLICT)
-                .collect(java.util.stream.Collectors.toMap(
-                candidate -> candidate.manifest().worldId(),
-                ignored -> plan.fetched().remote(),
-                (first, ignored) -> first));
+        Map<WorldId, String> connections = connectableRemote(plan.fetched().remote())
+                ? candidates.stream()
+                        .filter(candidate -> installs.get(candidate.manifest().backupId())
+                                != GitImportInstallStatus.CONFLICT)
+                        .collect(java.util.stream.Collectors.toMap(
+                        candidate -> candidate.manifest().worldId(),
+                        ignored -> plan.fetched().remote(),
+                        (first, ignored) -> first))
+                : Map.of();
         return summary.finish(connections);
+    }
+
+    static boolean connectableRemote(String remote) {
+        try {
+            RemoteUrlPolicy.validateConfiguredPlain(remote);
+            return true;
+        } catch (IllegalArgumentException exception) {
+            return false;
+        }
     }
 
     private static DestinationResult gitDestination(
