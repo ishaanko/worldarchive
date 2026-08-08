@@ -79,16 +79,40 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
             WorldOperationGate operationGate) {
         this(
                 catalog,
-                RecoveryDestinations.create(
-                        gitBackend,
-                        zipStore,
-                        Optional.of(Objects.requireNonNull(sources, "sources")),
-                        Clock.systemUTC()),
+                gitBackend,
+                zipStore,
+                sources,
                 deletions,
                 identityStore,
                 metadataFinalizer,
                 executor,
-                Clock.systemUTC(),
+                operationGate,
+                Clock.systemUTC());
+    }
+
+    public BackupRecoveryService(
+            BackupCatalog catalog,
+            Optional<? extends GitSnapshotStore> gitBackend,
+            Optional<? extends ZipBackupStoreResolver> zipStore,
+            ImportSourceRegistry sources,
+            BackupDeletionRegistry deletions,
+            WorldIdentityStore identityStore,
+            RestoredWorldMetadataFinalizer metadataFinalizer,
+            Executor executor,
+            WorldOperationGate operationGate,
+            Clock clock) {
+        this(
+                catalog,
+                RecoveryDestinations.create(
+                        gitBackend,
+                        zipStore,
+                        Optional.of(Objects.requireNonNull(sources, "sources")),
+                        clock),
+                deletions,
+                identityStore,
+                metadataFinalizer,
+                executor,
+                clock,
                 DEFAULT_CONFIRMATION_LIFETIME,
                 operationGate,
                 Files::move);

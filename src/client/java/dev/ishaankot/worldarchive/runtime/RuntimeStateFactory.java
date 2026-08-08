@@ -64,7 +64,8 @@ final class RuntimeStateFactory {
                 services.identityStore(),
                 new MinecraftRestoredWorldMetadataFinalizer(),
                 services.workerExecutor(),
-                services.operationGate());
+                services.operationGate(),
+                services.clock());
         SerializedBackupCoordinator coordinator = new SerializedBackupCoordinator(
                 services.catalog(),
                 services.captureFactory(),

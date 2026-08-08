@@ -213,8 +213,7 @@ final class RecoveryHealthOperations {
             }
         });
         return switch (synchronizedResult.syncStatus()) {
-            case SYNCED, NOT_CONFIGURED -> withState(
-                    local,
+            case SYNCED, NOT_CONFIGURED -> local.withState(
                     DestinationStatus.SUCCESS,
                     Optional.empty(),
                     synchronizedResult.syncStatus());
@@ -229,26 +228,9 @@ final class RecoveryHealthOperations {
             DestinationResult local,
             String message,
             SyncStatus status) {
-        return withState(
-                local,
+        return local.withState(
                 DestinationStatus.PENDING_SYNC,
                 Optional.of(message),
                 status);
-    }
-
-    private static DestinationResult withState(
-            DestinationResult original,
-            DestinationStatus status,
-            Optional<String> message,
-            SyncStatus syncStatus) {
-        return new DestinationResult(
-                original.destination(),
-                status,
-                original.artifactId(),
-                message,
-                original.verificationStatus(),
-                syncStatus,
-                original.ownership(),
-                original.importSourceId());
     }
 }

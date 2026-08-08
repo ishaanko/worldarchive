@@ -15,7 +15,7 @@ import dev.ishaankot.worldarchive.model.BackupRecord;
 import dev.ishaankot.worldarchive.model.BackupResult;
 import dev.ishaankot.worldarchive.model.DestinationResult;
 import dev.ishaankot.worldarchive.model.DestinationStatus;
-import dev.ishaankot.worldarchive.model.SyncStatus;
+import dev.ishaankot.worldarchive.model.SensitiveDataRedactor;
 import java.io.IOException;
 import java.time.Clock;
 import java.time.Duration;
@@ -27,6 +27,8 @@ import java.util.Optional;
 
 /** Executes delete confirmation issuance and the destination-deletion operation. */
 final class RecoveryDeleteOperation {
+    private static final int MAXIMUM_FAILURE_REASON_LENGTH = 200;
+
     private final BackupCatalog catalog;
 
     private final RecoveryDestinations destinations;
@@ -110,24 +112,26 @@ final class RecoveryDeleteOperation {
                 cancellation.checkpoint();
                 RecoveryDestination adapter = destinations.get(destination.destination());
                 boolean removed = false;
+                Optional<String> failureReason = Optional.empty();
                 if (adapter != null) {
                     try {
-                        removed = cancellation.commitIfActive(() ->
+                        DeletionOutcome outcome = cancellation.commitIfActive(() ->
                                 deleteAndPersist(current, destination, adapter));
+                        removed = outcome.removed();
+                        failureReason = outcome.failureReason();
                     } catch (InterruptedException exception) {
                         Thread.currentThread().interrupt();
                         throw exception;
                     }
                 }
                 if (removed) {
-                    attempts.add(withState(
-                            destination,
+                    attempts.add(destination.withState(
                             DestinationStatus.SUCCESS,
                             Optional.empty(),
                             destination.syncStatus()));
                 } else {
                     attempts.add(DestinationResult.failed(
-                            destination.destination(), "Destination artifact could not be deleted"));
+                            destination.destination(), deletionFailureMessage(failureReason)));
                 }
                 RecoverySupport.report(progressListener, RecoverySupport.progress(
                         operationId, current, BackupOperation.DELETE, OperationPhase.WRITING,
@@ -150,7 +154,7 @@ final class RecoveryDeleteOperation {
         }
     }
 
-    private boolean deleteAndPersist(
+    private DeletionOutcome deleteAndPersist(
             BackupRecord current,
             DestinationResult destination,
             RecoveryDestination adapter) throws Exception {
@@ -161,12 +165,39 @@ final class RecoveryDeleteOperation {
             Thread.currentThread().interrupt();
             throw exception;
         } catch (Exception exception) {
-            return false;
+            return DeletionOutcome.failed(safeFailureReason(exception));
         }
         if (removed) {
             persistSuccessfulDeletion(current, RecoverySupport.DestinationKey.from(destination));
         }
-        return removed;
+        return removed ? DeletionOutcome.succeeded() : DeletionOutcome.failed(Optional.empty());
+    }
+
+    private static Optional<String> safeFailureReason(Exception exception) {
+        String message = exception.getMessage();
+        if (message == null || message.isBlank()) {
+            return Optional.of(exception.getClass().getSimpleName());
+        }
+        String redacted = SensitiveDataRedactor.redact(message);
+        return Optional.of(redacted.length() > MAXIMUM_FAILURE_REASON_LENGTH
+                ? redacted.substring(0, MAXIMUM_FAILURE_REASON_LENGTH - 1) + "…"
+                : redacted);
+    }
+
+    private static String deletionFailureMessage(Optional<String> reason) {
+        return reason
+                .map(text -> "Destination artifact could not be deleted: " + text)
+                .orElse("Destination artifact could not be deleted");
+    }
+
+    private record DeletionOutcome(boolean removed, Optional<String> failureReason) {
+        static DeletionOutcome succeeded() {
+            return new DeletionOutcome(true, Optional.empty());
+        }
+
+        static DeletionOutcome failed(Optional<String> failureReason) {
+            return new DeletionOutcome(false, failureReason);
+        }
     }
 
     private void removeRecordWithoutArtifacts(BackupRecord expected) throws IOException {
@@ -210,21 +241,5 @@ final class RecoveryDeleteOperation {
     private Instant completionTime(BackupRecord record) {
         Instant now = clock.instant();
         return now.isBefore(record.manifest().createdAt()) ? record.manifest().createdAt() : now;
-    }
-
-    private static DestinationResult withState(
-            DestinationResult original,
-            DestinationStatus status,
-            Optional<String> message,
-            SyncStatus syncStatus) {
-        return new DestinationResult(
-                original.destination(),
-                status,
-                original.artifactId(),
-                message,
-                original.verificationStatus(),
-                syncStatus,
-                original.ownership(),
-                original.importSourceId());
     }
 }

@@ -69,6 +69,9 @@ final class CleanupExecutor {
             if (removedGit) {
                 try {
                     ManagedStorageSupport.await(git.compactCurrentStorage(plan.worldId()));
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    throw exception;
                 } catch (Exception exception) {
                     failures.putIfAbsent(
                             plan.items().stream()
@@ -120,7 +123,7 @@ final class CleanupExecutor {
             CleanupRequest request,
             Snapshot current,
             Set<BackupId> remoteCopies,
-            Map<BackupId, String> failures) {
+            Map<BackupId, String> failures) throws InterruptedException {
         boolean removedGit = false;
         for (CleanupItem item : plan.items()) {
             if (!request.selectedBackups().contains(item.backupId())) {
@@ -139,6 +142,9 @@ final class CleanupExecutor {
                             remoteCopies.contains(item.backupId()));
                     removedGit = true;
                 }
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw exception;
             } catch (Exception exception) {
                 failures.put(item.backupId(), safeMessage(exception));
             }
@@ -177,7 +183,7 @@ final class CleanupExecutor {
     Optional<Set<BackupId>> protectedRemoteCopiesForGitRemoval(
             Snapshot snapshot,
             Set<BackupId> protectedIds,
-            BackupId safetyFloor) {
+            BackupId safetyFloor) throws InterruptedException {
         if (snapshot.localGitSnapshots().isEmpty()) {
             return Optional.empty();
         }
@@ -220,18 +226,26 @@ final class CleanupExecutor {
                         .isEmpty()) {
                     return Optional.empty();
                 }
-                try {
-                    if (!ManagedStorageSupport.await(git.currentRemoteContainsSnapshot(
-                            snapshot.world().worldId(), backupId))) {
-                        return Optional.empty();
-                    }
-                } catch (Exception exception) {
+                if (!currentRemoteContainsSnapshot(snapshot, backupId)) {
                     return Optional.empty();
                 }
                 remoteCopies.add(backupId);
             }
         }
         return Optional.of(Set.copyOf(remoteCopies));
+    }
+
+    private boolean currentRemoteContainsSnapshot(Snapshot snapshot, BackupId backupId)
+            throws InterruptedException {
+        try {
+            return ManagedStorageSupport.await(git.currentRemoteContainsSnapshot(
+                    snapshot.world().worldId(), backupId));
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw exception;
+        } catch (Exception exception) {
+            return false;
+        }
     }
 
     private Set<BackupId> requireCurrentRemoteCopies(
