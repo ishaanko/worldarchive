@@ -481,7 +481,10 @@ public final class FileBackupImportService implements BackupImportService, AutoC
             deletions.restore(candidate.manifest().backupId());
             merge(summary, record(candidate.manifest(), destination));
         }
-        Map<WorldId, String> connections = candidates.stream().collect(java.util.stream.Collectors.toMap(
+        Map<WorldId, String> connections = candidates.stream()
+                .filter(candidate -> installs.get(candidate.manifest().backupId())
+                        != GitImportInstallStatus.CONFLICT)
+                .collect(java.util.stream.Collectors.toMap(
                 candidate -> candidate.manifest().worldId(),
                 ignored -> plan.fetched().remote(),
                 (first, ignored) -> first));
