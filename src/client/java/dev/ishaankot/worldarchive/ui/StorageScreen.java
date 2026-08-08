@@ -325,6 +325,9 @@ final class StorageScreen extends Screen {
         facade.prepareCleanup(world.worldId()).whenComplete((plan, throwable) ->
                 minecraft.execute(() -> {
                     if (!active || token != revision) {
+                        if (plan != null) {
+                            facade.discardCleanup(plan.confirmationToken());
+                        }
                         return;
                     }
                     busy = false;

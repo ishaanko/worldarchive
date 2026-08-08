@@ -290,8 +290,33 @@ final class CleanupExecutor {
         if (artifact == null) {
             throw new IOException("Previewed ZIP artifact is no longer available");
         }
+        BackupRecord previous = catalog.find(backupId)
+                .orElseThrow(() -> new IOException("Cleanup catalog record disappeared"));
         removeDestination(backupId, DestinationType.ZIP, false);
-        snapshot.zipStore().delete(artifact);
+        try {
+            snapshot.zipStore().delete(artifact);
+        } catch (IOException | RuntimeException exception) {
+            if (snapshot.zipStore().verify(artifact.archivePath()).valid()) {
+                restoreRecord(previous, exception);
+            }
+            throw exception;
+        }
+    }
+
+    private void restoreRecord(BackupRecord previous, Exception deletionFailure) {
+        BackupId backupId = previous.manifest().backupId();
+        try {
+            if (catalog.update(backupId, ignored -> previous).isEmpty()) {
+                catalog.add(previous);
+            }
+        } catch (IOException | RuntimeException rollbackFailure) {
+            deletionFailure.addSuppressed(rollbackFailure);
+        }
+        try {
+            deletions.restore(backupId);
+        } catch (IOException | RuntimeException rollbackFailure) {
+            deletionFailure.addSuppressed(rollbackFailure);
+        }
     }
 
     private void removeGitCatalogCopy(
