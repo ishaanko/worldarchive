@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.2 (2026-08-08)
 
 ### Added
 
@@ -19,6 +19,20 @@
   unmetered storage that guided cleanup never deletes.
 - Allow synchronized Git snapshots to be evicted locally and rehydrated from
   their unchanged remote ref when a later verification or restore needs them.
+
+### Fixed
+
+- Harden backup capture, catalog repair, import, verification, restore, and
+  deletion against interrupted work, unsafe paths, stale confirmations, and
+  remote repositories that change during an operation.
+- Keep guided cleanup catalog records, deletion markers, and ZIP artifacts
+  consistent when a catalog update or physical deletion fails.
+- Release abandoned cleanup previews so storage configuration changes do not
+  remain blocked until the preview expires.
+- Let normal deletion remove synchronized snapshots that guided cleanup kept
+  only on the configured remote.
+- Keep import conflicts from changing world remotes, and do not connect
+  read-only `git://` import sources as writable backup remotes.
 
 ### Removed
 
