@@ -290,8 +290,8 @@ final class CleanupExecutor {
         if (artifact == null) {
             throw new IOException("Previewed ZIP artifact is no longer available");
         }
-        snapshot.zipStore().delete(artifact);
         removeDestination(backupId, DestinationType.ZIP, false);
+        snapshot.zipStore().delete(artifact);
     }
 
     private void removeGitCatalogCopy(
@@ -315,9 +315,17 @@ final class CleanupExecutor {
                 .toList();
         if (remaining.isEmpty()) {
             deletions.record(backupId);
-            if (!catalog.remove(backupId)) {
-                deletions.restore(backupId);
-                throw new IOException("Cleanup catalog record disappeared");
+            try {
+                if (!catalog.remove(backupId)) {
+                    throw new IOException("Cleanup catalog record disappeared");
+                }
+            } catch (IOException | RuntimeException exception) {
+                try {
+                    deletions.restore(backupId);
+                } catch (IOException rollbackFailure) {
+                    exception.addSuppressed(rollbackFailure);
+                }
+                throw exception;
             }
             return;
         }

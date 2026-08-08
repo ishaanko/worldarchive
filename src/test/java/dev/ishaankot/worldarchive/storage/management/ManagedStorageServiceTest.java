@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.ishaankot.worldarchive.catalog.BackupCatalog;
 import dev.ishaankot.worldarchive.catalog.BackupDeletionRegistry;
+import dev.ishaankot.worldarchive.catalog.FileBackupDeletionRegistry;
 import dev.ishaankot.worldarchive.config.GitDestinationConfig;
 import dev.ishaankot.worldarchive.config.StoragePolicy;
 import dev.ishaankot.worldarchive.config.TriggerConfig;
@@ -99,7 +100,7 @@ final class ManagedStorageServiceTest {
     }
 
     @Test
-    void cleanupReturnsRedactedFailureWhenPostDeleteHistoryAppendFails()
+    void cleanupPreservesZipWhenCatalogRemovalFails()
             throws Exception {
         WorldId worldId = WorldId.create();
         ZipBackupStore zipStore = new ZipBackupStore(
@@ -116,6 +117,8 @@ final class ManagedStorageServiceTest {
                 "safe world");
         InMemoryCatalog catalog = new InMemoryCatalog(old.record(), safety.record());
         catalog.failRemoval(old.backupId());
+        FileBackupDeletionRegistry deletions = new FileBackupDeletionRegistry(
+                temporaryDirectory.resolve("deleted-backups.txt"));
         Path blockedHistory = temporaryDirectory.resolve("blocked-history");
         Files.writeString(blockedHistory, "not a directory", StandardCharsets.UTF_8);
 
@@ -123,6 +126,7 @@ final class ManagedStorageServiceTest {
                 worldId,
                 CLEANUP_POLICY,
                 catalog,
+                deletions,
                 zipStore,
                 blockedHistory,
                 Clock.fixed(NOW, ZoneOffset.UTC),
@@ -136,8 +140,10 @@ final class ManagedStorageServiceTest {
             String failure = result.failures().get(old.backupId());
             assertTrue(failure.contains(SensitiveDataRedactor.REDACTED));
             assertFalse(failure.contains(SECRET));
-            assertFalse(Files.exists(old.artifact().archivePath()));
+            assertTrue(Files.exists(old.artifact().archivePath()));
             assertTrue(Files.exists(safety.artifact().archivePath()));
+            assertTrue(catalog.find(old.backupId()).isPresent());
+            assertFalse(deletions.contains(old.backupId()));
         }
     }
 
@@ -357,6 +363,26 @@ final class ManagedStorageServiceTest {
             Path historyDirectory,
             Clock clock,
             GitCommandRunner gitRunner) {
+        return fixture(
+                worldId,
+                policy,
+                catalog,
+                BackupDeletionRegistry.NONE,
+                zipStore,
+                historyDirectory,
+                clock,
+                gitRunner);
+    }
+
+    private Fixture fixture(
+            WorldId worldId,
+            StoragePolicy policy,
+            BackupCatalog catalog,
+            BackupDeletionRegistry deletions,
+            ZipBackupStore zipStore,
+            Path historyDirectory,
+            Clock clock,
+            GitCommandRunner gitRunner) {
         ExecutorService gitExecutor = Executors.newSingleThreadExecutor();
         WorldGitSnapshotStore git = new WorldGitSnapshotStore(
                 new GitBackendSettings(
@@ -387,7 +413,7 @@ final class ManagedStorageServiceTest {
         ManagedStorageService service = new ManagedStorageService(
                 () -> configuration,
                 catalog,
-                BackupDeletionRegistry.NONE,
+                deletions,
                 git,
                 zipStore,
                 new FileStorageHistoryStore(historyDirectory),
