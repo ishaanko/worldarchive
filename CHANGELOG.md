@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Find Git and Git LFS installed in common package-manager locations (Homebrew,
+  MacPorts, Nix, snap, Linuxbrew, Chocolatey, Scoop, Git for Windows, and
+  user-local installs) even when the game is started from a GUI launcher whose
+  minimal `PATH` does not include them. Known install folders that exist are
+  appended to the Git process `PATH`; an operator-configured `PATH` still wins.
+
 ## 0.3.2 (2026-08-08)
 
 ### Added

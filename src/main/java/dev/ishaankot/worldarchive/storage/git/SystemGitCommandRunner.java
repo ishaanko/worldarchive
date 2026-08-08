@@ -72,6 +72,7 @@ public final class SystemGitCommandRunner implements GitCommandRunner {
         Map<String, String> environment = builder.environment();
         removeUnsafeGitEnvironment(environment);
         applyCommandEnvironment(environment, command.environment());
+        KnownGitToolDirectories.augment(environment);
         environment.put("GIT_CONFIG_NOSYSTEM", "1");
         environment.put("GIT_ATTR_NOSYSTEM", "1");
         environment.put("GIT_TERMINAL_PROMPT", "0");
