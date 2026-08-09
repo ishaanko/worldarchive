@@ -62,6 +62,25 @@ public final class SystemGitCommandRunner implements GitCommandRunner {
             "GIT_INDEX_FILE",
             "GIT_LFS_SKIP_SMUDGE");
 
+    private static final Set<String> NETWORK_SUBCOMMANDS = Set.of(
+            "clone", "fetch", "ls-remote", "pull", "push");
+
+    private final CredentialHelperResolver credentialHelpers;
+
+    public SystemGitCommandRunner() {
+        this(SystemCredentialHelpers::resolve);
+    }
+
+    SystemGitCommandRunner(CredentialHelperResolver credentialHelpers) {
+        this.credentialHelpers = Objects.requireNonNull(credentialHelpers, "credentialHelpers");
+    }
+
+    @FunctionalInterface
+    interface CredentialHelperResolver {
+        List<String> resolve(String executable, Map<String, String> environment)
+                throws InterruptedException;
+    }
+
     @Override
     public GitCommandResult run(GitCommand command) throws IOException, InterruptedException {
         Objects.requireNonNull(command, "command");
@@ -81,6 +100,7 @@ public final class SystemGitCommandRunner implements GitCommandRunner {
         environment.put("SSH_ASKPASS", "");
         environment.remove("SSH_ASKPASS_REQUIRE");
         environment.put("GIT_LFS_FORCE_PROGRESS", "0");
+        applySystemCredentialHelpers(command, environment);
 
         Process process;
         try {
@@ -164,6 +184,32 @@ public final class SystemGitCommandRunner implements GitCommandRunner {
                 error.truncated(),
                 output.byteCount(),
                 output.sha256());
+    }
+
+    /**
+     * Restores the system-configured credential helpers that {@code GIT_CONFIG_NOSYSTEM} hides.
+     *
+     * <p>With terminal prompts disabled, network commands can only authenticate through a
+     * credential helper, and on macOS and Windows the stock helper lives in the system
+     * configuration file this runner suppresses. Only {@code credential.helper} is carried back
+     * over, as command-scoped configuration, and only for commands that may touch a remote.</p>
+     */
+    void applySystemCredentialHelpers(GitCommand command, Map<String, String> environment)
+            throws InterruptedException {
+        List<String> arguments = command.arguments();
+        if (arguments.stream().noneMatch(NETWORK_SUBCOMMANDS::contains)) {
+            return;
+        }
+        List<String> helpers = credentialHelpers.resolve(arguments.get(0), environment);
+        int count = 0;
+        for (String helper : helpers) {
+            environment.put("GIT_CONFIG_KEY_" + count, "credential.helper");
+            environment.put("GIT_CONFIG_VALUE_" + count, helper);
+            count++;
+        }
+        if (count > 0) {
+            environment.put("GIT_CONFIG_COUNT", Integer.toString(count));
+        }
     }
 
     static void removeUnsafeGitEnvironment(Map<String, String> environment) {
