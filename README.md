@@ -1,128 +1,103 @@
 # WorldArchive
 
-WorldArchive is a Fabric client mod for backing up single-player Minecraft
-worlds. It supports incremental Git snapshots and standalone ZIP archives, and
-always restores backups as new worlds without modifying the original.
+WorldArchive is a Fabric client mod. It backs up your single-player Minecraft
+worlds. It makes incremental Git snapshots and standalone ZIP archives. A
+restore always creates a new world. Your original world is never changed.
 
 ## Features
 
-- Manual backups from the backup browser
-- Automatic backups when leaving a world
-- Optional scheduled backups
-- Incremental snapshots using an isolated Git and Git LFS repository per world
-- Standalone ZIP backups with SHA-256 integrity metadata
-- Independent Git and ZIP destinations
-- Optional per-world Git remotes over HTTPS, SSH, file, or local paths
-- Support for ZIP folders synced by OneDrive, Google Drive, or similar tools
-- Optional per-world ZIP folder overrides
-- Per-world and per-destination settings
-- Backup labels, verification, remote sync, and deletion
-- Per-world storage budgets, Git/ZIP usage, and growth forecasts
-- Previewed daily/weekly/monthly cleanup that preserves labeled story milestones
-- Previewed recovery of existing WorldArchive Git histories
-- Copy import for folders of WorldArchive ZIP archives
-- Offline catalog and Git-ref rebuilding from managed backup storage
-- Recovery-only access to backups for worlds whose save folders are gone
-- Partial-success reporting when one destination fails
-- Safe, copy-only restores to a new world
+- Back up manually, on world exit, or on a schedule
+- Incremental Git snapshots, one repository per world
+- ZIP archives with SHA-256 checksums
+- Optional Git remote per world (HTTPS, SSH, file, or local path)
+- ZIP folders can sit in OneDrive, Google Drive, or similar synced folders
+- Labels, verification, remote sync, and storage forecasts
+- Guided cleanup with a preview; labeled backups are always kept
+- Import and recovery tools for old backups
+- Copy-only restores that never touch the original world
 
-WorldArchive never deletes backups automatically. A configured per-world budget
-enables a weekly near-limit notice and a guided cleanup preview, but the exact
-local artifacts must still be reviewed and confirmed manually.
+WorldArchive never deletes backups on its own. You review and confirm every
+cleanup.
 
-## Dependencies
+## Requirements
 
 - Minecraft 26.2
 - Fabric Loader 0.19.3 or newer
 - Fabric API 0.155.2+26.2
 - Mod Menu 20.0.1 or newer
 - Java 25
+- Git and Git LFS on `PATH` (only needed for Git backups)
 
-Git backups also require Git and Git LFS to be installed and available on
-`PATH`. They are not required for ZIP-only backups. If either tool is missing,
-WorldArchive disables the Git destination and leaves ZIP backups available.
+If Git or Git LFS is missing, WorldArchive turns off the Git destination. ZIP
+backups still work.
 
-## How to use
+## Quick start
 
-Install Fabric Loader, Fabric API, and Mod Menu, then copy the WorldArchive JAR
-into the Minecraft instance's `mods` folder.
+1. Install Fabric Loader, Fabric API, and Mod Menu.
+2. Copy the WorldArchive JAR into your `mods` folder.
+3. Open **Mods**, select **WorldArchive**, and open its configuration.
+4. Use the **World Backups** screen to create, restore, verify, sync, and
+   delete backups.
 
-Open **Mods**, select **WorldArchive**, and choose its configuration button.
-The **World Backups** screen can create,
-restore, delete, sync, and verify backups. It also shows the status, size,
-changed-file count, and available destinations for each backup.
-You can also select a world in **Singleplayer** and choose **Backups** to open
-that world's backup history directly.
+Tip: you can also select a world in **Singleplayer** and click **Backups**.
 
-Backups can be created in three ways:
+## Backup triggers
 
-| Trigger | Default | Behavior |
+| Trigger | Default | What it does |
 | --- | --- | --- |
-| Manual | Enabled | Create a backup from the browser. |
-| World exit | Enabled | Create a backup after the world finishes saving and closes. |
-| Scheduled | Disabled | Create a backup every 30 minutes and skip unchanged worlds. |
+| Manual | On | Backs up when you click. |
+| World exit | On | Backs up after the world saves and closes. |
+| Scheduled | Off | Backs up every 30 minutes. Skips unchanged worlds. |
 
-Triggers can be configured independently for Git and ZIP, and individual worlds
-can be enabled or paused. Open WorldArchive through Mod Menu, then choose
-**Settings** from the backup browser.
+You can set triggers for Git and ZIP separately. You can also pause single
+worlds. Open **Settings** from the backup browser.
 
-Git and ZIP destinations are independent. If one fails while the other
-succeeds, the successful copy is kept and the backup is reported as a partial
-success. Failed remote Git pushes are marked **pending sync** and can be retried
-later.
+Git and ZIP destinations are independent. If one fails and the other succeeds,
+the good copy is kept. The backup is then reported as a partial success.
 
-Git stores each world's history in its own repository. To sync a world to
-GitHub or another server, open the **Worlds** settings tab, choose that world,
-and paste the clone URL of an existing empty repository into **Git remote**.
-WorldArchive creates a short six-character world code automatically; users do
-not need to find, copy, or add it to the URL. WorldArchive does not create
-server-side repositories or request account credentials.
+## Git remotes
 
-The **ZIP** tab defines the default archive folder. The **Worlds** tab lists
-multiple worlds at once and lets any selected world inherit that default or use
-a separate ZIP root, such as a different drive or synced folder.
+Each world has its own Git repository. To sync a world to GitHub or another
+server:
 
-Each world's backup browser also has a **Storage** screen. It measures managed
-local Git and ZIP files separately, learns the world's recent growth rate, and
-estimates when the configured budget will be reached. Remote Git refs, imports
-from earlier releases that reference storage WorldArchive does not own, and
-legacy shared repositories are shown as unmetered and are never removed by
-guided cleanup.
+1. Create an empty repository on the server.
+2. Open the **Worlds** settings tab and select the world.
+3. Paste the clone URL into **Git remote**.
 
-The balanced cleanup policy keeps one representative backup for each of 7
-recent days, 4 earlier weeks, and 12 earlier months. Labeled backups are always
-kept. Within a period, manual backups and backups with more changed files are
-preferred as story anchors. Changed-file counts are exact content comparisons,
-but WorldArchive does not claim they reveal the length or importance of a play
-session: one Minecraft region-file change can contain either a tiny update or
-substantial building.
+WorldArchive adds a short world code by itself. It never asks for your account
+credentials. If a push fails, the backup is marked **pending sync**. You can
+retry it later.
 
-Restoring a backup verifies it and creates a new, uniquely named world. The
-original world is never overwritten or modified.
+## Storage and cleanup
 
-### Recover existing backups
+Each world's backup browser has a **Storage** screen. It shows Git and ZIP
+usage, tracks the world's growth, and estimates when you will reach your
+budget.
 
-Open WorldArchive through Mod Menu, then choose **Import**, to recover backup history after a
-reinstall, profile move, catalog loss, remote rename, or computer migration.
-Every repository, folder, and stored-backup import is scanned first and shown
-as a list where you choose the exact backups to import. Identical records merge
-safely; a conflicting backup
-identity is reported and never overwrites the existing catalog or artifact.
+Guided cleanup keeps:
 
-For repository histories, paste any supported credential-free HTTPS, SSH, Git,
-file, or absolute local repository location. WorldArchive copies and verifies
-the selected Git and Git LFS objects into its managed storage, and connects
-the repository as that world's remote for future backups. WorldArchive never
-contacts imported repositories automatically at startup.
+- One backup per day for the last 7 days
+- One per week for 4 earlier weeks
+- One per month for 12 earlier months
+- Every labeled backup, always
 
-For backup folders, choosing a folder and clicking **Choose Backup Folder**
-publishes verified archives into managed storage.
+Within a period, manual backups and backups with more changed files win.
+Cleanup always shows a preview first. Nothing is deleted until you confirm.
 
-Use **Find Stored Backups** to recover catalog entries and missing Git snapshot
-refs from local managed repository histories and ZIP archives. This search is
-local-only and does not fetch from a network.
+## Recover old backups
 
-### Default paths
+Open **Import** from the mod screen after a reinstall, a profile move, or a
+switch to a new computer. Every import is scanned first. You then pick the
+exact backups to bring in. Imports never overwrite your existing catalog.
+
+- **Repository**: paste a repository location (HTTPS, SSH, Git, file, or local
+  path, without credentials). WorldArchive copies and verifies the history,
+  then connects it as the world's remote.
+- **Choose Backup Folder**: pick a folder of WorldArchive ZIP archives.
+- **Find Stored Backups**: rebuild catalog entries and Git refs from local
+  managed storage. This search never touches the network.
+
+## Default paths
 
 Paths are relative to the Minecraft instance directory, normally `.minecraft`.
 
@@ -140,24 +115,17 @@ Paths are relative to the Minecraft instance directory, normally `.minecraft`.
 | Temporary captures | `worldarchive/capture-temp/` |
 | World identity | `saves/<world>/.worldarchive/world.json` |
 
-Destination folders must remain outside world directories. Do not edit managed
-repositories or archive folders while WorldArchive is running, and do not use a
-Git destination from multiple computers at the same time. Configurations from
-older releases retain their shared Git repository as read-compatible legacy
-storage; WorldArchive never moves or deletes it during migration.
+Keep destination folders outside your world folders. Do not edit managed
+folders while the game runs. Do not use one Git destination from two computers
+at the same time.
 
 ## Build the mod
 
-Install Java 25 and Git. On Windows, run:
-
-```powershell
-.\gradlew.bat build
-```
-
-On Linux or macOS, run:
+Install Java 25 and Git, then run:
 
 ```sh
-./gradlew build
+./gradlew build        # Linux or macOS
+.\gradlew.bat build    # Windows
 ```
 
 The JAR files are in `build/libs/`.
@@ -171,4 +139,4 @@ WorldArchive is licensed under the [Apache License 2.0](LICENSE).
 ## Contributions
 
 Bug reports and pull requests are welcome. For larger changes, open an issue
-first to discuss the proposed approach.
+first.
