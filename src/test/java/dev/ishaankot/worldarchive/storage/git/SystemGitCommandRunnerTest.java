@@ -181,6 +181,74 @@ class SystemGitCommandRunnerTest {
     }
 
     @Test
+    void injectsSystemCredentialHelpersForNetworkCommands() throws Exception {
+        GitCommand command = command(
+                List.of("environment", "GIT_CONFIG_VALUE_0", "push"),
+                Duration.ofSeconds(10),
+                1_024,
+                Set.of());
+        SystemGitCommandRunner runner = new SystemGitCommandRunner(
+                (executable, environment) -> List.of("osxkeychain"));
+
+        GitCommandResult result = runner.run(command);
+
+        assertTrue(result.successful());
+        assertEquals("osxkeychain", result.standardOutput());
+    }
+
+    @Test
+    void countsEveryInjectedCredentialHelper() throws Exception {
+        GitCommand command = command(
+                List.of("environment", "GIT_CONFIG_COUNT", "fetch"),
+                Duration.ofSeconds(10),
+                1_024,
+                Set.of());
+        SystemGitCommandRunner runner = new SystemGitCommandRunner(
+                (executable, environment) -> List.of("osxkeychain", "!custom-helper"));
+
+        GitCommandResult result = runner.run(command);
+
+        assertTrue(result.successful());
+        assertEquals("2", result.standardOutput());
+    }
+
+    @Test
+    void localCommandsNeverResolveCredentialHelpers() throws Exception {
+        AtomicInteger resolutions = new AtomicInteger();
+        SystemGitCommandRunner runner = new SystemGitCommandRunner((executable, environment) -> {
+            resolutions.incrementAndGet();
+            return List.of("osxkeychain");
+        });
+        GitCommand command = command(
+                List.of("environment", "GIT_CONFIG_COUNT"),
+                Duration.ofSeconds(10),
+                1_024,
+                Set.of());
+
+        GitCommandResult result = runner.run(command);
+
+        assertTrue(result.successful());
+        assertEquals("null", result.standardOutput());
+        assertEquals(0, resolutions.get());
+    }
+
+    @Test
+    void networkCommandsWithoutHelpersStayUnconfigured() throws Exception {
+        GitCommand command = command(
+                List.of("environment", "GIT_CONFIG_COUNT", "push"),
+                Duration.ofSeconds(10),
+                1_024,
+                Set.of());
+        SystemGitCommandRunner runner = new SystemGitCommandRunner(
+                (executable, environment) -> List.of());
+
+        GitCommandResult result = runner.run(command);
+
+        assertTrue(result.successful());
+        assertEquals("null", result.standardOutput());
+    }
+
+    @Test
     void interruptionCancelsTheNativeProcess() throws Exception {
         GitCommand command = command(List.of("sleep", "10000"), Duration.ofSeconds(30), 1_024, Set.of());
         AtomicReference<Throwable> failure = new AtomicReference<>();
