@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.2.2 (2026-08-09)
+
+### Fixed
+
+- Restore system Git credential helpers for remote commands while keeping other
+  system configuration disabled, so non-interactive HTTPS authentication works
+  with standard macOS and Windows Git installations.
+
 ## 0.3.2.1 (2026-08-08)
 
 ### Fixed
