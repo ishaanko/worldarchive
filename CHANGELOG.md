@@ -1,6 +1,37 @@
 # Changelog
 
-## 0.3.2.2 (2026-08-09)
+## 0.3.3 (2026-08-12)
+
+### Added
+
+- Record the Minecraft version and data version every backup was made with, and
+  show it on the restore screen. Restoring across versions still works, because
+  restores only ever create a new world; the screen notes that an older backup
+  will be upgraded when opened, and warns that a backup from a newer version may
+  not open at all. Backups written by earlier releases carry no version and are
+  reported as recorded before version tracking.
+
+### Changed
+
+- WorldArchive now takes over the backup buttons on the Edit World screen.
+  **Make Backup** creates a WorldArchive backup of that world, and vanilla's
+  **Open Backups Folder** is replaced by **Backups**, which opens the world's
+  backup browser. Vanilla's own zip-to-`backups/` feature is no longer
+  reachable from that screen.
+- Updated build and runtime dependencies: Fabric API 0.157.0+26.2, Loom
+  1.17.19, Gradle 9.7.0, JUnit 6.1.3, Checkstyle 13.10.0.
+- Changed the Java package and Maven group from `dev.ishaankot` to
+  `dev.ishaanko`.
+
+### Fixed
+
+- The Edit World backup buttons now wait for world identity loading to finish.
+  Previously, both buttons stayed disabled if the Edit World screen opened while
+  the world identity was still loading.
+- The **Backups** button on the world list kept its selection tracking after
+  the window was resized. Previously a resize silently disconnected it.
+
+## 0.3.2.2 (2026-08-11)
 
 ### Fixed
 

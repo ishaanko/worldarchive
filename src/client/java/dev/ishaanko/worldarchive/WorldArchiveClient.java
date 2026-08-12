@@ -1,0 +1,22 @@
+package dev.ishaanko.worldarchive;
+
+import dev.ishaanko.worldarchive.runtime.WorldArchiveRuntime;
+import dev.ishaanko.worldarchive.settings.ClientSettingsAccess;
+import dev.ishaanko.worldarchive.ui.EditWorldBackupIntegration;
+import dev.ishaanko.worldarchive.ui.SelectWorldBackupIntegration;
+import net.fabricmc.api.ClientModInitializer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+public final class WorldArchiveClient implements ClientModInitializer {
+    private static final Logger LOGGER = LoggerFactory.getLogger(WorldArchiveMetadata.MOD_NAME);
+
+    @Override
+    public void onInitializeClient() {
+        ClientSettingsAccess.initialize();
+        WorldArchiveRuntime runtime = WorldArchiveRuntime.initialize();
+        SelectWorldBackupIntegration.register(() -> runtime);
+        EditWorldBackupIntegration.register(() -> runtime);
+        LOGGER.info("{} initialized.", WorldArchiveMetadata.MOD_NAME);
+    }
+}

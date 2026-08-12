@@ -16,10 +16,10 @@
     "environment": "client",
     "entrypoints": {
         "client": [
-            "dev.ishaankot.worldarchive.WorldArchiveClient"
+            "dev.ishaanko.worldarchive.WorldArchiveClient"
         ],
         "modmenu": [
-            "dev.ishaankot.worldarchive.integration.WorldArchiveModMenu"
+            "dev.ishaanko.worldarchive.integration.WorldArchiveModMenu"
         ]
     },
     "depends": {
