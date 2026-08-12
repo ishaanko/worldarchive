@@ -11,6 +11,7 @@ import com.google.gson.JsonPrimitive;
 import dev.ishaankot.worldarchive.model.BackupId;
 import dev.ishaankot.worldarchive.model.BackupManifest;
 import dev.ishaankot.worldarchive.model.BackupTrigger;
+import dev.ishaankot.worldarchive.model.GameVersionStamp;
 import dev.ishaankot.worldarchive.model.WorldId;
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -45,6 +46,12 @@ final class ZipMetadataCodec {
         root.addProperty("changedFileCount", manifest.changedFileCount());
         root.addProperty("contentSha256", manifest.contentSha256());
         root.addProperty("inventorySha256", manifest.inventorySha256());
+        manifest.gameVersion().ifPresent(stamp -> {
+            JsonObject encodedVersion = new JsonObject();
+            encodedVersion.addProperty("name", stamp.name());
+            encodedVersion.addProperty("dataVersion", stamp.dataVersion());
+            root.add("gameVersion", encodedVersion);
+        });
         return encode(root);
     }
 
@@ -72,7 +79,8 @@ final class ZipMetadataCodec {
                         sourceByteCount,
                         requiredLong(root, "changedFileCount"),
                         requiredString(root, "contentSha256"),
-                        requiredString(root, "inventorySha256"));
+                        requiredString(root, "inventorySha256"),
+                        optionalGameVersion(root));
             }
             return new BackupManifest(
                     formatVersion,
@@ -179,6 +187,20 @@ final class ZipMetadataCodec {
             throw new IOException("Optional ZIP metadata string is invalid: " + name);
         }
         return Optional.of(element.getAsString());
+    }
+
+    private static Optional<GameVersionStamp> optionalGameVersion(JsonObject object) throws IOException {
+        JsonElement element = object.get("gameVersion");
+        if (element == null || element.isJsonNull()) {
+            return Optional.empty();
+        }
+        if (!element.isJsonObject()) {
+            throw new IOException("ZIP manifest game version is not an object");
+        }
+        JsonObject encoded = element.getAsJsonObject();
+        return Optional.of(new GameVersionStamp(
+                requiredString(encoded, "name"),
+                requiredInteger(encoded, "dataVersion")));
     }
 
     private static int requiredInteger(JsonObject object, String name) throws IOException {

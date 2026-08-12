@@ -30,6 +30,10 @@ public final class SelectWorldBackupIntegration {
 
     private static volatile Supplier<? extends BackupClientFacade> facadeSupplier;
 
+    private static volatile BackupWorldSelection rememberedSelection;
+
+    private static volatile BackupWorldContext rememberedWorld;
+
     private SelectWorldBackupIntegration() {
     }
 
@@ -48,17 +52,34 @@ public final class SelectWorldBackupIntegration {
         WeakReference<ScreenState> reference = STATES.get(selectWorldScreen);
         ScreenState state = reference == null ? null : reference.get();
         if (state == null) {
-            state = createState(minecraft, selectWorldScreen);
+            state = new ScreenState(minecraft, selectWorldScreen);
             STATES.put(selectWorldScreen, new WeakReference<>(state));
         }
+        ScreenState current = state;
+        ScreenEvents.afterTick(selectWorldScreen).register(ignored -> current.afterTick());
+        ScreenEvents.remove(selectWorldScreen).register(ignored -> current.removed());
         state.install(width, height);
     }
 
-    private static ScreenState createState(Minecraft minecraft, SelectWorldScreen screen) {
-        ScreenState state = new ScreenState(minecraft, screen);
-        ScreenEvents.afterTick(screen).register(ignored -> state.afterTick());
-        ScreenEvents.remove(screen).register(ignored -> state.removed());
-        return state;
+    static Optional<BackupWorldContext> lastResolvedWorld() {
+        BackupWorldSelection selection = rememberedSelection;
+        BackupWorldContext world = rememberedWorld;
+        if (selection == null || world == null || !world.matches(selection)) {
+            return Optional.empty();
+        }
+        return Optional.of(world);
+    }
+
+    private static void rememberSelection(BackupWorldSelection selection) {
+        if (!Objects.equals(rememberedSelection, selection)) {
+            rememberedSelection = selection;
+            rememberedWorld = null;
+        }
+    }
+
+    private static void rememberWorld(BackupWorldSelection selection, BackupWorldContext world) {
+        rememberedSelection = selection;
+        rememberedWorld = world;
     }
 
     private static BackupClientFacade currentFacade() {
@@ -160,6 +181,7 @@ public final class SelectWorldBackupIntegration {
                     .flatMap(this::selectionFor);
             if (candidate.equals(Optional.ofNullable(selectedWorld))) {
                 if (candidate.isEmpty()) {
+                    rememberSelection(null);
                     disable("Select a valid world");
                 }
                 return;
@@ -168,6 +190,7 @@ public final class SelectWorldBackupIntegration {
             selectionRevision++;
             selectedWorld = candidate.orElse(null);
             resolvedWorld = null;
+            rememberSelection(selectedWorld);
             if (selectedWorld == null) {
                 disable("Select a valid world");
                 return;
@@ -213,6 +236,7 @@ public final class SelectWorldBackupIntegration {
                     return;
                 }
                 resolvedWorld = context;
+                rememberWorld(selection, context);
                 backupsButton.active = true;
                 backupsButton.setTooltip(Tooltip.create(
                         Component.literal("Browse backups for " + context.displayName())));

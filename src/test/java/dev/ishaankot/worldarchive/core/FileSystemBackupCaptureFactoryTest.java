@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.ishaankot.worldarchive.model.BackupId;
 import dev.ishaankot.worldarchive.model.BackupTrigger;
+import dev.ishaankot.worldarchive.model.GameVersionStamp;
 import dev.ishaankot.worldarchive.model.WorldId;
 import dev.ishaankot.worldarchive.storage.zip.ZipBackupArtifact;
 import dev.ishaankot.worldarchive.storage.zip.ZipBackupStore;
@@ -77,6 +78,43 @@ final class FileSystemBackupCaptureFactoryTest {
         }
         assertFalse(Files.exists(activeCapture));
         assertFalse(Files.exists(activeMarker));
+    }
+
+    @Test
+    void stampsCapturesWithTheInjectedGameVersion() throws Exception {
+        Path captures = temporaryDirectory.resolve("captures-stamped");
+        Path world = Files.createDirectory(temporaryDirectory.resolve("world-stamped"));
+        Files.writeString(world.resolve("level.dat"), "stamped", StandardCharsets.UTF_8);
+        GameVersionStamp stamp = new GameVersionStamp("26.2", 4_820);
+        FileSystemBackupCaptureFactory factory = new FileSystemBackupCaptureFactory(
+                captures,
+                Optional.of(stamp));
+
+        try (CapturedBackup captured = factory.capture(
+                request(world, BackupTrigger.MANUAL),
+                BackupId.create(),
+                CREATED_AT,
+                Optional.empty(),
+                CaptureProgressListener.NO_OP)) {
+            assertEquals(Optional.of(stamp), captured.capture().manifest().gameVersion());
+        }
+    }
+
+    @Test
+    void capturesWithoutAGameVersionWhenNoneIsInjected() throws Exception {
+        Path captures = temporaryDirectory.resolve("captures-unstamped");
+        Path world = Files.createDirectory(temporaryDirectory.resolve("world-unstamped"));
+        Files.writeString(world.resolve("level.dat"), "unstamped", StandardCharsets.UTF_8);
+        FileSystemBackupCaptureFactory factory = new FileSystemBackupCaptureFactory(captures);
+
+        try (CapturedBackup captured = factory.capture(
+                request(world, BackupTrigger.MANUAL),
+                BackupId.create(),
+                CREATED_AT,
+                Optional.empty(),
+                CaptureProgressListener.NO_OP)) {
+            assertEquals(Optional.empty(), captured.capture().manifest().gameVersion());
+        }
     }
 
     @Test

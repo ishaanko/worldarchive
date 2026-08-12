@@ -2,6 +2,7 @@ package dev.ishaankot.worldarchive.core;
 
 import dev.ishaankot.worldarchive.model.BackupId;
 import dev.ishaankot.worldarchive.model.BackupManifest;
+import dev.ishaankot.worldarchive.model.GameVersionStamp;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InterruptedIOException;
@@ -34,6 +35,8 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
 
     private final SourceCaptureObserver observer;
 
+    private final Optional<GameVersionStamp> gameVersion;
+
     public FileSystemBackupCaptureFactory(Path captureDirectory) {
         this(captureDirectory, SourceCaptureObserver.NONE);
     }
@@ -41,8 +44,22 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
     public FileSystemBackupCaptureFactory(
             Path captureDirectory,
             SourceCaptureObserver observer) {
+        this(captureDirectory, observer, Optional.empty());
+    }
+
+    public FileSystemBackupCaptureFactory(
+            Path captureDirectory,
+            Optional<GameVersionStamp> gameVersion) {
+        this(captureDirectory, SourceCaptureObserver.NONE, gameVersion);
+    }
+
+    public FileSystemBackupCaptureFactory(
+            Path captureDirectory,
+            SourceCaptureObserver observer,
+            Optional<GameVersionStamp> gameVersion) {
         this.workspace = new CaptureWorkspace(captureDirectory);
         this.observer = Objects.requireNonNull(observer, "observer");
+        this.gameVersion = Objects.requireNonNull(gameVersion, "gameVersion");
     }
 
     @Override
@@ -88,7 +105,8 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
                     inventory.byteCount(),
                     changedFiles,
                     inventory.contentSha256(),
-                    inventory.inventorySha256());
+                    inventory.inventorySha256(),
+                    gameVersion);
             lease.seal();
             return new CapturedBackup(
                     new BackupCapture(staging, manifest),

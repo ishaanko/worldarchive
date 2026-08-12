@@ -19,6 +19,7 @@ import dev.ishaankot.worldarchive.model.ArtifactOwnership;
 import dev.ishaankot.worldarchive.model.DestinationResult;
 import dev.ishaankot.worldarchive.model.DestinationStatus;
 import dev.ishaankot.worldarchive.model.DestinationType;
+import dev.ishaankot.worldarchive.model.GameVersionStamp;
 import dev.ishaankot.worldarchive.model.ImportSourceId;
 import dev.ishaankot.worldarchive.model.SyncStatus;
 import dev.ishaankot.worldarchive.model.VerificationStatus;
@@ -273,6 +274,12 @@ public final class FileBackupCatalog implements BackupCatalog {
         encoded.addProperty("changedFileCount", manifest.changedFileCount());
         encoded.addProperty("contentSha256", manifest.contentSha256());
         encoded.addProperty("inventorySha256", manifest.inventorySha256());
+        manifest.gameVersion().ifPresent(stamp -> {
+            JsonObject encodedVersion = new JsonObject();
+            encodedVersion.addProperty("name", stamp.name());
+            encodedVersion.addProperty("dataVersion", stamp.dataVersion());
+            encoded.add("gameVersion", encodedVersion);
+        });
         return encoded;
     }
 
@@ -333,7 +340,22 @@ public final class FileBackupCatalog implements BackupCatalog {
                 requiredLong(encoded, "sourceByteCount"),
                 requiredLong(encoded, "changedFileCount"),
                 requiredString(encoded, "contentSha256"),
-                requiredString(encoded, "inventorySha256"));
+                requiredString(encoded, "inventorySha256"),
+                optionalGameVersion(encoded));
+    }
+
+    private static Optional<GameVersionStamp> optionalGameVersion(JsonObject object) throws IOException {
+        JsonElement element = object.get("gameVersion");
+        if (element == null || element.isJsonNull()) {
+            return Optional.empty();
+        }
+        if (!element.isJsonObject()) {
+            throw new IOException("Catalog game version is not an object");
+        }
+        JsonObject encoded = element.getAsJsonObject();
+        return Optional.of(new GameVersionStamp(
+                requiredString(encoded, "name"),
+                requiredInteger(encoded, "dataVersion")));
     }
 
     private static BackupResult decodeResult(JsonObject encoded, int schemaVersion) throws IOException {

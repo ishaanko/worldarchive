@@ -11,6 +11,7 @@ import com.google.gson.JsonPrimitive;
 import dev.ishaankot.worldarchive.model.BackupId;
 import dev.ishaankot.worldarchive.model.BackupManifest;
 import dev.ishaankot.worldarchive.model.BackupTrigger;
+import dev.ishaankot.worldarchive.model.GameVersionStamp;
 import dev.ishaankot.worldarchive.model.WorldId;
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -47,6 +48,12 @@ final class GitSnapshotManifestCodec {
         root.addProperty("changedFileCount", manifest.changedFileCount());
         root.addProperty("contentSha256", manifest.contentSha256());
         root.addProperty("inventorySha256", manifest.inventorySha256());
+        manifest.gameVersion().ifPresent(stamp -> {
+            JsonObject encodedVersion = new JsonObject();
+            encodedVersion.addProperty("name", stamp.name());
+            encodedVersion.addProperty("dataVersion", stamp.dataVersion());
+            root.add("gameVersion", encodedVersion);
+        });
         root.addProperty("sourceIdentity", snapshotManifest.sourceIdentity());
         JsonArray patterns = new JsonArray();
         snapshotManifest.lfsPatterns().forEach(patterns::add);
@@ -73,7 +80,8 @@ final class GitSnapshotManifestCodec {
                     requiredLong(root, "sourceByteCount"),
                     requiredLong(root, "changedFileCount"),
                     requiredString(root, "contentSha256"),
-                    requiredString(root, "inventorySha256"));
+                    requiredString(root, "inventorySha256"),
+                    optionalGameVersion(root));
             return new GitSnapshotManifest(
                     requiredInteger(root, "storageFormatVersion"),
                     manifest,
@@ -116,6 +124,20 @@ final class GitSnapshotManifestCodec {
             throw new IOException("Git snapshot manifest contains an invalid optional string");
         }
         return Optional.of(element.getAsString());
+    }
+
+    private static Optional<GameVersionStamp> optionalGameVersion(JsonObject root) throws IOException {
+        JsonElement element = root.get("gameVersion");
+        if (element == null || element.isJsonNull()) {
+            return Optional.empty();
+        }
+        if (!element.isJsonObject()) {
+            throw new IOException("Git snapshot manifest game version is not an object");
+        }
+        JsonObject encoded = element.getAsJsonObject();
+        return Optional.of(new GameVersionStamp(
+                requiredString(encoded, "name"),
+                requiredInteger(encoded, "dataVersion")));
     }
 
     private static int requiredInteger(JsonObject root, String name) throws IOException {

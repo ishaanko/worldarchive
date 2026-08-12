@@ -13,6 +13,7 @@ import dev.ishaankot.worldarchive.model.BackupTrigger;
 import dev.ishaankot.worldarchive.model.ArtifactOwnership;
 import dev.ishaankot.worldarchive.model.DestinationResult;
 import dev.ishaankot.worldarchive.model.DestinationType;
+import dev.ishaankot.worldarchive.model.GameVersionStamp;
 import dev.ishaankot.worldarchive.model.ImportSourceId;
 import dev.ishaankot.worldarchive.model.SyncStatus;
 import dev.ishaankot.worldarchive.model.VerificationStatus;
@@ -24,6 +25,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -94,6 +96,42 @@ final class FileBackupCatalogTest {
                 StandardCharsets.UTF_8);
 
         assertEquals(List.of(record), catalog.listAll());
+    }
+
+    @Test
+    void readsCatalogsWrittenBeforeGameVersionTracking() throws IOException {
+        Path file = temporaryDirectory.resolve("catalog.json");
+        Files.writeString(file, legacyCatalog(), StandardCharsets.UTF_8);
+
+        BackupRecord record = new FileBackupCatalog(file).listAll().getFirst();
+
+        assertEquals("Legacy World", record.manifest().worldName());
+        assertEquals(Optional.empty(), record.manifest().gameVersion());
+    }
+
+    @Test
+    void roundTripsAStampedGameVersion() throws IOException {
+        FileBackupCatalog catalog = new FileBackupCatalog(temporaryDirectory.resolve("catalog.json"));
+        GameVersionStamp stamp = new GameVersionStamp("26.2", 4_820);
+        BackupRecord original = record(WorldId.create(), "2026-07-17T10:00:00Z");
+        BackupManifest stamped = BackupManifest.create(
+                original.manifest().backupId(),
+                original.manifest().worldId(),
+                original.manifest().worldName(),
+                original.manifest().label(),
+                original.manifest().createdAt(),
+                original.manifest().trigger(),
+                original.manifest().sourceFileCount(),
+                original.manifest().sourceByteCount(),
+                original.manifest().changedFileCount(),
+                original.manifest().contentSha256(),
+                original.manifest().inventorySha256(),
+                Optional.of(stamp));
+        catalog.add(new BackupRecord(stamped, original.result()));
+
+        BackupRecord reloaded = new FileBackupCatalog(catalog.file()).listAll().getFirst();
+
+        assertEquals(Optional.of(stamp), reloaded.manifest().gameVersion());
     }
 
     @Test
@@ -323,6 +361,47 @@ final class FileBackupCatalogTest {
                 List.of(DestinationResult.success(DestinationType.ZIP, "archive.zip")),
                 createdAt.plusSeconds(1));
         return new BackupRecord(manifest, result);
+    }
+
+    private static String legacyCatalog() {
+        return ("""
+                {
+                    "schemaVersion": 3,
+                    "records": [
+                        {
+                            "manifest": {
+                                "formatVersion": 1,
+                                "backupId": "11111111-1111-1111-1111-111111111111",
+                                "worldId": "22222222-2222-2222-2222-222222222222",
+                                "worldName": "Legacy World",
+                                "createdAt": "2026-07-17T10:00:00Z",
+                                "trigger": "MANUAL",
+                                "sourceFileCount": 12,
+                                "sourceByteCount": 4096,
+                                "changedFileCount": 12,
+                                "contentSha256": "%1$s",
+                                "inventorySha256": "%1$s"
+                            },
+                            "result": {
+                                "backupId": "11111111-1111-1111-1111-111111111111",
+                                "worldId": "22222222-2222-2222-2222-222222222222",
+                                "status": "SUCCESS",
+                                "completedAt": "2026-07-17T10:00:01Z",
+                                "destinations": [
+                                    {
+                                        "destination": "ZIP",
+                                        "status": "SUCCESS",
+                                        "artifactId": "archive.zip",
+                                        "verificationStatus": "NOT_VERIFIED",
+                                        "syncStatus": "NOT_CONFIGURED",
+                                        "ownership": "MANAGED"
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+                """).formatted(SOURCE_HASH);
     }
 
     private static <T> T get(Future<T> future) throws InterruptedException, ExecutionException {

@@ -21,7 +21,8 @@ public record BackupManifest(
         long sourceByteCount,
         long changedFileCount,
         String contentSha256,
-        String inventorySha256) {
+        String inventorySha256,
+        Optional<GameVersionStamp> gameVersion) {
     public static final int CURRENT_FORMAT_VERSION = 1;
 
     private static final Pattern SHA256 = Pattern.compile("[0-9a-f]{64}");
@@ -49,6 +50,36 @@ public record BackupManifest(
         }
         contentSha256 = requireSha256(contentSha256, "contentSha256");
         inventorySha256 = requireSha256(inventorySha256, "inventorySha256");
+        Objects.requireNonNull(gameVersion, "gameVersion");
+    }
+
+    public BackupManifest(
+            int formatVersion,
+            BackupId backupId,
+            WorldId worldId,
+            String worldName,
+            Optional<String> label,
+            Instant createdAt,
+            BackupTrigger trigger,
+            long sourceFileCount,
+            long sourceByteCount,
+            long changedFileCount,
+            String contentSha256,
+            String inventorySha256) {
+        this(
+                formatVersion,
+                backupId,
+                worldId,
+                worldName,
+                label,
+                createdAt,
+                trigger,
+                sourceFileCount,
+                sourceByteCount,
+                changedFileCount,
+                contentSha256,
+                inventorySha256,
+                Optional.empty());
     }
 
     /** Compatibility constructor for the initial single-digest manifest contract. */
@@ -123,6 +154,35 @@ public record BackupManifest(
                 changedFileCount,
                 contentSha256,
                 inventorySha256);
+    }
+
+    public static BackupManifest create(
+            BackupId backupId,
+            WorldId worldId,
+            String worldName,
+            Optional<String> label,
+            Instant createdAt,
+            BackupTrigger trigger,
+            long sourceFileCount,
+            long sourceByteCount,
+            long changedFileCount,
+            String contentSha256,
+            String inventorySha256,
+            Optional<GameVersionStamp> gameVersion) {
+        return new BackupManifest(
+                CURRENT_FORMAT_VERSION,
+                backupId,
+                worldId,
+                worldName,
+                label,
+                createdAt,
+                trigger,
+                sourceFileCount,
+                sourceByteCount,
+                changedFileCount,
+                contentSha256,
+                inventorySha256,
+                gameVersion);
     }
 
     /** Compatibility alias for callers that previously consumed the single source digest. */

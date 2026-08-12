@@ -1,6 +1,7 @@
 package dev.ishaankot.worldarchive.model;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.time.Instant;
@@ -38,6 +39,37 @@ final class BackupManifestTest {
                         0,
                         SHA256,
                         SHA256));
+    }
+
+    @Test
+    void recordsNoGameVersionForManifestsBuiltWithoutOne() {
+        assertEquals(Optional.empty(), manifest(Instant.parse("2026-07-31T12:00:00Z")).gameVersion());
+    }
+
+    @Test
+    void keepsTheGameVersionItWasStampedWith() {
+        BackupManifest manifest = BackupManifest.create(
+                BackupId.create(),
+                WorldId.create(),
+                "World",
+                Optional.empty(),
+                Instant.parse("2026-07-31T12:00:00Z"),
+                BackupTrigger.MANUAL,
+                0,
+                0,
+                0,
+                SHA256,
+                SHA256,
+                Optional.of(new GameVersionStamp("26.2", 4_820)));
+
+        assertEquals(Optional.of(new GameVersionStamp("26.2", 4_820)), manifest.gameVersion());
+    }
+
+    @Test
+    void rejectsAnUnusableGameVersionStamp() {
+        assertThrows(IllegalArgumentException.class, () -> new GameVersionStamp("26.2", 0));
+        assertThrows(IllegalArgumentException.class, () -> new GameVersionStamp(" ", 1));
+        assertThrows(IllegalArgumentException.class, () -> new GameVersionStamp("26.2\n", 1));
     }
 
     private static BackupManifest manifest(Instant createdAt) {

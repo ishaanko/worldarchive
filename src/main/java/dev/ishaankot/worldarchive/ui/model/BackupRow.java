@@ -6,6 +6,7 @@ import dev.ishaankot.worldarchive.model.BackupStatus;
 import dev.ishaankot.worldarchive.model.BackupTrigger;
 import dev.ishaankot.worldarchive.model.DestinationResult;
 import dev.ishaankot.worldarchive.model.DestinationType;
+import dev.ishaankot.worldarchive.model.GameVersionStamp;
 import dev.ishaankot.worldarchive.model.SensitiveDataRedactor;
 import dev.ishaankot.worldarchive.model.SyncStatus;
 import dev.ishaankot.worldarchive.model.VerificationStatus;
@@ -27,7 +28,8 @@ public record BackupRow(
         BackupDestinationView git,
         BackupDestinationView zip,
         long logicalSizeBytes,
-        long changedFileCount) {
+        long changedFileCount,
+        Optional<GameVersionStamp> gameVersion) {
     public BackupRow {
         Objects.requireNonNull(backupId, "backupId");
         Objects.requireNonNull(worldId, "worldId");
@@ -44,6 +46,34 @@ public record BackupRow(
         if (logicalSizeBytes < 0 || changedFileCount < 0) {
             throw new IllegalArgumentException("Backup counts must not be negative");
         }
+        Objects.requireNonNull(gameVersion, "gameVersion");
+    }
+
+    public BackupRow(
+            BackupId backupId,
+            WorldId worldId,
+            String worldName,
+            Instant createdAt,
+            Optional<String> label,
+            BackupTrigger trigger,
+            BackupStatus status,
+            BackupDestinationView git,
+            BackupDestinationView zip,
+            long logicalSizeBytes,
+            long changedFileCount) {
+        this(
+                backupId,
+                worldId,
+                worldName,
+                createdAt,
+                label,
+                trigger,
+                status,
+                git,
+                zip,
+                logicalSizeBytes,
+                changedFileCount,
+                Optional.empty());
     }
 
     public static BackupRow from(BackupRecord record) {
@@ -60,7 +90,8 @@ public record BackupRow(
                 destination(destinations, DestinationType.GIT),
                 destination(destinations, DestinationType.ZIP),
                 record.manifest().sourceByteCount(),
-                record.manifest().changedFileCount());
+                record.manifest().changedFileCount(),
+                record.manifest().gameVersion());
     }
 
     public boolean hasDurableCopy() {

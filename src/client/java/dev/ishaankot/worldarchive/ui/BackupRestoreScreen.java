@@ -2,8 +2,10 @@ package dev.ishaankot.worldarchive.ui;
 
 import dev.ishaankot.worldarchive.core.RestoreBackupRequest;
 import dev.ishaankot.worldarchive.core.RestoreBackupResult;
+import dev.ishaankot.worldarchive.runtime.RunningGameVersion;
 import dev.ishaankot.worldarchive.ui.model.ConfirmationKind;
 import dev.ishaankot.worldarchive.ui.model.ConfirmationState;
+import dev.ishaankot.worldarchive.ui.model.GameVersionNotice;
 import dev.ishaankot.worldarchive.ui.model.RestoreChoice;
 import dev.ishaankot.worldarchive.ui.model.BackupRow;
 import dev.ishaankot.worldarchive.ui.model.ScreenGeometry;
@@ -71,21 +73,29 @@ final class BackupRestoreScreen extends Screen {
         int contentX = ScreenGeometry.centerX(width, contentWidth);
         int top = ScreenGeometry.anchorMiddle(12, height, -100);
         addRenderableOnly(Widgets.title(font, contentX, top, contentWidth, 20, title));
-        MultiLineTextWidget explanation = new MultiLineTextWidget(
-                        contentX,
-                        top + 24,
-                        Component.literal(
-                                "A new world copy will be created. The selected world is never replaced."),
-                        font)
-                .setMaxWidth(contentWidth)
-                .setCentered(true);
-        explanation.setWidth(contentWidth);
+        MultiLineTextWidget explanation = paragraph(
+                contentX,
+                top + 24,
+                contentWidth,
+                Component.literal(
+                        "A new world copy will be created. The selected world is never replaced."));
         addRenderableOnly(explanation);
 
+        GameVersionNotice notice = GameVersionNotice.of(
+                row.gameVersion(),
+                RunningGameVersion.current());
+        MultiLineTextWidget versionNotice = paragraph(
+                contentX,
+                explanation.getY() + explanation.getHeight() + 6,
+                contentWidth,
+                Component.literal(notice.message()).withStyle(noticeStyle(notice)));
+        addRenderableOnly(versionNotice);
+
+        int nameTop = versionNotice.getY() + versionNotice.getHeight() + 9;
         EditBox nameBox = new EditBox(
                 font,
                 contentX,
-                top + 59,
+                nameTop,
                 contentWidth,
                 20,
                 Component.literal("Restored world name"));
@@ -100,14 +110,14 @@ final class BackupRestoreScreen extends Screen {
 
         validationWidget = new StringWidget(
                 contentX,
-                top + 82,
+                nameTop + 23,
                 contentWidth,
                 18,
                 Component.empty(),
                 font);
         addRenderableOnly(validationWidget);
         int buttonWidth = Math.max(50, (contentWidth - 6) / 3);
-        int buttonY = top + 108;
+        int buttonY = nameTop + 49;
         selectButton = Button.builder(Component.literal("Restore"), ignored -> choose(RestoreChoice.SELECT))
                 .bounds(contentX, buttonY, buttonWidth, 20)
                 .build();
@@ -121,6 +131,22 @@ final class BackupRestoreScreen extends Screen {
                 .build());
         updateValidation();
         setInitialFocus(nameBox);
+    }
+
+    private MultiLineTextWidget paragraph(int x, int y, int contentWidth, Component text) {
+        MultiLineTextWidget widget = new MultiLineTextWidget(x, y, text, font)
+                .setMaxWidth(contentWidth)
+                .setCentered(true);
+        widget.setWidth(contentWidth);
+        return widget;
+    }
+
+    private static ChatFormatting noticeStyle(GameVersionNotice notice) {
+        return switch (notice.level()) {
+            case DOWNGRADE -> ChatFormatting.RED;
+            case UPGRADE -> ChatFormatting.YELLOW;
+            case MATCHED, UNKNOWN -> ChatFormatting.GRAY;
+        };
     }
 
     private void updateValidation() {

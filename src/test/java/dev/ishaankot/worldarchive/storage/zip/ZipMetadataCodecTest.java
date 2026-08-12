@@ -3,8 +3,11 @@ package dev.ishaankot.worldarchive.storage.zip;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import dev.ishaankot.worldarchive.model.BackupId;
 import dev.ishaankot.worldarchive.model.BackupManifest;
 import dev.ishaankot.worldarchive.model.BackupTrigger;
+import dev.ishaankot.worldarchive.model.GameVersionStamp;
+import dev.ishaankot.worldarchive.model.WorldId;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -38,6 +41,38 @@ class ZipMetadataCodecTest {
                 IOException.class,
                 () -> ZipMetadataCodec.decodeManifest(
                         legacyManifest(BackupManifest.CURRENT_FORMAT_VERSION + 1)));
+    }
+
+    @Test
+    void decodesManifestsWrittenBeforeGameVersionTracking() throws IOException {
+        BackupManifest manifest = ZipMetadataCodec.decodeManifest(
+                legacyManifest(BackupManifest.CURRENT_FORMAT_VERSION));
+
+        assertEquals(Optional.empty(), manifest.gameVersion());
+    }
+
+    @Test
+    void roundTripsAStampedGameVersion() throws IOException {
+        GameVersionStamp stamp = new GameVersionStamp("26.2", 4_820);
+        BackupManifest stamped = BackupManifest.create(
+                BackupId.parse("11111111-1111-1111-1111-111111111111"),
+                WorldId.parse("22222222-2222-2222-2222-222222222222"),
+                "Stamped World",
+                Optional.empty(),
+                Instant.parse("2026-07-17T20:00:00Z"),
+                BackupTrigger.MANUAL,
+                3L,
+                12L,
+                3L,
+                LEGACY_DIGEST,
+                LEGACY_DIGEST,
+                Optional.of(stamp));
+
+        BackupManifest decoded = ZipMetadataCodec.decodeManifest(
+                ZipMetadataCodec.encodeManifest(stamped));
+
+        assertEquals(Optional.of(stamp), decoded.gameVersion());
+        assertEquals(stamped, decoded);
     }
 
     private static byte[] legacyManifest(int formatVersion) {

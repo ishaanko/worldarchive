@@ -149,7 +149,9 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
                 this::logFailure);
         this.catalog = new FileBackupCatalog(storageRoot.resolve("catalog.json"));
         this.inventoryStore = new FileWorldInventoryStore(storageRoot.resolve("inventories"));
-        this.captureFactory = new FileSystemBackupCaptureFactory(storageRoot.resolve("capture-temp"));
+        this.captureFactory = new FileSystemBackupCaptureFactory(
+                storageRoot.resolve("capture-temp"),
+                RunningGameVersion.current());
         this.services = new RuntimeServices(
                 minecraft,
                 storageRoot,

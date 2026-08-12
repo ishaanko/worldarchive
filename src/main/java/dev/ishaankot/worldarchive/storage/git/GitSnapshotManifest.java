@@ -55,7 +55,10 @@ record GitSnapshotManifest(
                 + manifest.sourceByteCount() + "\n"
                 + manifest.changedFileCount() + "\n"
                 + manifest.contentSha256() + "\n"
-                + manifest.inventorySha256() + "\n";
+                + manifest.inventorySha256() + "\n"
+                + manifest.gameVersion()
+                        .map(stamp -> "gameVersion:" + stamp.name() + "\n" + stamp.dataVersion() + "\n")
+                        .orElse("");
         MessageDigest digest = Digests.sha256();
         return Digests.hex(digest.digest(canonical.getBytes(StandardCharsets.UTF_8)));
     }
