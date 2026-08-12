@@ -1,0 +1,312 @@
+package dev.ishaanko.worldarchive.ui;
+
+import java.lang.ref.WeakReference;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.WeakHashMap;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
+import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
+import net.fabricmc.fabric.api.client.screen.v1.Screens;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.components.AbstractWidget;
+import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.components.Tooltip;
+import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.gui.screens.worldselection.SelectWorldScreen;
+import net.minecraft.client.gui.screens.worldselection.WorldSelectionList;
+import net.minecraft.network.chat.Component;
+
+/** Adds the WorldArchive entry point to vanilla's Select World action bar. */
+public final class SelectWorldBackupIntegration {
+    private static final AtomicBoolean REGISTERED = new AtomicBoolean();
+
+    private static final Map<SelectWorldScreen, WeakReference<ScreenState>> STATES = new WeakHashMap<>();
+
+    private static volatile Supplier<? extends BackupClientFacade> facadeSupplier;
+
+    private static volatile BackupWorldSelection rememberedSelection;
+
+    private static volatile BackupWorldContext rememberedWorld;
+
+    private SelectWorldBackupIntegration() {
+    }
+
+    /** Registers the global Fabric screen hook. Repeated calls update the runtime facade supplier. */
+    public static void register(Supplier<? extends BackupClientFacade> supplier) {
+        facadeSupplier = Objects.requireNonNull(supplier, "supplier");
+        if (REGISTERED.compareAndSet(false, true)) {
+            ScreenEvents.AFTER_INIT.register(SelectWorldBackupIntegration::afterInit);
+        }
+    }
+
+    private static void afterInit(Minecraft minecraft, Screen screen, int width, int height) {
+        if (!(screen instanceof SelectWorldScreen selectWorldScreen)) {
+            return;
+        }
+        WeakReference<ScreenState> reference = STATES.get(selectWorldScreen);
+        ScreenState state = reference == null ? null : reference.get();
+        if (state == null) {
+            state = new ScreenState(minecraft, selectWorldScreen);
+            STATES.put(selectWorldScreen, new WeakReference<>(state));
+        }
+        ScreenState current = state;
+        ScreenEvents.afterTick(selectWorldScreen).register(ignored -> current.afterTick());
+        ScreenEvents.remove(selectWorldScreen).register(ignored -> current.removed());
+        state.install(width, height);
+    }
+
+    static Optional<BackupWorldContext> lastResolvedWorld() {
+        BackupWorldSelection selection = rememberedSelection;
+        BackupWorldContext world = rememberedWorld;
+        if (selection == null || world == null || !world.matches(selection)) {
+            return Optional.empty();
+        }
+        return Optional.of(world);
+    }
+
+    static Optional<BackupWorldSelection> lastSelection() {
+        return Optional.ofNullable(rememberedSelection);
+    }
+
+    private static void rememberSelection(BackupWorldSelection selection) {
+        if (!Objects.equals(rememberedSelection, selection)) {
+            rememberedSelection = selection;
+            rememberedWorld = null;
+        }
+    }
+
+    private static void rememberWorld(BackupWorldSelection selection, BackupWorldContext world) {
+        rememberedSelection = selection;
+        rememberedWorld = world;
+    }
+
+    private static BackupClientFacade currentFacade() {
+        Supplier<? extends BackupClientFacade> supplier = facadeSupplier;
+        if (supplier == null) {
+            throw new IllegalStateException("WorldArchive client facade has not been registered");
+        }
+        return Objects.requireNonNull(supplier.get(), "facadeSupplier result");
+    }
+
+    private static final class ScreenState {
+        private static final int GAP = 4;
+
+        private static final int MAXIMUM_BAR_WIDTH = 620;
+
+        private final Minecraft minecraft;
+
+        private final SelectWorldScreen screen;
+
+        private WorldSelectionList worldList;
+
+        private Button backupsButton;
+
+        private BackupWorldSelection selectedWorld;
+
+        private BackupWorldContext resolvedWorld;
+
+        private boolean active;
+
+        private boolean layoutPending;
+
+        private long selectionRevision;
+
+        private ScreenState(Minecraft minecraft, SelectWorldScreen screen) {
+            this.minecraft = minecraft;
+            this.screen = screen;
+        }
+
+        private void install(int width, int height) {
+            active = true;
+            layoutPending = true;
+            selectionRevision++;
+            selectedWorld = null;
+            resolvedWorld = null;
+            uninstallButton();
+            worldList = findWorldList();
+            backupsButton = Button.builder(Component.literal("Backups"), ignored -> openBrowser())
+                    .bounds(Math.max(10, (width - 100) / 2), Math.max(5, height - 28), 100, 20)
+                    .build();
+            backupsButton.active = false;
+            backupsButton.setTooltip(Tooltip.create(Component.literal("Select a valid world")));
+            Screens.getWidgets(screen).add(backupsButton);
+            relayoutBottomBar();
+            updateSelection();
+        }
+
+        private WorldSelectionList findWorldList() {
+            return Screens.getWidgets(screen).stream()
+                    .filter(WorldSelectionList.class::isInstance)
+                    .map(WorldSelectionList.class::cast)
+                    .findFirst()
+                    .orElse(null);
+        }
+
+        private void afterTick() {
+            if (!active || backupsButton == null) {
+                return;
+            }
+            if (layoutPending) {
+                layoutPending = false;
+                relayoutBottomBar();
+            }
+            updateSelection();
+        }
+
+        private void removed() {
+            active = false;
+            selectionRevision++;
+            selectedWorld = null;
+            resolvedWorld = null;
+            worldList = null;
+            uninstallButton();
+        }
+
+        private void uninstallButton() {
+            Button installed = backupsButton;
+            backupsButton = null;
+            if (installed != null) {
+                Screens.getWidgets(screen).remove(installed);
+            }
+        }
+
+        private void updateSelection() {
+            Optional<WorldSelectionList.WorldListEntry> selected = worldList == null
+                    ? Optional.empty()
+                    : worldList.getSelectedOpt();
+            Optional<BackupWorldSelection> candidate = selected
+                    .filter(WorldSelectionList.WorldListEntry::canInteract)
+                    .flatMap(this::selectionFor);
+            if (candidate.equals(Optional.ofNullable(selectedWorld))) {
+                if (candidate.isEmpty()) {
+                    rememberSelection(null);
+                    disable("Select a valid world");
+                }
+                return;
+            }
+
+            selectionRevision++;
+            selectedWorld = candidate.orElse(null);
+            resolvedWorld = null;
+            rememberSelection(selectedWorld);
+            if (selectedWorld == null) {
+                disable("Select a valid world");
+                return;
+            }
+            disable("Loading world identity…");
+            resolveSelectedWorld(selectedWorld, selectionRevision);
+        }
+
+        private Optional<BackupWorldSelection> selectionFor(WorldSelectionList.WorldListEntry entry) {
+            try {
+                String storageName = entry.getLevelName();
+                return Optional.of(new BackupWorldSelection(
+                        minecraft.getLevelSource().getLevelPath(storageName),
+                        minecraft.getLevelSource().getBaseDir(),
+                        storageName,
+                        entry.getLevelSummary().getLevelName()));
+            } catch (IllegalArgumentException exception) {
+                return Optional.empty();
+            }
+        }
+
+        private void resolveSelectedWorld(BackupWorldSelection selection, long revision) {
+            CompletionStage<Optional<BackupWorldContext>> resolution;
+            try {
+                resolution = Objects.requireNonNull(
+                        currentFacade().resolveWorld(selection),
+                        "resolveWorld result");
+            } catch (RuntimeException exception) {
+                disable("Backups are not ready");
+                return;
+            }
+            resolution.whenComplete((resolved, throwable) -> minecraft.execute(() -> {
+                if (!active || revision != selectionRevision || !selection.equals(selectedWorld)) {
+                    return;
+                }
+                if (throwable != null || resolved == null || resolved.isEmpty()) {
+                    disable("Backups are unavailable for this world");
+                    return;
+                }
+                BackupWorldContext context = resolved.orElseThrow();
+                if (!context.matches(selection)) {
+                    disable("World identity did not match the selection");
+                    return;
+                }
+                resolvedWorld = context;
+                rememberWorld(selection, context);
+                backupsButton.active = true;
+                backupsButton.setTooltip(Tooltip.create(
+                        Component.literal("Browse backups for " + context.displayName())));
+            }));
+        }
+
+        private void disable(String message) {
+            if (backupsButton == null) {
+                return;
+            }
+            backupsButton.active = false;
+            backupsButton.setTooltip(Tooltip.create(Component.literal(message)));
+        }
+
+        private void openBrowser() {
+            BackupWorldContext context = resolvedWorld;
+            BackupWorldSelection selection = selectedWorld;
+            if (!active || context == null || selection == null || !context.matches(selection)) {
+                disable("Select a valid world");
+                return;
+            }
+            try {
+                minecraft.setScreenAndShow(new BackupBrowserScreen(screen, context, currentFacade()));
+            } catch (RuntimeException exception) {
+                disable("Backups are not ready");
+            }
+        }
+
+        private void relayoutBottomBar() {
+            if (backupsButton == null) {
+                return;
+            }
+            List<Button> vanillaButtons = Screens.getWidgets(screen).stream()
+                    .filter(Button.class::isInstance)
+                    .map(Button.class::cast)
+                    .filter(button -> button != backupsButton)
+                    .toList();
+            int bottomY = vanillaButtons.stream()
+                    .mapToInt(AbstractWidget::getY)
+                    .max()
+                    .orElse(backupsButton.getY());
+            List<Button> bottomRow = vanillaButtons.stream()
+                    .filter(button -> Math.abs(button.getY() - bottomY) <= 2)
+                    .sorted(Comparator.comparingInt(AbstractWidget::getX))
+                    .collect(ArrayList::new, ArrayList::add, ArrayList::addAll);
+            if (bottomRow.isEmpty()) {
+                backupsButton.setRectangle(
+                        100,
+                        20,
+                        Math.max(10, (screen.width - 100) / 2),
+                        Math.max(5, screen.height - 28));
+                return;
+            }
+
+            bottomRow.add(bottomRow.size() - 1, backupsButton);
+            int availableWidth = Math.max(200, screen.width - 20);
+            int totalWidth = Math.min(MAXIMUM_BAR_WIDTH, availableWidth);
+            int buttonWidth = Math.max(
+                    32,
+                    (totalWidth - GAP * (bottomRow.size() - 1)) / bottomRow.size());
+            int usedWidth = buttonWidth * bottomRow.size() + GAP * (bottomRow.size() - 1);
+            int x = (screen.width - usedWidth) / 2;
+            for (Button button : bottomRow) {
+                button.setRectangle(buttonWidth, 20, x, bottomY);
+                x += buttonWidth + GAP;
+            }
+        }
+    }
+}

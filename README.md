@@ -15,6 +15,8 @@ restore always creates a new world. Your original world is never changed.
 - Guided cleanup with a preview; labeled backups are always kept
 - Import and recovery tools for old backups
 - Copy-only restores that never touch the original world
+- Every backup records the Minecraft version it was made with
+- The Edit World backup buttons create and browse WorldArchive backups
 
 WorldArchive never deletes backups on its own. You review and confirm every
 cleanup.
@@ -40,6 +42,9 @@ backups still work.
    delete backups.
 
 Tip: you can also select a world in **Singleplayer** and click **Backups**.
+On the **Edit World** screen, **Make Backup** creates a WorldArchive backup
+and **Backups** opens the world's backup browser; vanilla's own backup
+feature is replaced there.
 
 ## Backup triggers
 
@@ -83,6 +88,20 @@ Guided cleanup keeps:
 
 Within a period, manual backups and backups with more changed files win.
 Cleanup always shows a preview first. Nothing is deleted until you confirm.
+
+## Minecraft versions
+
+Every new backup records the Minecraft version it was made with. The restore
+screen shows that version before you confirm.
+
+If the version differs from the game you are running, the screen says so. A
+backup from an older version is fine: Minecraft upgrades the restored copy when
+you open it. A backup from a newer version is riskier, and the screen warns that
+the restored copy may not open at all.
+
+A version difference never blocks a restore. Restores only ever create a new
+world, so nothing you already have is at risk. Backups made before this feature
+shipped have no recorded version, and the screen says that too.
 
 ## Recover old backups
 
