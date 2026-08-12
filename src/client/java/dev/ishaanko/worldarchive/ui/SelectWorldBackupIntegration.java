@@ -70,6 +70,10 @@ public final class SelectWorldBackupIntegration {
         return Optional.of(world);
     }
 
+    static Optional<BackupWorldSelection> lastSelection() {
+        return Optional.ofNullable(rememberedSelection);
+    }
+
     private static void rememberSelection(BackupWorldSelection selection) {
         if (!Objects.equals(rememberedSelection, selection)) {
             rememberedSelection = selection;

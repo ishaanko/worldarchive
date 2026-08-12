@@ -6,6 +6,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.WeakHashMap;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
@@ -98,9 +99,13 @@ public final class EditWorldBackupIntegration {
 
         private BackupWorldContext world;
 
+        private BackupWorldSelection selection;
+
         private boolean active;
 
         private boolean layoutPending;
+
+        private long resolutionRevision;
 
         private ScreenState(Minecraft minecraft, EditWorldScreen screen) {
             this.minecraft = minecraft;
@@ -123,12 +128,54 @@ public final class EditWorldBackupIntegration {
         private void install() {
             active = true;
             layoutPending = true;
+            long revision = ++resolutionRevision;
             ScreenEvents.afterTick(screen).register(ignored -> afterTick());
             ScreenEvents.remove(screen).register(ignored -> removed());
-            world = SelectWorldBackupIntegration.lastResolvedWorld().orElse(null);
+            selection = SelectWorldBackupIntegration.lastSelection().orElse(null);
+            BackupWorldContext remembered = SelectWorldBackupIntegration.lastResolvedWorld().orElse(null);
+            if (remembered != null) {
+                world = remembered;
+            } else if (selection == null || world == null || !world.matches(selection)) {
+                world = null;
+            }
             backupSlot = takeOver(backupSlot, BACKUP_KEY, "Make Backup", this::promptManualBackup);
             backupFolderSlot = takeOver(backupFolderSlot, BACKUP_FOLDER_KEY, "Backups", this::openBrowser);
-            applyWorld();
+            if (world != null) {
+                applyWorld();
+            } else if (selection != null) {
+                disable("Loading world identity…");
+                resolveWorld(selection, revision);
+            } else {
+                applyWorld();
+            }
+        }
+
+        private void resolveWorld(BackupWorldSelection target, long revision) {
+            CompletionStage<Optional<BackupWorldContext>> resolution;
+            try {
+                resolution = Objects.requireNonNull(
+                        currentFacade().resolveWorld(target),
+                        "resolveWorld result");
+            } catch (RuntimeException exception) {
+                disable(NOT_READY_MESSAGE);
+                return;
+            }
+            resolution.whenComplete((resolved, throwable) -> minecraft.execute(() -> {
+                if (!active || revision != resolutionRevision || !target.equals(selection)) {
+                    return;
+                }
+                if (throwable != null || resolved == null || resolved.isEmpty()) {
+                    disable("Backups are unavailable for this world");
+                    return;
+                }
+                BackupWorldContext context = resolved.orElseThrow();
+                if (!context.matches(target)) {
+                    disable("World identity did not match the selection");
+                    return;
+                }
+                world = context;
+                applyWorld();
+            }));
         }
 
         private Slot takeOver(Slot slot, String key, String label, Runnable action) {
@@ -163,7 +210,9 @@ public final class EditWorldBackupIntegration {
 
         private void removed() {
             active = false;
+            resolutionRevision++;
             world = null;
+            selection = null;
             List<AbstractWidget> widgets = Screens.getWidgets(screen);
             detach(widgets, backupSlot.replacement());
             detach(widgets, backupFolderSlot.replacement());

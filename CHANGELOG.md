@@ -25,6 +25,9 @@
 
 ### Fixed
 
+- The Edit World backup buttons now wait for world identity loading to finish.
+  Previously, both buttons stayed disabled if the Edit World screen opened while
+  the world identity was still loading.
 - The **Backups** button on the world list kept its selection tracking after
   the window was resized. Previously a resize silently disconnected it.
 
