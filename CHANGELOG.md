@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.3 (2026-08-12)
 
 ### Added
 
@@ -20,6 +20,8 @@
   reachable from that screen.
 - Updated build and runtime dependencies: Fabric API 0.157.0+26.2, Loom
   1.17.19, Gradle 9.7.0, JUnit 6.1.3, Checkstyle 13.10.0.
+- Changed the Java package and Maven group from `dev.ishaankot` to
+  `dev.ishaanko`.
 
 ### Fixed
 
