@@ -62,7 +62,7 @@ public final class BackupBrowserScreen extends Screen {
     private List<BackupRecord> records = List.of();
 
     private BackupBrowserCapabilities capabilities = new BackupBrowserCapabilities(
-            false, false, false, false, Optional.empty());
+            false, true, false, false, false, Optional.empty());
 
     private BackupSort sort = BackupSort.NEWEST;
 
@@ -334,6 +334,7 @@ public final class BackupBrowserScreen extends Screen {
         Optional<BackupRow> selection = page.selectedRow();
         BackupBrowserCapabilities effectiveCapabilities = new BackupBrowserCapabilities(
                 busy || loading,
+                capabilities.sourceAvailable(),
                 capabilities.createDestinationConfigured(),
                 capabilities.gitRemoteConfigured(),
                 capabilities.managedFolderAvailable(),
@@ -634,6 +635,7 @@ public final class BackupBrowserScreen extends Screen {
     private static String disabledReason(ActionDisabledReason reason) {
         return switch (reason) {
             case OPERATION_IN_PROGRESS -> "Wait for the current operation";
+            case SOURCE_UNAVAILABLE -> "The original world is unavailable";
             case NO_DESTINATION_CONFIGURED -> "Configure at least one destination";
             case NO_SELECTION -> "Select a backup";
             case NO_DURABLE_COPY -> "This backup has no available copy";

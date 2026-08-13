@@ -60,6 +60,29 @@ public final class WorldIdentityStore {
         });
     }
 
+    /** Reads an existing identity without creating one; empty when the folder carries none. */
+    public Optional<WorldIdentity> loadExisting(Path worldDirectory) throws IOException {
+        Path world = worldDirectory.toRealPath();
+        if (!Files.isDirectory(world, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("World path is not a directory: " + world);
+        }
+        Path metadata = world.resolve(METADATA_DIRECTORY);
+        if (Files.isSymbolicLink(metadata)) {
+            throw new IOException("World identity metadata directory must not be a symbolic link");
+        }
+        if (!Files.isDirectory(metadata, LinkOption.NOFOLLOW_LINKS)) {
+            return Optional.empty();
+        }
+        Path realMetadata = metadata.toRealPath();
+        if (!realMetadata.startsWith(world)) {
+            throw new IOException("World identity metadata escaped the world directory");
+        }
+        return withLock(realMetadata, identityFile ->
+                Files.exists(identityFile, LinkOption.NOFOLLOW_LINKS)
+                        ? Optional.of(read(identityFile))
+                        : Optional.empty());
+    }
+
     /** Explicitly replaces a copied source identity with a fresh restored-world identity. */
     public WorldIdentity createFreshRestoredCopyIdentity(
             Path restoredWorldDirectory,

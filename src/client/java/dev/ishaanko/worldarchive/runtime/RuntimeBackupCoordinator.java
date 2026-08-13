@@ -36,8 +36,7 @@ final class RuntimeBackupCoordinator implements BackupCoordinator {
             }
             if (!runtime.registerWorldPath(
                     request.worldId(),
-                    request.worldDirectory(),
-                    state)) {
+                    request.worldDirectory())) {
                 throw new IOException(
                         "The world identity is registered to a different folder");
             }
@@ -119,8 +118,7 @@ final class RuntimeBackupCoordinator implements BackupCoordinator {
             }
             if (!runtime.registerWorldPath(
                     request.worldId(),
-                    request.worldDirectory(),
-                    state)) {
+                    request.worldDirectory())) {
                 return failedStage(
                         "The world identity is registered to a different folder");
             }

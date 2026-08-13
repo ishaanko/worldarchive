@@ -28,7 +28,9 @@ public final class BackupActionPolicy {
                 BackupAction.CREATE,
                 capabilities.createDestinationConfigured()
                         ? enabled()
-                        : disabled(ActionDisabledReason.NO_DESTINATION_CONFIGURED));
+                        : disabled(capabilities.sourceAvailable()
+                                ? ActionDisabledReason.NO_DESTINATION_CONFIGURED
+                                : ActionDisabledReason.SOURCE_UNAVAILABLE));
         result.put(
                 BackupAction.OPEN_FOLDER,
                 capabilities.managedFolderAvailable()

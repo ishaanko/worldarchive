@@ -214,16 +214,21 @@ public final class EditWorldBackupIntegration {
             world = null;
             selection = null;
             List<AbstractWidget> widgets = Screens.getWidgets(screen);
-            detach(widgets, backupSlot.replacement());
-            detach(widgets, backupFolderSlot.replacement());
-            backupSlot = Slot.EMPTY;
-            backupFolderSlot = Slot.EMPTY;
+            backupSlot = release(widgets, backupSlot);
+            backupFolderSlot = release(widgets, backupFolderSlot);
         }
 
-        private void detach(List<AbstractWidget> widgets, Button button) {
-            if (button != null) {
-                widgets.remove(button);
+        private Slot release(List<AbstractWidget> widgets, Slot slot) {
+            Button replacement = slot.replacement();
+            int index = replacement == null ? -1 : widgets.indexOf(replacement);
+            if (replacement != null) {
+                widgets.remove(replacement);
             }
+            Button vanillaButton = slot.vanillaButton();
+            if (vanillaButton != null && !widgets.contains(vanillaButton)) {
+                widgets.add(index < 0 || index > widgets.size() ? widgets.size() : index, vanillaButton);
+            }
+            return Slot.EMPTY;
         }
 
         private void applyWorld() {

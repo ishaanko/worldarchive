@@ -52,6 +52,26 @@ final class RuntimeWorldPathRegistryTest {
     }
 
     @Test
+    void releaseFreesBothClaimsForNewOwners() {
+        RuntimeWorldPathRegistry registry = new RuntimeWorldPathRegistry();
+        WorldId original = WorldId.create();
+        WorldId restored = WorldId.create();
+        Path path = temporaryDirectory.resolve("world");
+
+        assertTrue(registry.register(original, path));
+        assertEquals(path.toAbsolutePath().normalize(),
+                registry.claimedPath(original).orElseThrow());
+        assertEquals(original, registry.claimedWorld(path).orElseThrow());
+        assertFalse(registry.register(restored, path));
+
+        registry.release(original, path);
+
+        assertTrue(registry.claimedPath(original).isEmpty());
+        assertTrue(registry.claimedWorld(path).isEmpty());
+        assertTrue(registry.register(restored, path));
+    }
+
+    @Test
     void runtimePathSnapshotRejectsDestinationInsideNewWorld() {
         RuntimeWorldPathRegistry registry = new RuntimeWorldPathRegistry();
         Path newWorld = temporaryDirectory.resolve("new-world");

@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 
 /** Process-lifetime bidirectional guard against copied or conflicting world identities. */
 final class RuntimeWorldPathRegistry {
@@ -49,6 +50,26 @@ final class RuntimeWorldPathRegistry {
         Path world = normalize(worldDirectory);
         return world.equals(pathsByWorld.get(worldId))
                 && worldId.equals(worldsByPath.get(world));
+    }
+
+    synchronized Optional<Path> claimedPath(WorldId worldId) {
+        return Optional.ofNullable(pathsByWorld.get(Objects.requireNonNull(worldId, "worldId")));
+    }
+
+    synchronized Optional<WorldId> claimedWorld(Path worldDirectory) {
+        return Optional.ofNullable(worldsByPath.get(normalize(worldDirectory)));
+    }
+
+    /** Releases one claim after the caller verified it no longer matches the folder on disk. */
+    synchronized void release(WorldId worldId, Path worldDirectory) {
+        Objects.requireNonNull(worldId, "worldId");
+        Path world = normalize(worldDirectory);
+        if (world.equals(pathsByWorld.get(worldId))) {
+            pathsByWorld.remove(worldId);
+        }
+        if (worldId.equals(worldsByPath.get(world))) {
+            worldsByPath.remove(world);
+        }
     }
 
     synchronized List<Path> snapshotPaths() {

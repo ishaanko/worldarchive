@@ -61,6 +61,18 @@ final class WorldIdentityStoreTest {
     }
 
     @Test
+    void loadExistingReadsWithoutCreating() throws IOException {
+        Path world = Files.createDirectory(temporaryDirectory.resolve("world"));
+        WorldIdentityStore store = new WorldIdentityStore();
+
+        assertTrue(store.loadExisting(world).isEmpty());
+        assertFalse(Files.exists(world.resolve(".worldarchive")));
+
+        WorldIdentity created = store.loadOrCreateIdentity(world);
+        assertEquals(created, store.loadExisting(world).orElseThrow());
+    }
+
+    @Test
     void malformedIdentityFailsWithoutReplacement() throws IOException {
         Path world = Files.createDirectory(temporaryDirectory.resolve("world"));
         Path metadata = Files.createDirectory(world.resolve(".worldarchive"));

@@ -114,7 +114,7 @@ final class RuntimeClientFacade implements BackupClientFacade {
             }
             CreateBackupRequest request = WorldArchiveRuntime.request(
                     world, label, BackupTrigger.MANUAL);
-            if (!runtime.registerWorldPath(world.worldId(), world.worldDirectory(), state)) {
+            if (!runtime.registerWorldPath(world.worldId(), world.worldDirectory())) {
                 return WorldArchiveRuntime.failedStage(
                         "The world identity is already registered to a different folder");
             }
@@ -161,6 +161,7 @@ final class RuntimeClientFacade implements BackupClientFacade {
         Optional<String> storageIssue = runtime.storageIssue(state);
         return CompletableFuture.completedFuture(new BackupBrowserCapabilities(
                 runtime.busyAcrossStates(world.worldId()),
+                sourceAvailable,
                 storageIssue.isEmpty() && sourceAvailable && createAvailable,
                 config.git().enabled() && state.gitBackend().remoteConfigured(world.worldId()),
                 storageIssue.isEmpty() && folderAvailable,

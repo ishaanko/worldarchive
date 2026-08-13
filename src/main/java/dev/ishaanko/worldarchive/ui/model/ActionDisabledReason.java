@@ -4,6 +4,7 @@ package dev.ishaanko.worldarchive.ui.model;
 public enum ActionDisabledReason {
     NONE,
     OPERATION_IN_PROGRESS,
+    SOURCE_UNAVAILABLE,
     NO_DESTINATION_CONFIGURED,
     NO_SELECTION,
     NO_DURABLE_COPY,

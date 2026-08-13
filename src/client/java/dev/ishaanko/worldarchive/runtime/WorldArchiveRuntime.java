@@ -41,6 +41,8 @@ import dev.ishaanko.worldarchive.storage.management.CleanupRequest;
 import dev.ishaanko.worldarchive.storage.management.CleanupResult;
 import dev.ishaanko.worldarchive.storage.management.StorageOverview;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
@@ -519,15 +521,11 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
                 trigger);
     }
 
-    boolean registerWorldPath(
-            WorldId worldId,
-            Path worldDirectory,
-            RuntimeState state) {
-        Path world = worldDirectory.toAbsolutePath().normalize();
-        if (state != null && !matchesConfiguredWorld(worldId, world, state.config())) {
-            return false;
-        }
-        return worldPaths.isRegistered(worldId, world);
+    boolean registerWorldPath(WorldId worldId, Path worldDirectory) {
+        // Exact registrations were verified against the folder on disk and stay in
+        // sync with every published configuration, so a configuration snapshot that
+        // still carries a stale claim cannot veto them.
+        return worldPaths.isRegistered(worldId, worldDirectory.toAbsolutePath().normalize());
     }
 
     boolean matchesKnownWorld(
@@ -535,6 +533,9 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
             Path worldDirectory,
             WorldArchiveConfig config) {
         Path world = worldDirectory.toAbsolutePath().normalize();
+        if (worldPaths.isRegistered(worldId, world)) {
+            return true;
+        }
         if (!matchesConfiguredWorld(worldId, world, config)) {
             return false;
         }
@@ -579,10 +580,14 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
             WorldId worldId,
             Path world,
             RuntimeState state) {
-        if (state != null && !matchesConfiguredWorld(worldId, world, state.config())) {
+        if (state != null
+                && !matchesConfiguredWorld(worldId, world, state.config())
+                && !conflictingConfiguredClaimsAreStale(worldId, world, state.config())) {
             return false;
         }
-        if (!worldPaths.register(worldId, world)) {
+        if (!worldPaths.register(worldId, world)
+                && (!releaseStaleRegistryClaims(worldId, world)
+                        || !worldPaths.register(worldId, world))) {
             return false;
         }
         if (state != null) {
@@ -590,6 +595,71 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
         }
         registerSettingsWorld(worldId, world);
         return true;
+    }
+
+    /**
+     * Verifies that every configured claim conflicting with this world no longer
+     * matches a folder on disk, so a world restored or moved onto a previously
+     * used path is not blocked by the stale entry the reconciler will drop.
+     */
+    private boolean conflictingConfiguredClaimsAreStale(
+            WorldId worldId,
+            Path world,
+            WorldArchiveConfig config) {
+        for (WorldConfig configured : config.worlds()) {
+            Path configuredPath = configured.path().toAbsolutePath().normalize();
+            boolean sameId = configured.worldId().equals(worldId);
+            boolean samePath = configuredPath.equals(world);
+            if (sameId && !samePath && !claimStaleOnDisk(configured.worldId(), configuredPath)) {
+                return false;
+            }
+            if (!sameId && samePath && !folderHoldsIdentity(worldId, world)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean releaseStaleRegistryClaims(WorldId worldId, Path world) {
+        Path claimedPath = worldPaths.claimedPath(worldId).orElse(null);
+        if (claimedPath != null && !claimedPath.equals(world)) {
+            if (!claimStaleOnDisk(worldId, claimedPath)) {
+                return false;
+            }
+            worldPaths.release(worldId, claimedPath);
+        }
+        WorldId claimedWorld = worldPaths.claimedWorld(world).orElse(null);
+        if (claimedWorld != null && !claimedWorld.equals(worldId)) {
+            if (!folderHoldsIdentity(worldId, world)) {
+                return false;
+            }
+            worldPaths.release(claimedWorld, world);
+        }
+        return true;
+    }
+
+    /** True when the folder no longer exists or no longer carries the claimed identity. */
+    private boolean claimStaleOnDisk(WorldId claimedId, Path claimedPath) {
+        if (!Files.isDirectory(claimedPath, LinkOption.NOFOLLOW_LINKS)) {
+            return true;
+        }
+        try {
+            return identityStore.loadExisting(claimedPath)
+                    .map(identity -> !identity.worldId().equals(claimedId))
+                    .orElse(true);
+        } catch (IOException exception) {
+            return false;
+        }
+    }
+
+    private boolean folderHoldsIdentity(WorldId worldId, Path world) {
+        try {
+            return identityStore.loadExisting(world)
+                    .map(identity -> identity.worldId().equals(worldId))
+                    .orElse(false);
+        } catch (IOException exception) {
+            return false;
+        }
     }
 
     private void registerSettingsWorld(WorldId worldId, Path worldDirectory) {

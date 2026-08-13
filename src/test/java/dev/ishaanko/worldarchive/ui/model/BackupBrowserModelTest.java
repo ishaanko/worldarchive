@@ -98,7 +98,7 @@ class BackupBrowserModelTest {
         BackupRow selected = BackupRow.from(record(
                 "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1", "label", 1, 10, 1));
         BackupBrowserCapabilities capabilities = new BackupBrowserCapabilities(
-                false, true, false, true);
+                false, true, true, false, true);
         Map<BackupAction, BackupActionAvailability> states = BackupActionPolicy.evaluate(
                 capabilities, Optional.of(selected));
 
@@ -120,7 +120,7 @@ class BackupBrowserModelTest {
                 noSelection.get(BackupAction.RESTORE).reason());
 
         Map<BackupAction, BackupActionAvailability> busy = BackupActionPolicy.evaluate(
-                new BackupBrowserCapabilities(true, true, true, true),
+                new BackupBrowserCapabilities(true, true, true, true, true),
                 Optional.of(selected));
         assertTrue(busy.values().stream().noneMatch(BackupActionAvailability::enabled));
         assertTrue(busy.values().stream()
@@ -134,11 +134,18 @@ class BackupBrowserModelTest {
                 1,
                 DestinationResult.failed(DestinationType.GIT, "failed")));
         Map<BackupAction, BackupActionAvailability> noDurableCopy = BackupActionPolicy.evaluate(
-                new BackupBrowserCapabilities(false, false, true, false),
+                new BackupBrowserCapabilities(false, true, false, true, false),
                 Optional.of(failed));
         assertEquals(
                 ActionDisabledReason.NO_DESTINATION_CONFIGURED,
                 noDurableCopy.get(BackupAction.CREATE).reason());
+
+        Map<BackupAction, BackupActionAvailability> sourceMissing = BackupActionPolicy.evaluate(
+                new BackupBrowserCapabilities(false, false, false, true, false),
+                Optional.of(failed));
+        assertEquals(
+                ActionDisabledReason.SOURCE_UNAVAILABLE,
+                sourceMissing.get(BackupAction.CREATE).reason());
         assertEquals(
                 ActionDisabledReason.FOLDER_UNAVAILABLE,
                 noDurableCopy.get(BackupAction.OPEN_FOLDER).reason());

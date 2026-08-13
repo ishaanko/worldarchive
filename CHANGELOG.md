@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.3 (2026-08-12)
+## 0.3.3 (2026-08-13)
 
 ### Added
 
@@ -25,6 +25,18 @@
 
 ### Fixed
 
+- The Edit World backup buttons come back after returning from the backup
+  browser or the backup prompt they open. Previously the screen returned with
+  neither WorldArchive's buttons nor vanilla's, because the takeover was not
+  undone when the screen was left.
+- Worlds restored onto a folder that an earlier world used, and worlds whose
+  save folder was renamed or moved, can be backed up again. Identity claims
+  that verifiably no longer match any folder on disk are released instead of
+  permanently rejecting the world with "Backups are unavailable for this
+  world" or "The world identity is registered to a different folder".
+- The backup browser's **Create** button now reports that the original world
+  is unavailable when its save folder is missing, instead of asking for a
+  destination to be configured.
 - The Edit World backup buttons now wait for world identity loading to finish.
   Previously, both buttons stayed disabled if the Edit World screen opened while
   the world identity was still loading.

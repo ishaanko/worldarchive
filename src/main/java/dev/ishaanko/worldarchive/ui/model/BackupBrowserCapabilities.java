@@ -6,6 +6,7 @@ import java.util.Optional;
 /** External capabilities that cannot be inferred from catalog rows alone. */
 public record BackupBrowserCapabilities(
         boolean operationInProgress,
+        boolean sourceAvailable,
         boolean createDestinationConfigured,
         boolean gitRemoteConfigured,
         boolean managedFolderAvailable,
@@ -16,11 +17,13 @@ public record BackupBrowserCapabilities(
 
     public BackupBrowserCapabilities(
             boolean operationInProgress,
+            boolean sourceAvailable,
             boolean createDestinationConfigured,
             boolean gitRemoteConfigured,
             boolean managedFolderAvailable) {
         this(
                 operationInProgress,
+                sourceAvailable,
                 createDestinationConfigured,
                 gitRemoteConfigured,
                 managedFolderAvailable,
