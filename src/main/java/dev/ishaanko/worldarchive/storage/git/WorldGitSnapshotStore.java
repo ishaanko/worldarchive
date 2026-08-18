@@ -520,41 +520,48 @@ public final class WorldGitSnapshotStore implements GitSnapshotStore {
                 });
     }
 
+    /** Shared CHILD/LEGACY dispatch; the NONE case is delegated to the caller's strategy. */
+    private <T> CompletionStage<T> withLocation(
+            WorldId worldId,
+            BackupId backupId,
+            Function<GitBackupBackend, CompletionStage<T>> operation,
+            Function<WorldId, CompletionStage<T>> onNone) {
+        Objects.requireNonNull(operation, "operation");
+        Objects.requireNonNull(onNone, "onNone");
+        return locateLocal(worldId, backupId).thenCompose(location -> switch (location) {
+            case CHILD -> operation.apply(child(worldId));
+            case LEGACY -> operation.apply(legacyBackend.orElseThrow());
+            case NONE -> onNone.apply(worldId);
+        });
+    }
+
     private <T> CompletionStage<T> withLocatedLocal(
             WorldId worldId,
             BackupId backupId,
             Function<GitBackupBackend, CompletionStage<T>> operation) {
-        Objects.requireNonNull(operation, "operation");
-        return locateLocal(worldId, backupId).thenCompose(location -> switch (location) {
-            case CHILD -> operation.apply(child(worldId));
-            case LEGACY -> operation.apply(legacyBackend.orElseThrow());
-            case NONE -> operation.apply(child(worldId));
-        });
+        return withLocation(worldId, backupId, operation, w -> operation.apply(child(w)));
     }
 
     private <T> CompletionStage<T> withRestorableLocation(
             WorldId worldId,
             BackupId backupId,
             Function<GitBackupBackend, CompletionStage<T>> operation) {
-        Objects.requireNonNull(operation, "operation");
-        return locateLocal(worldId, backupId).thenCompose(location -> {
-            if (location == SnapshotLocation.CHILD) {
-                return operation.apply(child(worldId));
-            }
-            if (location == SnapshotLocation.LEGACY) {
-                return operation.apply(legacyBackend.orElseThrow());
-            }
-            boolean childRemote = currentRemote(worldId).isPresent();
-            boolean legacyRemote = legacySettings.flatMap(GitBackendSettings::remoteUrl).isPresent();
-            if (childRemote && legacyRemote) {
-                return CompletableFuture.failedFuture(new GitStorageException(
-                        "Git snapshot location is ambiguous across configured remotes"));
-            }
-            if (legacyRemote) {
-                return operation.apply(legacyBackend.orElseThrow());
-            }
-            return operation.apply(child(worldId));
-        });
+        return withLocation(worldId, backupId, operation, w -> resolveAmbiguousRemote(w, operation));
+    }
+
+    private <T> CompletionStage<T> resolveAmbiguousRemote(
+            WorldId worldId,
+            Function<GitBackupBackend, CompletionStage<T>> operation) {
+        boolean childRemote = currentRemote(worldId).isPresent();
+        boolean legacyRemote = legacySettings.flatMap(GitBackendSettings::remoteUrl).isPresent();
+        if (childRemote && legacyRemote) {
+            return CompletableFuture.failedFuture(new GitStorageException(
+                    "Git snapshot location is ambiguous across configured remotes"));
+        }
+        if (legacyRemote) {
+            return operation.apply(legacyBackend.orElseThrow());
+        }
+        return operation.apply(child(worldId));
     }
 
     private Optional<String> currentRemote(WorldId worldId) {

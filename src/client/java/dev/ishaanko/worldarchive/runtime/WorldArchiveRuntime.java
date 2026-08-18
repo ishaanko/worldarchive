@@ -703,7 +703,7 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
         Optional<String> issue = RuntimeStorageSafety.issue(
                 state.config(), worldPaths.snapshotPaths());
         if (stateRegistry.currentOrNull() == state) {
-            storageSafety.refresh(state.config(), worldPaths.snapshotPaths());
+            storageSafety.set(issue);
         }
         return issue;
     }

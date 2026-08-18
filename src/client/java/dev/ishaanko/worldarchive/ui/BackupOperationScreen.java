@@ -4,7 +4,6 @@ import dev.ishaanko.worldarchive.core.BackupOperation;
 import dev.ishaanko.worldarchive.core.ProgressListener;
 import dev.ishaanko.worldarchive.core.RestoreBackupResult;
 import dev.ishaanko.worldarchive.model.BackupResult;
-import dev.ishaanko.worldarchive.model.SensitiveDataRedactor;
 import dev.ishaanko.worldarchive.ui.model.BackupOutcomeSummary;
 import dev.ishaanko.worldarchive.ui.model.DestinationOutcomeView;
 import dev.ishaanko.worldarchive.ui.model.ProgressState;
@@ -342,25 +341,7 @@ final class BackupOperationScreen<T> extends Screen {
     }
 
     private static String safeFailure(Throwable throwable) {
-        Throwable current = Objects.requireNonNull(throwable, "throwable");
-        while (current.getCause() != null
-                && (current instanceof java.util.concurrent.CompletionException
-                        || current instanceof java.util.concurrent.ExecutionException)) {
-            current = current.getCause();
-        }
-        String message = current.getMessage();
-        if (message == null || message.isBlank()) {
-            message = current.getClass().getSimpleName();
-        }
-        String safe = SensitiveDataRedactor.redact(message)
-                .chars()
-                .filter(character -> !Character.isISOControl(character))
-                .collect(StringBuilder::new, StringBuilder::appendCodePoint, StringBuilder::append)
-                .toString();
-        if (safe.length() > 300) {
-            return safe.substring(0, 299) + "…";
-        }
-        return safe;
+        return FailureMessages.safe(throwable, 300);
     }
 
     static boolean captureChanged(String failure) {

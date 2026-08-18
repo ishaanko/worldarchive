@@ -38,7 +38,6 @@ final class GitStorageCompactor {
         }
         commands.checked(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "reflog",
                         "expire",
                         "--expire=now",
@@ -48,7 +47,6 @@ final class GitStorageCompactor {
                 new byte[0]);
         commands.checked(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "gc",
                         "--prune=now"),
                 settings.repository(),
@@ -59,7 +57,6 @@ final class GitStorageCompactor {
         } else {
             commands.checked(
                     List.of(
-                            "--git-dir=" + settings.repository(),
                             "lfs",
                             "prune",
                             "--force"),

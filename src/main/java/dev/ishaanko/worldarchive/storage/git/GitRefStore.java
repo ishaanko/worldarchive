@@ -35,7 +35,6 @@ final class GitRefStore {
             throws IOException, InterruptedException, GitStorageException {
         GitCommandResult result = commands.checked(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "for-each-ref",
                         "--count=1",
                         "--sort=-committerdate",
@@ -59,7 +58,6 @@ final class GitRefStore {
             throws IOException, InterruptedException, GitStorageException {
         GitCommandResult result = commands.run(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "rev-parse",
                         "--verify",
                         "--quiet",
@@ -88,7 +86,6 @@ final class GitRefStore {
         repository.configureRemote();
         GitCommandResult result = commands.checked(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "ls-remote",
                         "--refs",
                         settings.remoteName(),
@@ -126,7 +123,6 @@ final class GitRefStore {
             return;
         }
         List<String> arguments = new ArrayList<>(List.of(
-                "--git-dir=" + settings.repository(),
                 "update-ref",
                 refName,
                 newCommit));
@@ -165,7 +161,6 @@ final class GitRefStore {
             throws IOException, InterruptedException, GitStorageException {
         GitCommandResult timestampResult = commands.checked(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "show",
                         "-s",
                         "--format=%ct",
@@ -194,7 +189,6 @@ final class GitRefStore {
         try {
             commands.checked(
                     List.of(
-                            "--git-dir=" + settings.repository(),
                             "update-ref",
                             "-d",
                             refName,
@@ -242,9 +236,7 @@ final class GitRefStore {
         if (!current.equals(Optional.of(newCommit))) {
             return;
         }
-        List<String> rollback = new ArrayList<>(List.of(
-                "--git-dir=" + settings.repository(),
-                "update-ref"));
+        List<String> rollback = new ArrayList<>(List.of("update-ref"));
         if (previousCommit.isPresent()) {
             rollback.add(refName);
             rollback.add(previousCommit.get());

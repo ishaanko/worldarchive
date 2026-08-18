@@ -6,7 +6,6 @@ import dev.ishaanko.worldarchive.core.DeleteBackupRequest;
 import dev.ishaanko.worldarchive.core.DeletePreparation;
 import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.BackupRecord;
-import dev.ishaanko.worldarchive.model.SensitiveDataRedactor;
 import dev.ishaanko.worldarchive.ui.model.ActionDisabledReason;
 import dev.ishaanko.worldarchive.ui.model.BackupAction;
 import dev.ishaanko.worldarchive.ui.model.BackupActionAvailability;
@@ -647,23 +646,8 @@ public final class BackupBrowserScreen extends Screen {
     }
 
     private static Component failureStatus(Throwable throwable) {
-        Throwable current = Objects.requireNonNull(throwable, "throwable");
-        while (current.getCause() != null
-                && (current instanceof java.util.concurrent.CompletionException
-                        || current instanceof java.util.concurrent.ExecutionException)) {
-            current = current.getCause();
-        }
-        String message = current.getMessage();
-        if (message == null || message.isBlank()) {
-            message = current.getClass().getSimpleName();
-        }
-        String safe = SensitiveDataRedactor.redact(message)
-                .replaceAll("[\\p{Cc}\\p{Cf}]", "")
-                .strip();
-        if (safe.length() > 220) {
-            safe = safe.substring(0, 219) + "…";
-        }
-        return Component.literal("Error: " + safe).withStyle(ChatFormatting.RED);
+        return Component.literal("Error: " + FailureMessages.safe(throwable, 220))
+                .withStyle(ChatFormatting.RED);
     }
 
     private record BrowserLoad(

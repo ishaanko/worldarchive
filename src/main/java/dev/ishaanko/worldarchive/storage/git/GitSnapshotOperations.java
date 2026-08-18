@@ -146,7 +146,6 @@ final class GitSnapshotOperations {
         String prefix = "refs/heads/worldarchive/" + worldId.map(value -> value + "/").orElse("");
         GitCommandResult result = commands.checked(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "for-each-ref",
                         "--sort=-committerdate",
                         "--format=%(refname)%09%(objectname)%09%(committerdate:unix)",
@@ -293,7 +292,6 @@ final class GitSnapshotOperations {
             Files.createDirectory(checkout);
             commands.checked(
                     List.of(
-                            "--git-dir=" + settings.repository(),
                             "read-tree",
                             snapshot.commitId()),
                     checkout,
@@ -301,7 +299,6 @@ final class GitSnapshotOperations {
                     new byte[0]);
             commands.checked(
                     List.of(
-                            "--git-dir=" + settings.repository(),
                             "--work-tree=" + checkout,
                             "checkout-index",
                             "--all",
@@ -391,7 +388,6 @@ final class GitSnapshotOperations {
         try {
             commands.checked(
                     List.of(
-                            "--git-dir=" + settings.repository(),
                             "fetch",
                             "--no-tags",
                             "--no-write-fetch-head",
@@ -404,7 +400,6 @@ final class GitSnapshotOperations {
                     .orElseThrow(() -> new GitStorageException("Git remote did not provide the requested snapshot"));
             commands.checked(
                     List.of(
-                            "--git-dir=" + settings.repository(),
                             "lfs",
                             "fetch",
                             settings.remoteName(),
@@ -503,7 +498,6 @@ final class GitSnapshotOperations {
             }
         }
         List<String> arguments = new ArrayList<>(List.of(
-                "--git-dir=" + settings.repository(),
                 "push",
                 "--atomic",
                 "--porcelain"));
@@ -588,7 +582,6 @@ final class GitSnapshotOperations {
         repository.configureRemote();
         commands.checked(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "lfs",
                         "push",
                         settings.remoteName(),
@@ -598,7 +591,6 @@ final class GitSnapshotOperations {
                 new byte[0]);
         commands.checked(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "push",
                         "--atomic",
                         "--porcelain",
@@ -628,7 +620,6 @@ final class GitSnapshotOperations {
             throws IOException, InterruptedException, GitStorageException {
         commands.checked(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "push",
                         "--porcelain",
                         settings.remoteName(),
@@ -652,6 +643,19 @@ final class GitSnapshotOperations {
         if (remoteMain.isEmpty() || !remoteMain.orElseThrow().equals(deletedCommit)) {
             return;
         }
+        try {
+            retargetDefaultBranch(deletedCommit);
+        } catch (IOException | GitStorageException exception) {
+            throw new GitStorageException(
+                    "The remote refused to move its main branch off the deleted backup"
+                            + " (branch protection?). The backup was not deleted because"
+                            + " its content would stay visible on main.",
+                    exception);
+        }
+    }
+
+    private void retargetDefaultBranch(String deletedCommit)
+            throws IOException, InterruptedException, GitStorageException {
         Optional<GitSnapshot> newestRemaining = listSnapshotsBlocking(Optional.empty())
                 .stream()
                 .filter(snapshot -> !snapshot.commitId().equals(deletedCommit))
@@ -661,12 +665,12 @@ final class GitSnapshotOperations {
             return;
         }
         String emptyTree = GitCommands.objectId(commands.checked(
-                List.of("--git-dir=" + settings.repository(), "mktree"),
+                List.of("mktree"),
                 settings.repository(),
                 Map.of(),
                 GitCommand.utf8Input("")).standardOutput());
         String placeholder = GitCommands.objectId(commands.checked(
-                List.of("--git-dir=" + settings.repository(), "commit-tree", emptyTree),
+                List.of("commit-tree", emptyTree),
                 settings.repository(),
                 Map.of(
                         "GIT_AUTHOR_NAME", "WorldArchive",
@@ -679,7 +683,6 @@ final class GitSnapshotOperations {
                 .standardOutput());
         commands.checked(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "push",
                         "--porcelain",
                         settings.remoteName(),

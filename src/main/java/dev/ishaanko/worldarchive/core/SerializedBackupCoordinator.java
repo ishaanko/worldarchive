@@ -159,21 +159,15 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
                     0,
                     0,
                     "Preparing private world capture"));
-            Optional<WorldInventory> loadedInventory;
-            try {
-                loadedInventory = inventoryStore.load(request.worldId());
-            } catch (IOException exception) {
-                loadedInventory = Optional.empty();
-                capturePreparations.put(request.worldId(), preparationProgress(
-                        request,
-                        backupId,
-                        operationId,
-                        OperationPhase.PREPARING,
-                        0,
-                        0,
-                        "Change inventory is unavailable; capturing a full baseline"));
-            }
-            Optional<WorldInventory> previous = loadedInventory;
+            Optional<WorldInventory> previous = loadInventoryOrFallback(request.worldId(), () ->
+                    capturePreparations.put(request.worldId(), preparationProgress(
+                            request,
+                            backupId,
+                            operationId,
+                            OperationPhase.PREPARING,
+                            0,
+                            0,
+                            "Change inventory is unavailable; capturing a full baseline")));
             captured = captureFactory.capture(
                     request,
                     backupId,
@@ -389,19 +383,13 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
             if (captured == null) {
                 try (WorldOperationGate.Permit ignored = captureMutex.enter(
                         operation.request.worldId())) {
-                    Optional<WorldInventory> loadedInventory;
-                    try {
-                        loadedInventory = inventoryStore.load(operation.request.worldId());
-                    } catch (IOException exception) {
-                        loadedInventory = Optional.empty();
-                        report(
-                                operation,
-                                OperationPhase.PREPARING,
-                                0,
-                                0,
-                                "Change inventory is unavailable; capturing a full baseline");
-                    }
-                    Optional<WorldInventory> previous = loadedInventory;
+                    Optional<WorldInventory> previous = loadInventoryOrFallback(
+                            operation.request.worldId(), () -> report(
+                                    operation,
+                                    OperationPhase.PREPARING,
+                                    0,
+                                    0,
+                                    "Change inventory is unavailable; capturing a full baseline"));
                     operation.previousInventoryPresent = previous.isPresent();
                     captured = captureGate.capture(() -> captureFactory.capture(
                             operation.request,
@@ -677,17 +665,45 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
                 SensitiveDataRedactor.redact(progress.message()));
     }
 
+    /** Loads the previous inventory, falling back to an empty baseline (and notifying via {@code onUnavailable}) on IOException. */
+    private Optional<WorldInventory> loadInventoryOrFallback(WorldId worldId, Runnable onUnavailable) {
+        try {
+            return inventoryStore.load(worldId);
+        } catch (IOException exception) {
+            onUnavailable.run();
+            return Optional.empty();
+        }
+    }
+
+    private static OperationProgress progressFor(
+            OperationId operationId,
+            WorldId worldId,
+            BackupId backupId,
+            OperationPhase phase,
+            long completed,
+            long total,
+            String message) {
+        return new OperationProgress(
+                operationId,
+                worldId,
+                Optional.of(backupId),
+                BackupOperation.CREATE,
+                phase,
+                completed,
+                total,
+                message);
+    }
+
     private void report(
             CreateOperation operation,
             OperationPhase phase,
             long completed,
             long total,
             String message) {
-        OperationProgress progress = new OperationProgress(
+        OperationProgress progress = progressFor(
                 operation.operationId,
                 operation.request.worldId(),
-                Optional.of(operation.backupId),
-                BackupOperation.CREATE,
+                operation.backupId,
                 phase,
                 completed,
                 total,
@@ -706,15 +722,7 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
             long completed,
             long total,
             String message) {
-        return new OperationProgress(
-                operationId,
-                request.worldId(),
-                Optional.of(backupId),
-                BackupOperation.CREATE,
-                phase,
-                completed,
-                total,
-                message);
+        return progressFor(operationId, request.worldId(), backupId, phase, completed, total, message);
     }
 
     private DestinationPlan selectDestinations(CreateBackupRequest request) {

@@ -20,6 +20,10 @@ final class RuntimeStorageSafety {
         warning.set(issue(config, worldPaths));
     }
 
+    void set(Optional<String> issue) {
+        warning.set(issue);
+    }
+
     Optional<String> warning() {
         return warning.get();
     }

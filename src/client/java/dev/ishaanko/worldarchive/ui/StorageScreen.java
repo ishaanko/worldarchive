@@ -1,7 +1,6 @@
 package dev.ishaanko.worldarchive.ui;
 
 import dev.ishaanko.worldarchive.config.StoragePolicy;
-import dev.ishaanko.worldarchive.model.SensitiveDataRedactor;
 import dev.ishaanko.worldarchive.storage.management.StorageForecast;
 import dev.ishaanko.worldarchive.storage.management.StorageOverview;
 import dev.ishaanko.worldarchive.ui.model.ScreenGeometry;
@@ -398,23 +397,10 @@ final class StorageScreen extends Screen {
     }
 
     static Component failure(Throwable throwable) {
-        Throwable current = throwable == null
+        Throwable safe = throwable == null
                 ? new IllegalStateException("Storage operation returned no result")
                 : throwable;
-        while (current.getCause() != null
-                && (current instanceof java.util.concurrent.CompletionException
-                        || current instanceof java.util.concurrent.ExecutionException)) {
-            current = current.getCause();
-        }
-        String message = current.getMessage();
-        if (message == null || message.isBlank()) {
-            message = current.getClass().getSimpleName();
-        }
-        message = SensitiveDataRedactor.redact(message).replaceAll("[\\p{Cc}\\p{Cf}]", "");
-        if (message.length() > 220) {
-            message = message.substring(0, 219) + "…";
-        }
-        return Component.literal(message).withStyle(ChatFormatting.RED);
+        return Component.literal(FailureMessages.safe(safe, 220)).withStyle(ChatFormatting.RED);
     }
 
     @Override

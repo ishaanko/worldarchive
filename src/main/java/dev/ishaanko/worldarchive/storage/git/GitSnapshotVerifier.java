@@ -35,7 +35,7 @@ final class GitSnapshotVerifier {
         GitSnapshotManifest snapshotManifest = metadata.manifest();
         List<GitTreeEntry> treeEntries = metadata.treeEntries();
         commands.checked(
-                List.of("--git-dir=" + settings.repository(), "fsck", "--strict", "--no-dangling", commit),
+                List.of("fsck", "--strict", "--no-dangling", commit),
                 settings.repository(),
                 Map.of(),
                 new byte[0]);
@@ -49,7 +49,7 @@ final class GitSnapshotVerifier {
             throws IOException, InterruptedException, GitStorageException {
         String commit = snapshot.commitId();
         commands.checked(
-                List.of("--git-dir=" + settings.repository(), "cat-file", "-e", commit + "^{commit}"),
+                List.of("cat-file", "-e", commit + "^{commit}"),
                 settings.repository(),
                 Map.of(),
                 new byte[0]);
@@ -108,7 +108,7 @@ final class GitSnapshotVerifier {
             GitSnapshotManifest snapshotManifest)
             throws IOException, InterruptedException, GitStorageException {
         GitCommandResult result = commands.checked(
-                List.of("--git-dir=" + settings.repository(), "cat-file", "-p", commit),
+                List.of("cat-file", "-p", commit),
                 settings.repository(),
                 Map.of(),
                 new byte[0]);
@@ -148,7 +148,6 @@ final class GitSnapshotVerifier {
             throws IOException, InterruptedException, GitStorageException {
         GitCommandResult result = commands.checked(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "ls-tree",
                         "-r",
                         "-z",
@@ -164,7 +163,6 @@ final class GitSnapshotVerifier {
             throws IOException, InterruptedException, GitStorageException {
         GitCommandResult result = commands.checked(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "show",
                         commit + ":" + GitBackupBackend.MANIFEST_PATH),
                 settings.repository(),
@@ -195,7 +193,6 @@ final class GitSnapshotVerifier {
             throws IOException, InterruptedException, GitStorageException {
         GitCommandResult message = commands.checked(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "show",
                         "-s",
                         "--format=%B",
@@ -222,7 +219,6 @@ final class GitSnapshotVerifier {
             }
             GitCommandResult contents = commands.run(
                     List.of(
-                            "--git-dir=" + settings.repository(),
                             "cat-file",
                             "blob",
                             entry.objectId()),
