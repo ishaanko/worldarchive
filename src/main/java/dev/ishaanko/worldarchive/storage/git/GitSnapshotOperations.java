@@ -470,17 +470,20 @@ final class GitSnapshotOperations {
             if (remoteRefs.isEmpty()) {
                 return false;
             }
+            // Main moves off the deleted commit first: if that is blocked (branch
+            // protection), the deletion fails with nothing half-removed and every
+            // retry starts from the same state.
+            retargetDefaultBranchAfterDelete(remoteRefs.getFirst().commitId());
             deleteRemoteSnapshotRefs(remoteRefs, remoteRefs.getFirst().commitId());
-            retargetDefaultBranchAfterDelete(worldId, remoteRefs.getFirst().commitId());
             return true;
         }
         if (settings.remoteUrl().isPresent()) {
             GitSnapshot snapshot = refs.snapshotForCommit(worldId, backupId, current.get());
+            retargetDefaultBranchAfterDelete(current.get());
             deleteRemoteSnapshotRefs(remoteSnapshots.find(
                     worldId,
                     backupId,
                     Optional.of(snapshot.committedAt())), current.get());
-            retargetDefaultBranchAfterDelete(worldId, current.get());
         }
         refs.deleteExact(refName, current.get());
         return true;
@@ -637,18 +640,19 @@ final class GitSnapshotOperations {
 
     /**
      * A deleted backup must stop being reachable from the remote. When the default
-     * branch points at the deleted commit, it moves to the newest remaining backup.
+     * branch points at the deleted commit, it moves to the newest snapshot left in
+     * the whole repository (legacy shared repositories hold several worlds).
      * Remotes refuse to delete the branch their HEAD points at, so the last deletion
      * parks the branch on an empty placeholder commit instead. Failures propagate so
      * the deletion reports honestly that the remote still holds the content.
      */
-    private void retargetDefaultBranchAfterDelete(WorldId worldId, String deletedCommit)
+    private void retargetDefaultBranchAfterDelete(String deletedCommit)
             throws IOException, InterruptedException, GitStorageException {
         Optional<String> remoteMain = refs.resolveRemote(GitRemoteSnapshotRef.DEFAULT_BRANCH);
         if (remoteMain.isEmpty() || !remoteMain.orElseThrow().equals(deletedCommit)) {
             return;
         }
-        Optional<GitSnapshot> newestRemaining = listSnapshotsBlocking(Optional.of(worldId))
+        Optional<GitSnapshot> newestRemaining = listSnapshotsBlocking(Optional.empty())
                 .stream()
                 .filter(snapshot -> !snapshot.commitId().equals(deletedCommit))
                 .findFirst();

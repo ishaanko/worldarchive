@@ -15,6 +15,8 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -50,9 +52,10 @@ final class RuntimeLifecycle {
 
     private int savingPauses;
 
-    // Guarded by lock: captures still reading the world; new requested saves are
-    // refused while one runs, because a forced save writes even while paused.
-    private int activeCaptures;
+    // Guarded by lock: captures still reading each server's world; new requested
+    // saves for that server are refused while one runs, because a forced save
+    // writes even while autosaving is paused.
+    private final Map<MinecraftServer, Integer> activeCaptures = new HashMap<>();
 
     private IntegratedServer activeServer;
 
@@ -192,7 +195,7 @@ final class RuntimeLifecycle {
             if (activeServer != server || stoppingServer == server) {
                 return WorldArchiveRuntime.failedStage("The integrated world is closing");
             }
-            if (activeCaptures > 0) {
+            if (capturing(server)) {
                 return WorldArchiveRuntime.failedStage(
                         "A backup is still copying the world; try again shortly");
             }
@@ -361,6 +364,10 @@ final class RuntimeLifecycle {
             requested = saveGate.observeRequestedSave(server, flush, force).orElse(null);
             if (requested == null) {
                 saveGate.observeExitSave(server, flush, force);
+            } else {
+                // Counted while still holding the lock that freed the save gate, so
+                // no new save can slip in before the capture registers itself.
+                captureStarted(server);
             }
         }
         if (requested != null) {
@@ -464,7 +471,7 @@ final class RuntimeLifecycle {
                     || scheduleState.state() != state
                     || liveWorld == null
                     || activeServer == null
-                    || activeCaptures > 0
+                    || capturing(activeServer)
                     || !scheduleState.worldId().equals(liveWorld.worldId())
                     || scheduleState.schedule().poll(clock.instant()).isEmpty()
                     || saveGate.hasPending()) {
@@ -547,20 +554,19 @@ final class RuntimeLifecycle {
     }
 
     private void captureStoppedWorld(PendingLiveBackup pending) {
+        synchronized (lock) {
+            captureStarted(pending.server());
+        }
         dispatchCapture(pending, false);
     }
 
+    /** The caller has already counted this capture via {@link #captureStarted}. */
     private void dispatchCapture(PendingLiveBackup pending, boolean resumeSaving) {
-        synchronized (lock) {
-            activeCaptures++;
-        }
         runtime.submit(() -> {
             captureAndDispatch(pending);
             return null;
         }).whenComplete((ignored, throwable) -> {
-            synchronized (lock) {
-                activeCaptures--;
-            }
+            captureFinished(pending.server());
             if (resumeSaving) {
                 resumeLevelSaving(pending.server());
             }
@@ -570,6 +576,23 @@ final class RuntimeLifecycle {
                         "World capture could not be started"));
             }
         });
+    }
+
+    private void captureStarted(MinecraftServer server) {
+        activeCaptures.merge(server, 1, Integer::sum);
+    }
+
+    private void captureFinished(MinecraftServer server) {
+        synchronized (lock) {
+            // A null result removes the entry, so stopped servers do not linger.
+            activeCaptures.computeIfPresent(
+                    server,
+                    (ignored, count) -> count > 1 ? count - 1 : null);
+        }
+    }
+
+    private boolean capturing(MinecraftServer server) {
+        return activeCaptures.getOrDefault(server, 0) > 0;
     }
 
     /** Overlapping captures each pause saving; only the last one to finish resumes it. */
