@@ -599,6 +599,27 @@ final class GitSnapshotOperations {
                 Map.of(),
                 new byte[0]);
         legacyMigration.migrateLegacyRemoteRefs(snapshot.worldId());
+        publishDefaultBranch(snapshot);
+    }
+
+    /**
+     * Points the remote default branch at the newest backup. The remote repository
+     * is dedicated to this world's backups, and histories legitimately diverge when
+     * a world folder moves between machines, so the update is forced.
+     */
+    private void publishDefaultBranch(GitSnapshot snapshot)
+            throws IOException, InterruptedException, GitStorageException {
+        commands.checked(
+                List.of(
+                        "--git-dir=" + settings.repository(),
+                        "push",
+                        "--force",
+                        "--porcelain",
+                        settings.remoteName(),
+                        snapshot.refName() + ":" + GitRemoteSnapshotRef.defaultBranch()),
+                settings.repository(),
+                Map.of(),
+                new byte[0]);
     }
 
     private void rejectRepositoryWorldOverlap(Path worldDirectory) throws GitStorageException {

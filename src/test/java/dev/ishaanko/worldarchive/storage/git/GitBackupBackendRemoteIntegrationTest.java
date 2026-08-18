@@ -134,6 +134,48 @@ class GitBackupBackendRemoteIntegrationTest extends GitBackupBackendIntegrationT
     }
 
     @Test
+    void syncKeepsRemoteMainOnTheNewestBackup() throws Exception {
+        Path remote = temporaryDirectory.resolve("default-branch.git");
+        nativeGit("init", "--bare", remote.toString());
+        Path world = temporaryDirectory.resolve("default-branch-world");
+        Files.createDirectories(world);
+        Files.writeString(world.resolve("level.dat"), "first", StandardCharsets.UTF_8);
+        WorldId worldId = WorldId.create();
+        BackupId firstId = BackupId.create();
+        BackupId secondId = BackupId.create();
+        GitBackendSettings remoteSettings = settings(Optional.of(remote.toUri().toString()));
+
+        try (GitBackupBackend backend = new GitBackupBackend(remoteSettings)) {
+            assertEquals(DestinationStatus.SUCCESS, await(backend.createBackup(
+                    capture(world, worldId, firstId, Instant.now().minusSeconds(1)),
+                    ProgressListener.NO_OP)).status());
+            String firstCommit = nativeGit(
+                    "--git-dir=" + remoteSettings.repository(),
+                    "rev-parse",
+                    GitSnapshot.refName(worldId, firstId)).trim();
+            assertEquals(Optional.of(firstCommit), remoteRef(remote, "refs/heads/main"));
+
+            // A diverged default branch left behind by another machine must still move.
+            String emptyTree = nativeGit(
+                    "--git-dir=" + remote, "hash-object", "-t", "tree", "-w", "/dev/null").trim();
+            String unrelated = nativeGit(
+                    "-c", "user.name=test", "-c", "user.email=test@test.invalid",
+                    "--git-dir=" + remote, "commit-tree", emptyTree, "-m", "diverged").trim();
+            nativeGit("--git-dir=" + remote, "update-ref", "refs/heads/main", unrelated);
+
+            Files.writeString(world.resolve("level.dat"), "second", StandardCharsets.UTF_8);
+            assertEquals(DestinationStatus.SUCCESS, await(backend.createBackup(
+                    capture(world, worldId, secondId, Instant.now()),
+                    ProgressListener.NO_OP)).status());
+            String secondCommit = nativeGit(
+                    "--git-dir=" + remoteSettings.repository(),
+                    "rev-parse",
+                    GitSnapshot.refName(worldId, secondId)).trim();
+            assertEquals(Optional.of(secondCommit), remoteRef(remote, "refs/heads/main"));
+        }
+    }
+
+    @Test
     void restoresExactBytesFromRemoteWhenLocalRepositoryIsAbsent() throws Exception {
         Path remote = temporaryDirectory.resolve("remote-only.git");
         nativeGit("init", "--bare", remote.toString());
