@@ -13,8 +13,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
-import java.util.OptionalDouble;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
@@ -43,6 +43,8 @@ final class BackupOperationScreen<T> extends Screen {
     private final OperationStarter<T> starter;
 
     private final SuccessHandler<T> successHandler;
+
+    private final AtomicReference<ProgressState> queuedProgress = new AtomicReference<>();
 
     private ProgressState progress;
 
@@ -230,19 +232,33 @@ final class BackupOperationScreen<T> extends Screen {
         }));
     }
 
+    /**
+     * Progress events arrive once per copied file; only the newest one matters. The
+     * reference coalesces bursts into at most one queued render-thread task, and the
+     * widgets rebuild only when the phase message changes — the bar itself reads
+     * {@link #progress} every frame without a rebuild.
+     */
     private void onProgress(long token, dev.ishaanko.worldarchive.core.OperationProgress value) {
         if (value == null) {
             return;
         }
-        ProgressState updated = ProgressState.from(value);
-        minecraft.execute(() -> {
-            if (!accepts(token) || !running) {
-                return;
-            }
-            progress = updated;
-            presentation = Presentation.running(progressMessage(updated));
+        if (queuedProgress.getAndSet(ProgressState.from(value)) == null) {
+            minecraft.execute(() -> applyQueuedProgress(token));
+        }
+    }
+
+    private void applyQueuedProgress(long token) {
+        ProgressState updated = queuedProgress.getAndSet(null);
+        if (updated == null || !accepts(token) || !running) {
+            return;
+        }
+        boolean messageChanged = progress == null
+                || !progress.message().equals(updated.message());
+        progress = updated;
+        if (messageChanged) {
+            presentation = Presentation.running(updated.message());
             rebuildIfInitialized();
-        });
+        }
     }
 
     private void finishFailure(long token, Throwable throwable) {
@@ -323,14 +339,6 @@ final class BackupOperationScreen<T> extends Screen {
             default -> throw new IllegalStateException("Unknown backup status: " + summary.status());
         };
         return new Presentation(summary.headline(), details, color);
-    }
-
-    private static String progressMessage(ProgressState state) {
-        OptionalDouble fraction = state.fraction();
-        if (fraction.isPresent()) {
-            return state.message() + " (" + Math.round(fraction.orElseThrow() * 100) + "%)";
-        }
-        return state.message();
     }
 
     private static String safeFailure(Throwable throwable) {

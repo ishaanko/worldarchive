@@ -26,6 +26,7 @@ import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.storage.LevelResource;
 
 /** Owns integrated-server save gates, scheduling, and live-world lifecycle state. */
@@ -232,6 +233,8 @@ final class RuntimeLifecycle {
             }
             stoppingServer = integrated;
         }
+        // A capture may still hold saving paused; the shutdown save must always write.
+        setLevelSaving(integrated, true);
         BackupWorldContext world = resolveStoppingWorld(integrated);
         if (world == null) {
             return;
@@ -341,7 +344,7 @@ final class RuntimeLifecycle {
             }
         }
         if (requested != null) {
-            captureAndDispatch(requested);
+            captureAndDispatchAsync(requested, true);
         }
     }
 
@@ -388,7 +391,7 @@ final class RuntimeLifecycle {
             case EXIT_READY -> {
                 runtime.enqueueWorldExitNotice(
                         BackgroundBackupWarnings.worldExitStartedNotice());
-                captureAndDispatch(stopped.value().orElseThrow());
+                captureAndDispatchAsync(stopped.value().orElseThrow(), false);
             }
             default -> throw new IllegalStateException(
                     "Unknown live-save stop outcome");
@@ -489,6 +492,45 @@ final class RuntimeLifecycle {
                             "The requested save produced no matching capture event"));
                 }
             }
+        }
+    }
+
+    /**
+     * Runs the world capture on a worker thread so the server thread keeps ticking.
+     * While a running server is captured, level saving is paused so the on-disk world
+     * cannot change under the copy; {@link #serverStopping} force-resumes saving so a
+     * shutdown save is never skipped.
+     */
+    private void captureAndDispatchAsync(PendingLiveBackup pending, boolean pauseSaving) {
+        if (pauseSaving) {
+            setLevelSaving(pending.server(), false);
+        }
+        runtime.submit(() -> {
+            captureAndDispatch(pending);
+            return null;
+        }).whenComplete((ignored, throwable) -> {
+            if (pauseSaving) {
+                resumeLevelSaving(pending.server());
+            }
+            if (throwable != null) {
+                pending.fail(WorldArchiveRuntime.safeFailure(
+                        throwable,
+                        "World capture could not be started"));
+            }
+        });
+    }
+
+    private void resumeLevelSaving(MinecraftServer server) {
+        try {
+            server.execute(() -> setLevelSaving(server, true));
+        } catch (RejectedExecutionException exception) {
+            // The server already stopped; serverStopping resumed saving before its final save.
+        }
+    }
+
+    private static void setLevelSaving(MinecraftServer server, boolean enabled) {
+        for (ServerLevel level : server.getAllLevels()) {
+            level.noSave = !enabled;
         }
     }
 
