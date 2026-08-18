@@ -24,12 +24,12 @@ jobs:
       # passive git data. Do not add dependency installs, build/test scripts,
       # or cache actions here.
       - name: Checkout base repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0
 
       - name: Sync PR size label
-        uses: actions/github-script@v8
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
         with:
           script: |
             const { execFileSync } = require("node:child_process");
