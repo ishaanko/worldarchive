@@ -20,6 +20,7 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicInteger;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
@@ -44,6 +45,8 @@ final class RuntimeLifecycle {
 
     private final RetryGate<IntegratedServer> worldResolutionRetries =
             new RetryGate<>(WORLD_RESOLUTION_RETRY_DELAY);
+
+    private final AtomicInteger savingPauses = new AtomicInteger();
 
     private IntegratedServer activeServer;
 
@@ -503,6 +506,7 @@ final class RuntimeLifecycle {
      */
     private void captureAndDispatchAsync(PendingLiveBackup pending, boolean pauseSaving) {
         if (pauseSaving) {
+            savingPauses.incrementAndGet();
             setLevelSaving(pending.server(), false);
         }
         runtime.submit(() -> {
@@ -520,7 +524,11 @@ final class RuntimeLifecycle {
         });
     }
 
+    /** Overlapping captures each pause saving; only the last one to finish resumes it. */
     private void resumeLevelSaving(MinecraftServer server) {
+        if (savingPauses.decrementAndGet() > 0) {
+            return;
+        }
         try {
             server.execute(() -> setLevelSaving(server, true));
         } catch (RejectedExecutionException exception) {
