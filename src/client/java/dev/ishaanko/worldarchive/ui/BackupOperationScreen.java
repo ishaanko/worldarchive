@@ -259,7 +259,7 @@ final class BackupOperationScreen<T> extends Screen {
         List<String> details = retryAvailable
                 ? List.of(
                         failure,
-                        "Fix: pause world activity, wait for saves to settle, then choose Retry.")
+                        "The world changed while it was being copied. Wait a moment, then choose Retry.")
                 : List.of(failure);
         presentation = new Presentation(
                 "Operation failed",
