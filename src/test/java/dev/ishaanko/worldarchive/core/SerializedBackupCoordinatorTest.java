@@ -463,12 +463,17 @@ final class SerializedBackupCoordinatorTest {
     void sourceMutationFailsBeforeAnyDestinationOrCatalogPublication() throws Exception {
         Path world = Files.createDirectory(temporaryDirectory.resolve("world-mutation"));
         Files.writeString(world.resolve("level.dat"), "before", StandardCharsets.UTF_8);
+        java.util.concurrent.atomic.AtomicInteger mutations =
+                new java.util.concurrent.atomic.AtomicInteger();
         FileSystemBackupCaptureFactory captures = new FileSystemBackupCaptureFactory(
                 temporaryDirectory.resolve("captures-mutation"),
                 new SourceCaptureObserver() {
                     @Override
                     public void afterFileCopy(Path relativePath) throws IOException {
-                        Files.writeString(world.resolve(relativePath), "after", StandardCharsets.UTF_8);
+                        Files.writeString(
+                                world.resolve(relativePath),
+                                "after-" + mutations.incrementAndGet(),
+                                StandardCharsets.UTF_8);
                     }
                 });
         InMemoryCatalog catalog = new InMemoryCatalog();
