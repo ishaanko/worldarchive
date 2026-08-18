@@ -29,9 +29,13 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** The blocking Git snapshot operations behind {@link GitBackupBackend}'s async entry points. */
 final class GitSnapshotOperations {
+    private static final Logger LOGGER = LoggerFactory.getLogger("WorldArchive");
+
     private static final Pattern SNAPSHOT_REF = Pattern.compile("refs/heads/worldarchive/([0-9a-f-]{36})/([0-9a-f-]{36})");
 
     private final GitBackendSettings settings;
@@ -467,6 +471,7 @@ final class GitSnapshotOperations {
                 return false;
             }
             deleteRemoteSnapshotRefs(remoteRefs, remoteRefs.getFirst().commitId());
+            retargetDefaultBranchAfterDelete(worldId, remoteRefs.getFirst().commitId());
             return true;
         }
         if (settings.remoteUrl().isPresent()) {
@@ -475,6 +480,7 @@ final class GitSnapshotOperations {
                     worldId,
                     backupId,
                     Optional.of(snapshot.committedAt())), current.get());
+            retargetDefaultBranchAfterDelete(worldId, current.get());
         }
         refs.deleteExact(refName, current.get());
         return true;
@@ -599,13 +605,21 @@ final class GitSnapshotOperations {
                 Map.of(),
                 new byte[0]);
         legacyMigration.migrateLegacyRemoteRefs(snapshot.worldId());
-        publishDefaultBranch(snapshot);
+        try {
+            publishDefaultBranch(snapshot);
+        } catch (IOException | GitStorageException exception) {
+            // The snapshot branch is the source of truth; the default branch is a
+            // browsing convenience that branch protection may block without making
+            // the upload any less complete.
+            LOGGER.warn(
+                    "Remote default branch could not be updated: {}",
+                    safeMessage(exception));
+        }
     }
 
     /**
-     * Points the remote default branch at the newest backup. The remote repository
-     * is dedicated to this world's backups, and histories legitimately diverge when
-     * a world folder moves between machines, so the update is forced.
+     * Points the remote default branch at the given backup. Histories legitimately
+     * diverge when a world folder moves between machines, so the update is forced.
      */
     private void publishDefaultBranch(GitSnapshot snapshot)
             throws IOException, InterruptedException, GitStorageException {
@@ -613,10 +627,59 @@ final class GitSnapshotOperations {
                 List.of(
                         "--git-dir=" + settings.repository(),
                         "push",
-                        "--force",
                         "--porcelain",
                         settings.remoteName(),
-                        snapshot.refName() + ":" + GitRemoteSnapshotRef.defaultBranch()),
+                        "+" + snapshot.refName() + ":" + GitRemoteSnapshotRef.DEFAULT_BRANCH),
+                settings.repository(),
+                Map.of(),
+                new byte[0]);
+    }
+
+    /**
+     * A deleted backup must stop being reachable from the remote. When the default
+     * branch points at the deleted commit, it moves to the newest remaining backup.
+     * Remotes refuse to delete the branch their HEAD points at, so the last deletion
+     * parks the branch on an empty placeholder commit instead. Failures propagate so
+     * the deletion reports honestly that the remote still holds the content.
+     */
+    private void retargetDefaultBranchAfterDelete(WorldId worldId, String deletedCommit)
+            throws IOException, InterruptedException, GitStorageException {
+        Optional<String> remoteMain = refs.resolveRemote(GitRemoteSnapshotRef.DEFAULT_BRANCH);
+        if (remoteMain.isEmpty() || !remoteMain.orElseThrow().equals(deletedCommit)) {
+            return;
+        }
+        Optional<GitSnapshot> newestRemaining = listSnapshotsBlocking(Optional.of(worldId))
+                .stream()
+                .filter(snapshot -> !snapshot.commitId().equals(deletedCommit))
+                .findFirst();
+        if (newestRemaining.isPresent()) {
+            publishDefaultBranch(newestRemaining.orElseThrow());
+            return;
+        }
+        String emptyTree = GitCommands.objectId(commands.checked(
+                List.of("--git-dir=" + settings.repository(), "mktree"),
+                settings.repository(),
+                Map.of(),
+                GitCommand.utf8Input("")).standardOutput());
+        String placeholder = GitCommands.objectId(commands.checked(
+                List.of("--git-dir=" + settings.repository(), "commit-tree", emptyTree),
+                settings.repository(),
+                Map.of(
+                        "GIT_AUTHOR_NAME", "WorldArchive",
+                        "GIT_AUTHOR_EMAIL", "worldarchive@localhost",
+                        "GIT_COMMITTER_NAME", "WorldArchive",
+                        "GIT_COMMITTER_EMAIL", "worldarchive@localhost",
+                        "GIT_AUTHOR_DATE", "1970-01-01T00:00:00Z",
+                        "GIT_COMMITTER_DATE", "1970-01-01T00:00:00Z"),
+                GitCommand.utf8Input("WorldArchive: all backups were deleted"))
+                .standardOutput());
+        commands.checked(
+                List.of(
+                        "--git-dir=" + settings.repository(),
+                        "push",
+                        "--porcelain",
+                        settings.remoteName(),
+                        "+" + placeholder + ":" + GitRemoteSnapshotRef.DEFAULT_BRANCH),
                 settings.repository(),
                 Map.of(),
                 new byte[0]);

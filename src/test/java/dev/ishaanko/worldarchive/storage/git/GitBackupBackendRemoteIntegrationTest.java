@@ -1,6 +1,7 @@
 package dev.ishaanko.worldarchive.storage.git;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -172,6 +173,56 @@ class GitBackupBackendRemoteIntegrationTest extends GitBackupBackendIntegrationT
                     "rev-parse",
                     GitSnapshot.refName(worldId, secondId)).trim();
             assertEquals(Optional.of(secondCommit), remoteRef(remote, "refs/heads/main"));
+
+            // Deleting the newest backup must stop its content being reachable from
+            // main; the last deletion parks main on an empty placeholder commit
+            // because remotes refuse to delete their HEAD branch.
+            assertTrue(await(backend.deleteSnapshot(worldId, secondId)));
+            assertEquals(Optional.of(firstCommit), remoteRef(remote, "refs/heads/main"));
+            assertTrue(await(backend.deleteSnapshot(worldId, firstId)));
+            String placeholder = remoteRef(remote, "refs/heads/main").orElseThrow();
+            assertNotEquals(firstCommit, placeholder);
+            assertNotEquals(secondCommit, placeholder);
+            assertTrue(nativeGit(
+                    "--git-dir=" + remoteSettings.repository(),
+                    "ls-tree",
+                    placeholder).isBlank());
+        }
+    }
+
+    @Test
+    void protectedDefaultBranchDoesNotFailTheSync() throws Exception {
+        Path remote = temporaryDirectory.resolve("protected-main.git");
+        nativeGit("init", "--bare", remote.toString());
+        Path hook = remote.resolve("hooks").resolve("pre-receive");
+        Files.writeString(hook, """
+                #!/bin/sh
+                while read old new ref; do
+                  if [ "$ref" = "refs/heads/main" ]; then
+                    echo "main is protected" >&2
+                    exit 1
+                  fi
+                done
+                exit 0
+                """);
+        assertTrue(hook.toFile().setExecutable(true));
+        Path world = temporaryDirectory.resolve("protected-main-world");
+        Files.createDirectories(world);
+        Files.writeString(world.resolve("level.dat"), "protected", StandardCharsets.UTF_8);
+        WorldId worldId = WorldId.create();
+        BackupId backupId = BackupId.create();
+        GitBackendSettings remoteSettings = settings(Optional.of(remote.toUri().toString()));
+
+        try (GitBackupBackend backend = new GitBackupBackend(remoteSettings)) {
+            DestinationResult result = await(backend.createBackup(
+                    capture(world, worldId, backupId, Instant.now()),
+                    ProgressListener.NO_OP));
+
+            assertEquals(DestinationStatus.SUCCESS, result.status(), result.message().orElse(""));
+            assertEquals(SyncStatus.SYNCED, result.syncStatus());
+            GitSnapshot snapshot = await(backend.listSnapshots(Optional.of(worldId))).getFirst();
+            assertFalse(remoteRef(remote, GitRemoteSnapshotRef.current(snapshot)).isEmpty());
+            assertEquals(Optional.empty(), remoteRef(remote, "refs/heads/main"));
         }
     }
 

@@ -19,9 +19,7 @@ final class GitRemoteSnapshotRef {
     }
 
     /** The remote branch that always tracks the newest backup. */
-    static String defaultBranch() {
-        return "refs/heads/main";
-    }
+    static final String DEFAULT_BRANCH = "refs/heads/main";
 
     static String current(GitSnapshot snapshot) {
         Objects.requireNonNull(snapshot, "snapshot");
