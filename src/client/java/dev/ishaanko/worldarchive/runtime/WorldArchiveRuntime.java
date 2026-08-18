@@ -728,6 +728,14 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
         backgroundBackups.enqueueWorldExitNotice(notice);
     }
 
+    void beginBackupProgress(String message) {
+        backgroundBackups.beginBackupProgress(message);
+    }
+
+    ProgressListener backupProgressListener() {
+        return backgroundBackups.backupProgressListener();
+    }
+
     RuntimeState requireCurrentState() {
         RuntimeState state = stateRegistry.currentOrNull();
         if (state == null || closed.get()) {

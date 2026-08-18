@@ -298,7 +298,7 @@ final class RuntimeLifecycle {
                     state,
                     server,
                     request,
-                    ProgressListener.NO_OP,
+                    runtime.backupProgressListener(),
                     new CompletableFuture<>());
             LiveBackupSaveGate.ExitInstall<PendingLiveBackup> installation;
             synchronized (lock) {
@@ -389,8 +389,8 @@ final class RuntimeLifecycle {
                     new IllegalStateException(
                             "The server stopped before its final save completed"));
             case EXIT_READY -> {
-                runtime.enqueueWorldExitNotice(
-                        BackgroundBackupWarnings.worldExitStartedNotice());
+                runtime.beginBackupProgress(
+                        BackgroundBackupWarnings.worldExitStartedMessage());
                 captureAndDispatchAsync(stopped.value().orElseThrow(), false);
             }
             default -> throw new IllegalStateException(

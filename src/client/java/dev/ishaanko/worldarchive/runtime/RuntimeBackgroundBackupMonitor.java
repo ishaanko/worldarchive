@@ -1,7 +1,9 @@
 package dev.ishaanko.worldarchive.runtime;
 
 import dev.ishaanko.worldarchive.WorldArchiveMetadata;
+import dev.ishaanko.worldarchive.core.ProgressListener;
 import dev.ishaanko.worldarchive.model.BackupResult;
+import dev.ishaanko.worldarchive.ui.model.ProgressState;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -20,7 +22,6 @@ import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.gui.components.toasts.SystemToast;
 import net.minecraft.network.chat.Component;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -48,6 +49,8 @@ final class RuntimeBackgroundBackupMonitor {
             new AtomicReference<>(Optional.empty());
 
     private final AtomicBoolean retainedWarningShown = new AtomicBoolean();
+
+    private final AtomicReference<BackupProgressToast> activeToast = new AtomicReference<>();
 
     RuntimeBackgroundBackupMonitor(
             Minecraft minecraft,
@@ -179,6 +182,32 @@ final class RuntimeBackgroundBackupMonitor {
         }
     }
 
+    /** Shows the persistent progress toast for an unattended backup that just started. */
+    void beginBackupProgress(String message) {
+        if (closed.getAsBoolean()) {
+            return;
+        }
+        minecraft.execute(() -> {
+            if (closed.getAsBoolean()) {
+                return;
+            }
+            BackupProgressToast toast = new BackupProgressToast(minecraft.font, message);
+            activeToast.set(toast);
+            minecraft.gui.toastManager().addToast(toast);
+        });
+    }
+
+    /** Feeds the active progress toast; safe to call from any worker thread. */
+    ProgressListener backupProgressListener() {
+        return progress -> {
+            BackupProgressToast toast = activeToast.get();
+            if (toast != null) {
+                ProgressState state = ProgressState.from(progress);
+                toast.progress(state.message(), state.fraction().orElse(0));
+            }
+        };
+    }
+
     void enqueueWorldExitNotice(
             BackgroundBackupWarnings.ExitNotice notice) {
         if (closed.getAsBoolean()) {
@@ -186,7 +215,7 @@ final class RuntimeBackgroundBackupMonitor {
         }
         minecraft.execute(() -> {
             if (!closed.getAsBoolean()) {
-                showWorldExitNotice(notice);
+                showBackupNotice(notice);
             }
         });
     }
@@ -198,18 +227,18 @@ final class RuntimeBackgroundBackupMonitor {
                 false);
     }
 
-    private void showWorldExitNotice(
-            BackgroundBackupWarnings.ExitNotice notice) {
-        ChatFormatting color = switch (notice.severity()) {
-            case SUCCESS -> ChatFormatting.GREEN;
-            case WARNING -> ChatFormatting.YELLOW;
-            case ERROR -> ChatFormatting.RED;
+    /** Finishes the active progress toast, or shows the outcome on its own toast. */
+    private void showBackupNotice(BackgroundBackupWarnings.ExitNotice notice) {
+        int color = switch (notice.severity()) {
+            case SUCCESS -> 0xFF55FF55;
+            case WARNING -> 0xFFFFFF55;
+            case ERROR -> 0xFFFF5555;
         };
-        SystemToast.addOrUpdate(
-                minecraft.gui.toastManager(),
-                SystemToast.SystemToastId.WORLD_BACKUP,
-                Component.literal("WorldArchive")
-                        .withStyle(ChatFormatting.BOLD),
-                Component.literal(notice.message()).withStyle(color));
+        BackupProgressToast toast = activeToast.getAndSet(null);
+        if (toast == null) {
+            toast = new BackupProgressToast(minecraft.font, notice.message());
+            minecraft.gui.toastManager().addToast(toast);
+        }
+        toast.finish(notice.message(), color);
     }
 }
