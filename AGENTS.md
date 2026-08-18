@@ -17,10 +17,6 @@ This is a backup tool. A bug that corrupts a backup or touches the original worl
 
 Another Git-based Minecraft backup mod exists ("Fast" + "Back", GPL-licensed). This project is an independent Apache-2.0 implementation and must stay one. Never read, copy from, or reference that mod or any GPL code. The `provenanceScan` quality gate fails the build if its name, its package path, or GPL license text appears in an implementation file. Markdown is exempt, which is the only reason this paragraph can exist.
 
-## A note from Ishaan
-
-I build complex things as simple as possible. Use laziness as an engineering virtue: spend effort upfront to find the right abstraction, then let it save time forever. Channel yagni. Do not add machinery for a future that may not come. These instructions are good defaults, not hard rules; my explicit request overrides anything here.
-
 ## Glossary
 
 - **world** — one single-player world directory, identified by a `WorldId` / `WorldIdentity`.
