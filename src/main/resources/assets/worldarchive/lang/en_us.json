@@ -20,7 +20,7 @@
     "screen.worldarchive.settings.more": "More...",
     "screen.worldarchive.settings.no_worlds": "World controls appear here after you open a world once with backups enabled.",
     "screen.worldarchive.settings.page": "Page %s of %s",
-    "screen.worldarchive.settings.path_hint": "Full folder path, for example C:\\Backups",
+    "screen.worldarchive.settings.path_hint": "Full folder path on this computer",
     "screen.worldarchive.settings.remote_name": "Remote name",
     "screen.worldarchive.settings.remote_name_hint": "Usually origin",
     "screen.worldarchive.settings.remote_name_tooltip": "The Git remote name (usually origin). Set each world's repository URL on the Worlds tab.",

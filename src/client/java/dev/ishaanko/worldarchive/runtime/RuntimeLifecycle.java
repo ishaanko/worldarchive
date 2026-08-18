@@ -20,14 +20,12 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.atomic.AtomicInteger;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.storage.LevelResource;
 
 /** Owns integrated-server save gates, scheduling, and live-world lifecycle state. */
@@ -46,7 +44,15 @@ final class RuntimeLifecycle {
     private final RetryGate<IntegratedServer> worldResolutionRetries =
             new RetryGate<>(WORLD_RESOLUTION_RETRY_DELAY);
 
-    private final AtomicInteger savingPauses = new AtomicInteger();
+    // Guarded by lock: which server has autosaving paused for captures, and how
+    // many overlapping captures still hold that pause.
+    private MinecraftServer savingPausedServer;
+
+    private int savingPauses;
+
+    // Guarded by lock: captures still reading the world; new requested saves are
+    // refused while one runs, because a forced save writes even while paused.
+    private int activeCaptures;
 
     private IntegratedServer activeServer;
 
@@ -186,6 +192,10 @@ final class RuntimeLifecycle {
             if (activeServer != server || stoppingServer == server) {
                 return WorldArchiveRuntime.failedStage("The integrated world is closing");
             }
+            if (activeCaptures > 0) {
+                return WorldArchiveRuntime.failedStage(
+                        "A backup is still copying the world; try again shortly");
+            }
             if (!saveGate.queueRequested(server, pending)) {
                 return WorldArchiveRuntime.failedStage(
                         "Another world save is already pending");
@@ -237,7 +247,13 @@ final class RuntimeLifecycle {
             stoppingServer = integrated;
         }
         // A capture may still hold saving paused; the shutdown save must always write.
-        setLevelSaving(integrated, true);
+        synchronized (lock) {
+            if (savingPausedServer == integrated) {
+                savingPausedServer = null;
+                savingPauses = 0;
+            }
+        }
+        integrated.setAutoSave(true);
         BackupWorldContext world = resolveStoppingWorld(integrated);
         if (world == null) {
             return;
@@ -297,12 +313,13 @@ final class RuntimeLifecycle {
                 }
                 return;
             }
+            CompletableFuture<BackupResult> exitResult = new CompletableFuture<>();
             PendingLiveBackup exit = new PendingLiveBackup(
                     state,
                     server,
                     request,
-                    runtime.backupProgressListener(),
-                    new CompletableFuture<>());
+                    runtime.backupProgressListener(exitResult),
+                    exitResult);
             LiveBackupSaveGate.ExitInstall<PendingLiveBackup> installation;
             synchronized (lock) {
                 if (activeServer != server || stoppingServer != server) {
@@ -347,7 +364,7 @@ final class RuntimeLifecycle {
             }
         }
         if (requested != null) {
-            captureAndDispatchAsync(requested, true);
+            captureRunningWorld(requested);
         }
     }
 
@@ -392,9 +409,21 @@ final class RuntimeLifecycle {
                     new IllegalStateException(
                             "The server stopped before its final save completed"));
             case EXIT_READY -> {
+                PendingLiveBackup exit = stopped.value().orElseThrow();
                 runtime.beginBackupProgress(
-                        BackgroundBackupWarnings.worldExitStartedMessage());
-                captureAndDispatchAsync(stopped.value().orElseThrow(), false);
+                        BackgroundBackupWarnings.worldExitStartedMessage(),
+                        exit.result());
+                boolean quitting;
+                synchronized (lock) {
+                    quitting = clientStopping;
+                }
+                if (quitting) {
+                    // Full quit: no tick loop remains to protect, and capturing here
+                    // keeps the copy out of the bounded shutdown wait.
+                    captureAndDispatch(exit);
+                } else {
+                    captureStoppedWorld(exit);
+                }
             }
             default -> throw new IllegalStateException(
                     "Unknown live-save stop outcome");
@@ -435,6 +464,7 @@ final class RuntimeLifecycle {
                     || scheduleState.state() != state
                     || liveWorld == null
                     || activeServer == null
+                    || activeCaptures > 0
                     || !scheduleState.worldId().equals(liveWorld.worldId())
                     || scheduleState.schedule().poll(clock.instant()).isEmpty()
                     || saveGate.hasPending()) {
@@ -499,21 +529,39 @@ final class RuntimeLifecycle {
     }
 
     /**
-     * Runs the world capture on a worker thread so the server thread keeps ticking.
-     * While a running server is captured, level saving is paused so the on-disk world
-     * cannot change under the copy; {@link #serverStopping} force-resumes saving so a
-     * shutdown save is never skipped.
+     * Captures the just-saved running world on a worker thread so the server keeps
+     * ticking. Autosaving is paused while captures run, which stops chunk writes;
+     * a few small files (player data, level.dat) can still be written, and the
+     * capture re-copies itself when that happens. Runs on the server thread.
      */
-    private void captureAndDispatchAsync(PendingLiveBackup pending, boolean pauseSaving) {
-        if (pauseSaving) {
-            savingPauses.incrementAndGet();
-            setLevelSaving(pending.server(), false);
+    private void captureRunningWorld(PendingLiveBackup pending) {
+        synchronized (lock) {
+            if (savingPausedServer != pending.server()) {
+                savingPausedServer = pending.server();
+                savingPauses = 0;
+            }
+            savingPauses++;
+        }
+        pending.server().setAutoSave(false);
+        dispatchCapture(pending, true);
+    }
+
+    private void captureStoppedWorld(PendingLiveBackup pending) {
+        dispatchCapture(pending, false);
+    }
+
+    private void dispatchCapture(PendingLiveBackup pending, boolean resumeSaving) {
+        synchronized (lock) {
+            activeCaptures++;
         }
         runtime.submit(() -> {
             captureAndDispatch(pending);
             return null;
         }).whenComplete((ignored, throwable) -> {
-            if (pauseSaving) {
+            synchronized (lock) {
+                activeCaptures--;
+            }
+            if (resumeSaving) {
                 resumeLevelSaving(pending.server());
             }
             if (throwable != null) {
@@ -526,20 +574,14 @@ final class RuntimeLifecycle {
 
     /** Overlapping captures each pause saving; only the last one to finish resumes it. */
     private void resumeLevelSaving(MinecraftServer server) {
-        if (savingPauses.decrementAndGet() > 0) {
-            return;
+        synchronized (lock) {
+            if (savingPausedServer != server || --savingPauses > 0) {
+                return;
+            }
+            savingPausedServer = null;
         }
-        try {
-            server.execute(() -> setLevelSaving(server, true));
-        } catch (RejectedExecutionException exception) {
-            // The server already stopped; serverStopping resumed saving before its final save.
-        }
-    }
-
-    private static void setLevelSaving(MinecraftServer server, boolean enabled) {
-        for (ServerLevel level : server.getAllLevels()) {
-            level.noSave = !enabled;
-        }
+        // A stopped server silently drops the task; serverStopping already resumed it.
+        server.execute(() -> server.setAutoSave(true));
     }
 
     private void captureAndDispatch(PendingLiveBackup pending) {

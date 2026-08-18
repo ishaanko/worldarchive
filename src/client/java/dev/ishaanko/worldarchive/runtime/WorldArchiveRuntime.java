@@ -724,16 +724,12 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
         backgroundBackups.showRetainedWarning();
     }
 
-    void enqueueWorldExitNotice(BackgroundBackupWarnings.ExitNotice notice) {
-        backgroundBackups.enqueueWorldExitNotice(notice);
+    void beginBackupProgress(String message, Object progressKey) {
+        backgroundBackups.beginBackupProgress(message, progressKey);
     }
 
-    void beginBackupProgress(String message) {
-        backgroundBackups.beginBackupProgress(message);
-    }
-
-    ProgressListener backupProgressListener() {
-        return backgroundBackups.backupProgressListener();
+    ProgressListener backupProgressListener(Object progressKey) {
+        return backgroundBackups.backupProgressListener(progressKey);
     }
 
     RuntimeState requireCurrentState() {
