@@ -15,6 +15,8 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -43,6 +45,17 @@ final class RuntimeLifecycle {
 
     private final RetryGate<IntegratedServer> worldResolutionRetries =
             new RetryGate<>(WORLD_RESOLUTION_RETRY_DELAY);
+
+    // Guarded by lock: which server has autosaving paused for captures, and how
+    // many overlapping captures still hold that pause.
+    private MinecraftServer savingPausedServer;
+
+    private int savingPauses;
+
+    // Guarded by lock: captures still reading each server's world; new requested
+    // saves for that server are refused while one runs, because a forced save
+    // writes even while autosaving is paused.
+    private final Map<MinecraftServer, Integer> activeCaptures = new HashMap<>();
 
     private IntegratedServer activeServer;
 
@@ -182,6 +195,10 @@ final class RuntimeLifecycle {
             if (activeServer != server || stoppingServer == server) {
                 return WorldArchiveRuntime.failedStage("The integrated world is closing");
             }
+            if (capturing(server)) {
+                return WorldArchiveRuntime.failedStage(
+                        "A backup is still copying the world; try again shortly");
+            }
             if (!saveGate.queueRequested(server, pending)) {
                 return WorldArchiveRuntime.failedStage(
                         "Another world save is already pending");
@@ -232,6 +249,14 @@ final class RuntimeLifecycle {
             }
             stoppingServer = integrated;
         }
+        // A capture may still hold saving paused; the shutdown save must always write.
+        synchronized (lock) {
+            if (savingPausedServer == integrated) {
+                savingPausedServer = null;
+                savingPauses = 0;
+            }
+        }
+        integrated.setAutoSave(true);
         BackupWorldContext world = resolveStoppingWorld(integrated);
         if (world == null) {
             return;
@@ -291,12 +316,13 @@ final class RuntimeLifecycle {
                 }
                 return;
             }
+            CompletableFuture<BackupResult> exitResult = new CompletableFuture<>();
             PendingLiveBackup exit = new PendingLiveBackup(
                     state,
                     server,
                     request,
-                    ProgressListener.NO_OP,
-                    new CompletableFuture<>());
+                    runtime.backupProgressListener(exitResult),
+                    exitResult);
             LiveBackupSaveGate.ExitInstall<PendingLiveBackup> installation;
             synchronized (lock) {
                 if (activeServer != server || stoppingServer != server) {
@@ -338,10 +364,14 @@ final class RuntimeLifecycle {
             requested = saveGate.observeRequestedSave(server, flush, force).orElse(null);
             if (requested == null) {
                 saveGate.observeExitSave(server, flush, force);
+            } else {
+                // Counted while still holding the lock that freed the save gate, so
+                // no new save can slip in before the capture registers itself.
+                captureStarted(server);
             }
         }
         if (requested != null) {
-            captureAndDispatch(requested);
+            captureRunningWorld(requested);
         }
     }
 
@@ -386,9 +416,21 @@ final class RuntimeLifecycle {
                     new IllegalStateException(
                             "The server stopped before its final save completed"));
             case EXIT_READY -> {
-                runtime.enqueueWorldExitNotice(
-                        BackgroundBackupWarnings.worldExitStartedNotice());
-                captureAndDispatch(stopped.value().orElseThrow());
+                PendingLiveBackup exit = stopped.value().orElseThrow();
+                runtime.beginBackupProgress(
+                        BackgroundBackupWarnings.worldExitStartedMessage(),
+                        exit.result());
+                boolean quitting;
+                synchronized (lock) {
+                    quitting = clientStopping;
+                }
+                if (quitting) {
+                    // Full quit: no tick loop remains to protect, and capturing here
+                    // keeps the copy out of the bounded shutdown wait.
+                    captureAndDispatch(exit);
+                } else {
+                    captureStoppedWorld(exit);
+                }
             }
             default -> throw new IllegalStateException(
                     "Unknown live-save stop outcome");
@@ -429,6 +471,7 @@ final class RuntimeLifecycle {
                     || scheduleState.state() != state
                     || liveWorld == null
                     || activeServer == null
+                    || capturing(activeServer)
                     || !scheduleState.worldId().equals(liveWorld.worldId())
                     || scheduleState.schedule().poll(clock.instant()).isEmpty()
                     || saveGate.hasPending()) {
@@ -490,6 +533,78 @@ final class RuntimeLifecycle {
                 }
             }
         }
+    }
+
+    /**
+     * Captures the just-saved running world on a worker thread so the server keeps
+     * ticking. Autosaving is paused while captures run, which stops chunk writes;
+     * a few small files (player data, level.dat) can still be written, and the
+     * capture re-copies itself when that happens. Runs on the server thread.
+     */
+    private void captureRunningWorld(PendingLiveBackup pending) {
+        synchronized (lock) {
+            if (savingPausedServer != pending.server()) {
+                savingPausedServer = pending.server();
+                savingPauses = 0;
+            }
+            savingPauses++;
+        }
+        pending.server().setAutoSave(false);
+        dispatchCapture(pending, true);
+    }
+
+    private void captureStoppedWorld(PendingLiveBackup pending) {
+        synchronized (lock) {
+            captureStarted(pending.server());
+        }
+        dispatchCapture(pending, false);
+    }
+
+    /** The caller has already counted this capture via {@link #captureStarted}. */
+    private void dispatchCapture(PendingLiveBackup pending, boolean resumeSaving) {
+        runtime.submit(() -> {
+            captureAndDispatch(pending);
+            return null;
+        }).whenComplete((ignored, throwable) -> {
+            captureFinished(pending.server());
+            if (resumeSaving) {
+                resumeLevelSaving(pending.server());
+            }
+            if (throwable != null) {
+                pending.fail(WorldArchiveRuntime.safeFailure(
+                        throwable,
+                        "World capture could not be started"));
+            }
+        });
+    }
+
+    private void captureStarted(MinecraftServer server) {
+        activeCaptures.merge(server, 1, Integer::sum);
+    }
+
+    private void captureFinished(MinecraftServer server) {
+        synchronized (lock) {
+            // A null result removes the entry, so stopped servers do not linger.
+            activeCaptures.computeIfPresent(
+                    server,
+                    (ignored, count) -> count > 1 ? count - 1 : null);
+        }
+    }
+
+    private boolean capturing(MinecraftServer server) {
+        return activeCaptures.getOrDefault(server, 0) > 0;
+    }
+
+    /** Overlapping captures each pause saving; only the last one to finish resumes it. */
+    private void resumeLevelSaving(MinecraftServer server) {
+        synchronized (lock) {
+            if (savingPausedServer != server || --savingPauses > 0) {
+                return;
+            }
+            savingPausedServer = null;
+        }
+        // A stopped server silently drops the task; serverStopping already resumed it.
+        server.execute(() -> server.setAutoSave(true));
     }
 
     private void captureAndDispatch(PendingLiveBackup pending) {

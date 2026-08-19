@@ -40,7 +40,6 @@ final class GitLegacyRefMigration {
             local.put(snapshot.refName(), snapshot);
         }
         List<String> arguments = new ArrayList<>(List.of(
-                "--git-dir=" + settings.repository(),
                 "push",
                 "--atomic",
                 "--porcelain",
@@ -57,7 +56,7 @@ final class GitLegacyRefMigration {
             arguments.add(snapshot.refName() + ":" + GitRemoteSnapshotRef.current(snapshot));
             arguments.add(":" + entry.getKey());
         }
-        if (arguments.size() > 5) {
+        if (arguments.size() > 4) {
             commands.checked(arguments, settings.repository(), Map.of(), new byte[0]);
         }
     }

@@ -12,19 +12,10 @@ import dev.ishaanko.worldarchive.model.WorldId;
 import dev.ishaanko.worldarchive.model.WorldIdentity;
 import java.io.IOException;
 import java.math.BigDecimal;
-import java.nio.channels.FileChannel;
-import java.nio.channels.FileLock;
 import java.nio.file.Files;
-import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
-import java.nio.file.attribute.BasicFileAttributes;
-import java.nio.file.attribute.FileTime;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.locks.ReentrantLock;
 
 /** Stable, versioned per-world identity with atomic creation and restored-copy provenance. */
 public final class WorldIdentityStore {
@@ -32,16 +23,12 @@ public final class WorldIdentityStore {
 
     private static final String IDENTITY_FILE = "world.json";
 
-    private static final String LOCK_FILE = "world.json.lock";
-
     private static final int MAXIMUM_IDENTITY_BYTES = 4_096;
 
     private static final Gson GSON = new GsonBuilder()
             .setPrettyPrinting()
             .disableHtmlEscaping()
             .create();
-
-    private static final ConcurrentMap<Path, ReentrantLock> JVM_LOCKS = new ConcurrentHashMap<>();
 
     /** Compatibility helper for callers that only need the stable UUID. */
     public WorldId loadOrCreate(Path worldDirectory) throws IOException {
@@ -114,30 +101,8 @@ public final class WorldIdentityStore {
 
     private static <T> T withLock(Path metadata, IdentityOperation<T> operation) throws IOException {
         Path identityFile = metadata.resolve(IDENTITY_FILE);
-        Path lockFile = metadata.resolve(LOCK_FILE);
-        rejectSymlink(identityFile, "World identity file");
-        rejectSymlink(lockFile, "World identity lock file");
-        ReentrantLock jvmLock = JVM_LOCKS.computeIfAbsent(identityFile, ignored -> new ReentrantLock());
-        jvmLock.lock();
-        try {
-            rejectSymlink(identityFile, "World identity file");
-            rejectSymlink(lockFile, "World identity lock file");
-            LockIdentity beforeOpen = ensureLockFile(lockFile);
-            try (FileChannel channel = FileChannel.open(
-                            lockFile,
-                            StandardOpenOption.WRITE,
-                            LinkOption.NOFOLLOW_LINKS)) {
-                LockIdentity afterOpen = readLockIdentity(lockFile);
-                requireSameLock(beforeOpen, afterOpen);
-                try (FileLock ignored = channel.lock()) {
-                    requireSameLock(afterOpen, readLockIdentity(lockFile));
-                    rejectSymlink(identityFile, "World identity file");
-                    return operation.apply(identityFile);
-                }
-            }
-        } finally {
-            jvmLock.unlock();
-        }
+        return new LockedFileStore(identityFile, IOException::new)
+                .withLock(() -> operation.apply(identityFile));
     }
 
     private static WorldIdentity read(Path identityFile) throws IOException {
@@ -185,35 +150,6 @@ public final class WorldIdentityStore {
         }
     }
 
-    private static LockIdentity ensureLockFile(Path lockFile) throws IOException {
-        try {
-            Files.createFile(lockFile);
-        } catch (FileAlreadyExistsException exception) {
-            // The persistent lock already exists; its identity is verified below.
-        }
-        return readLockIdentity(lockFile);
-    }
-
-    private static LockIdentity readLockIdentity(Path lockFile) throws IOException {
-        BasicFileAttributes attributes = Files.readAttributes(
-                lockFile,
-                BasicFileAttributes.class,
-                LinkOption.NOFOLLOW_LINKS);
-        if (attributes.isSymbolicLink() || !attributes.isRegularFile()) {
-            throw new IOException("World identity lock file must be a regular non-symbolic file");
-        }
-        return new LockIdentity(attributes.fileKey(), attributes.creationTime());
-    }
-
-    private static void requireSameLock(LockIdentity expected, LockIdentity actual) throws IOException {
-        boolean same = expected.fileKey() != null || actual.fileKey() != null
-                ? expected.fileKey() != null && expected.fileKey().equals(actual.fileKey())
-                : expected.creationTime().equals(actual.creationTime());
-        if (!same) {
-            throw new IOException("World identity lock file changed while it was being acquired");
-        }
-    }
-
     private static int requiredInteger(JsonObject object, String name) throws IOException {
         JsonElement element = object.get(name);
         if (element == null || !element.isJsonPrimitive() || !element.getAsJsonPrimitive().isNumber()) {
@@ -245,8 +181,5 @@ public final class WorldIdentityStore {
     @FunctionalInterface
     private interface IdentityOperation<T> {
         T apply(Path identityFile) throws IOException;
-    }
-
-    private record LockIdentity(Object fileKey, FileTime creationTime) {
     }
 }

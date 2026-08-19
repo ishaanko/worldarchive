@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.ishaanko.worldarchive.catalog.FileBackupCatalog;
 import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.BackupManifest;
 import dev.ishaanko.worldarchive.model.BackupRecord;
@@ -13,28 +14,36 @@ import dev.ishaanko.worldarchive.model.DestinationResult;
 import dev.ishaanko.worldarchive.model.DestinationType;
 import dev.ishaanko.worldarchive.model.WorldId;
 import dev.ishaanko.worldarchive.storage.zip.ZipBackupStore;
+import java.io.IOException;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class FileBackupImportServicePreviewTest {
     private static final Instant CREATED_AT = Instant.parse("2026-07-22T12:00:00Z");
 
+    @TempDir
+    private Path temporaryDirectory;
+
     @Test
-    void storedPreviewConsidersEveryDiscoveredDestination() {
+    void storedPreviewConsidersEveryDiscoveredDestination() throws IOException {
         BackupManifest manifest = manifest();
         DestinationResult git = DestinationResult.success(DestinationType.GIT, "git-ref");
         DestinationResult zip = DestinationResult.success(DestinationType.ZIP, "backup.zip");
         BackupRecord current = record(manifest, git);
         BackupRecord discovered = record(manifest, git, zip);
+        FileBackupCatalog catalog = new FileBackupCatalog(temporaryDirectory.resolve("catalog.json"));
+        catalog.add(current);
 
         assertEquals(
                 ImportDisposition.MERGE,
-                FileBackupImportService.predict(current, discovered));
+                FileBackupImportService.disposition(catalog.previewMerge(discovered)));
     }
 
     @Test
-    void storedPreviewReportsConflictInAnyDiscoveredDestination() {
+    void storedPreviewReportsConflictInAnyDiscoveredDestination() throws IOException {
         BackupManifest manifest = manifest();
         DestinationResult git = DestinationResult.success(DestinationType.GIT, "git-ref");
         BackupRecord current = record(
@@ -45,10 +54,12 @@ class FileBackupImportServicePreviewTest {
                 manifest,
                 git,
                 DestinationResult.success(DestinationType.ZIP, "different.zip"));
+        FileBackupCatalog catalog = new FileBackupCatalog(temporaryDirectory.resolve("catalog.json"));
+        catalog.add(current);
 
         assertEquals(
                 ImportDisposition.CONFLICT,
-                FileBackupImportService.predict(current, discovered));
+                FileBackupImportService.disposition(catalog.previewMerge(discovered)));
     }
 
     @Test

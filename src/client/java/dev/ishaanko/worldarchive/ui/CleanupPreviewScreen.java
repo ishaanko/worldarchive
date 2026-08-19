@@ -61,8 +61,8 @@ final class CleanupPreviewScreen extends Screen {
         int x = ScreenGeometry.centerX(width, contentWidth);
         addRenderableOnly(Widgets.title(font, x, 9, contentWidth, 20, title));
         String summary = plan.items().isEmpty()
-                ? "No eligible local copies can be removed under this policy."
-                : "Select the exact local copies to remove. Remote Git refs and linked imports are untouched.";
+                ? "Nothing to clean up right now. Your keep settings protect every backup."
+                : "Choose which backups to delete from this computer. Copies on GitHub or in linked folders are not touched.";
         addRenderableOnly(new MultiLineTextWidget(
                         x,
                         31,
@@ -134,13 +134,12 @@ final class CleanupPreviewScreen extends Screen {
                 .sum();
         boolean selectedTargetReachable =
                 Math.max(0, plan.currentBytes() - estimate) <= plan.targetBytes();
-        String total = selected.size() + " backup(s) selected · about "
-                + StorageScreen.bytes(estimate)
-                + " reclaimable";
+        String total = selected.size() + " backup(s) selected · frees about "
+                + StorageScreen.bytes(estimate);
         if (!selectedTargetReachable) {
             total += plan.targetReachable()
-                    ? " · the selected copies keep usage above target"
-                    : " · protected history keeps usage above target";
+                    ? " · still over the limit; select more backups"
+                    : " · still over the limit; the rest is protected";
         }
         addRenderableOnly(new StringWidget(
                 x,
@@ -204,11 +203,11 @@ final class CleanupPreviewScreen extends Screen {
         List<String> artifacts = new java.util.ArrayList<>();
         item.gitRef().ifPresent(ref -> artifacts.add("Git ref: " + ref));
         item.zipArtifactId().ifPresent(id -> artifacts.add("ZIP: " + id));
-        artifacts.add("Estimated reclaim: "
+        artifacts.add("Frees about "
                 + StorageScreen.bytes(item.estimatedReclaimableBytes()));
         artifacts.add(item.removesRestorePoint()
-                ? "This restore point will disappear."
-                : "Another known copy keeps this restore point available.");
+                ? "You cannot restore this backup after cleanup."
+                : "Another copy of this backup still exists.");
         return String.join("\n", artifacts);
     }
 

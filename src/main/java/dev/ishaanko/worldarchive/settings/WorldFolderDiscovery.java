@@ -1,6 +1,5 @@
 package dev.ishaanko.worldarchive.settings;
 
-import dev.ishaanko.worldarchive.config.WorldConfig;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -11,7 +10,6 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
 
 /** Read-only discovery of direct, non-linked Minecraft save directories. */
 public final class WorldFolderDiscovery {
@@ -36,17 +34,6 @@ public final class WorldFolderDiscovery {
         }
         worlds.sort(Comparator.comparing(Path::toString));
         return List.copyOf(worlds);
-    }
-
-    /** Returns configured worlds that still exist as safe saves in the supplied saves folder. */
-    public static List<WorldConfig> availableConfigured(
-            Path savesDirectory,
-            List<WorldConfig> configured) throws IOException {
-        Objects.requireNonNull(configured, "configured");
-        Set<Path> discovered = Set.copyOf(discover(savesDirectory));
-        return configured.stream()
-                .filter(world -> discovered.contains(world.path()))
-                .toList();
     }
 
     /** Identifies normal save paths without accepting mod-owned temporary save roots. */

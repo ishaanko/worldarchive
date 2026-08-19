@@ -4,6 +4,7 @@ import dev.ishaanko.worldarchive.catalog.BackupCatalog;
 import dev.ishaanko.worldarchive.catalog.BackupDeletionRegistry;
 import dev.ishaanko.worldarchive.config.RemoteUrlPolicy;
 import dev.ishaanko.worldarchive.catalog.CatalogMergeResult;
+import dev.ishaanko.worldarchive.catalog.CatalogMergeStatus;
 import dev.ishaanko.worldarchive.core.AsyncTasks;
 import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.BackupManifest;
@@ -332,13 +333,13 @@ public final class FileBackupImportService implements BackupImportService, AutoC
     private ImportPreviewItem previewItem(
             BackupManifest manifest,
             DestinationResult destination) throws IOException {
-        ImportDisposition disposition = predict(manifest, destination);
+        ImportDisposition disposition = disposition(catalog.previewMerge(record(manifest, destination)));
         return previewItem(manifest, destination.destination(), disposition);
     }
 
     private ImportPreviewItem localPreviewItem(BackupRecord record) throws IOException {
         DestinationResult display = record.result().destinations().getFirst();
-        return previewItem(record.manifest(), display.destination(), predict(record));
+        return previewItem(record.manifest(), display.destination(), disposition(catalog.previewMerge(record)));
     }
 
     private static ImportPreviewItem previewItem(
@@ -354,62 +355,13 @@ public final class FileBackupImportService implements BackupImportService, AutoC
         return new ImportPreviewItem(manifest, destination, disposition, detail);
     }
 
-    private ImportDisposition predict(BackupRecord discovered) throws IOException {
-        Optional<BackupRecord> existing = catalog.find(discovered.manifest().backupId());
-        if (existing.isEmpty()) {
-            return ImportDisposition.ADD;
-        }
-        return predict(existing.orElseThrow(), discovered);
-    }
-
-    static ImportDisposition predict(BackupRecord current, BackupRecord discovered) {
-        if (!current.manifest().equals(discovered.manifest())) {
-            return ImportDisposition.CONFLICT;
-        }
-        boolean merge = false;
-        for (DestinationResult destination : discovered.result().destinations()) {
-            Optional<DestinationResult> same = current.result().destinations().stream()
-                    .filter(value -> value.destination() == destination.destination())
-                    .findFirst();
-            if (same.isEmpty()) {
-                merge = true;
-            } else if (!sameArtifact(same.orElseThrow(), destination)) {
-                return ImportDisposition.CONFLICT;
-            }
-        }
-        return merge ? ImportDisposition.MERGE : ImportDisposition.UNCHANGED;
-    }
-
-    private ImportDisposition predict(
-            BackupManifest manifest,
-            DestinationResult destination) throws IOException {
-        Optional<BackupRecord> existing = catalog.find(manifest.backupId());
-        if (existing.isEmpty()) {
-            return ImportDisposition.ADD;
-        }
-        BackupRecord record = existing.orElseThrow();
-        if (!record.manifest().equals(manifest)) {
-            return ImportDisposition.CONFLICT;
-        }
-        Optional<DestinationResult> same = record.result().destinations().stream()
-                .filter(value -> value.destination() == destination.destination())
-                .findFirst();
-        if (same.isEmpty()) {
-            return ImportDisposition.MERGE;
-        }
-        DestinationResult current = same.orElseThrow();
-        if (sameArtifact(current, destination)) {
-            return ImportDisposition.UNCHANGED;
-        }
-        return ImportDisposition.CONFLICT;
-    }
-
-    private static boolean sameArtifact(
-            DestinationResult first,
-            DestinationResult second) {
-        return first.artifactId().equals(second.artifactId())
-                && first.ownership() == second.ownership()
-                && first.importSourceId().equals(second.importSourceId());
+    static ImportDisposition disposition(CatalogMergeStatus status) {
+        return switch (status) {
+            case ADDED -> ImportDisposition.ADD;
+            case MERGED -> ImportDisposition.MERGE;
+            case UNCHANGED -> ImportDisposition.UNCHANGED;
+            case CONFLICT -> ImportDisposition.CONFLICT;
+        };
     }
 
     private static Set<BackupId> validateSelection(PreparedPlan plan, Set<BackupId> selected) {

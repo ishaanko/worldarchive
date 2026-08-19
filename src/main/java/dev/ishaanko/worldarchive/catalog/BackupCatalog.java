@@ -26,6 +26,14 @@ public interface BackupCatalog {
         return merged;
     }
 
+    /** Non-mutating preview of what {@link #merge} would decide, without writing anything. */
+    default CatalogMergeStatus previewMerge(BackupRecord discovered) throws IOException {
+        Optional<BackupRecord> existing = find(discovered.manifest().backupId());
+        return existing.isEmpty()
+                ? CatalogMergeStatus.ADDED
+                : BackupRecordMerger.merge(existing.orElseThrow(), discovered).status();
+    }
+
     Optional<BackupRecord> find(BackupId backupId) throws IOException;
 
     List<BackupRecord> listAll() throws IOException;

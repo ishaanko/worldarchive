@@ -133,34 +133,22 @@ public final class SettingsDraft {
     public static SettingsDraft defaultsKeepingWorlds(WorldArchiveConfig current) {
         Objects.requireNonNull(current, "current");
         WorldArchiveConfig defaults = WorldArchiveConfig.defaults();
-        List<WorldConfig> worlds = current.worlds().stream()
-                .map(world -> new WorldConfig(
-                        world.worldId(),
-                        true,
-                        world.path(),
-                        world.remoteUrl(),
-                        world.zipDestination(),
-                        world.storagePolicy()))
-                .toList();
-        return new SettingsDraft(new WorldArchiveConfig(
-                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
-                defaults.triggers(),
-                new GitDestinationConfig(
-                        defaults.git().enabled(),
-                        current.git().repository(),
-                        defaults.git().remoteName(),
-                        defaults.git().remoteUrl(),
-                        defaults.git().triggers(),
-                        defaults.git().lfsPatterns(),
-                        defaults.git().health(),
-                        current.git().legacyRepository(),
-                        current.git().legacyRemoteUrl()),
-                new ZipDestinationConfig(
-                        defaults.zip().enabled(),
-                        current.zip().destination(),
-                        defaults.zip().triggers(),
-                        defaults.zip().health()),
-                worlds));
+        GitDestinationConfig git = new GitDestinationConfig(
+                defaults.git().enabled(),
+                current.git().repository(),
+                defaults.git().remoteName(),
+                defaults.git().remoteUrl(),
+                defaults.git().triggers(),
+                defaults.git().lfsPatterns(),
+                defaults.git().health(),
+                defaults.git().legacyRepository(),
+                defaults.git().legacyRemoteUrl());
+        ZipDestinationConfig zip = new ZipDestinationConfig(
+                defaults.zip().enabled(),
+                current.zip().destination(),
+                defaults.zip().triggers(),
+                defaults.zip().health());
+        return resetToDefaults(current, enableAllWorlds(current.worlds()), git, zip, defaults.triggers());
     }
 
     public static SettingsDraft defaultsKeepingWorlds(
@@ -168,7 +156,32 @@ public final class SettingsDraft {
             SettingsDefaults defaults) {
         Objects.requireNonNull(current, "current");
         Objects.requireNonNull(defaults, "defaults");
-        List<WorldConfig> worlds = current.worlds().stream()
+        List<WorldConfig> worlds = enableAllWorlds(current.worlds());
+        WorldArchiveConfig reset = defaults.defaultsKeepingWorlds(worlds);
+        return resetToDefaults(current, worlds, reset.git(), reset.zip(), reset.triggers());
+    }
+
+    /**
+     * Applies the shared reset policy: every world force-enabled, and the git destination's
+     * hidden legacy repository/URL carried over from {@code current} regardless of where the
+     * rest of the git and zip destinations were resolved from.
+     */
+    private static SettingsDraft resetToDefaults(
+            WorldArchiveConfig current,
+            List<WorldConfig> worlds,
+            GitDestinationConfig git,
+            ZipDestinationConfig zip,
+            TriggerConfig triggers) {
+        return new SettingsDraft(new WorldArchiveConfig(
+                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
+                triggers,
+                withLegacyGitFields(git, current.git()),
+                zip,
+                worlds));
+    }
+
+    private static List<WorldConfig> enableAllWorlds(List<WorldConfig> worlds) {
+        return worlds.stream()
                 .map(world -> new WorldConfig(
                         world.worldId(),
                         true,
@@ -177,23 +190,21 @@ public final class SettingsDraft {
                         world.zipDestination(),
                         world.storagePolicy()))
                 .toList();
-        WorldArchiveConfig reset = defaults.defaultsKeepingWorlds(worlds);
-        GitDestinationConfig git = reset.git();
-        return new SettingsDraft(new WorldArchiveConfig(
-                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
-                reset.triggers(),
-                new GitDestinationConfig(
-                        git.enabled(),
-                        git.repository(),
-                        git.remoteName(),
-                        git.remoteUrl(),
-                        git.triggers(),
-                        git.lfsPatterns(),
-                        git.health(),
-                        current.git().legacyRepository(),
-                        current.git().legacyRemoteUrl()),
-                reset.zip(),
-                reset.worlds()));
+    }
+
+    private static GitDestinationConfig withLegacyGitFields(
+            GitDestinationConfig fresh,
+            GitDestinationConfig current) {
+        return new GitDestinationConfig(
+                fresh.enabled(),
+                fresh.repository(),
+                fresh.remoteName(),
+                fresh.remoteUrl(),
+                fresh.triggers(),
+                fresh.lfsPatterns(),
+                fresh.health(),
+                current.legacyRepository(),
+                current.legacyRemoteUrl());
     }
 
     /** Builds a config only when fields, permissions, and recursive-destination rules all pass. */
@@ -606,10 +617,10 @@ public final class SettingsDraft {
         return new SettingsProbeRequest(
                 gitEnabled,
                 "git",
-                parseAbsolutePath(gitRepository),
+                SettingsPaths.parseAbsolute(gitRepository),
                 worldRemoteUrls.values().stream().anyMatch(value -> !value.isBlank()),
                 zipEnabled,
-                parseAbsolutePath(zipDestination));
+                SettingsPaths.parseAbsolute(zipDestination));
     }
 
     public void applyHealth(SettingsHealthSnapshot health, Instant checkedAt) {
@@ -635,17 +646,5 @@ public final class SettingsDraft {
     private void resetZipHealth() {
         zipHealth = SettingsHealthSnapshot.unchecked(probeRequest())
                 .zipDestinationHealth(Instant.EPOCH);
-    }
-
-    private static Optional<Path> parseAbsolutePath(String value) {
-        if (value.isBlank()) {
-            return Optional.empty();
-        }
-        try {
-            Path path = Path.of(value);
-            return path.isAbsolute() ? Optional.of(path.normalize()) : Optional.empty();
-        } catch (InvalidPathException exception) {
-            return Optional.empty();
-        }
     }
 }

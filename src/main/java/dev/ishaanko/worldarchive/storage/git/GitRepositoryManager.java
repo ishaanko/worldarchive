@@ -38,7 +38,7 @@ final class GitRepositoryManager {
         }
         GitRepositoryPathGuard.createDirectories(parent);
         if (!Files.exists(settings.repository(), LinkOption.NOFOLLOW_LINKS)) {
-            commands.checked(
+            commands.checkedRaw(
                     List.of(
                             "init",
                             "--bare",
@@ -53,7 +53,6 @@ final class GitRepositoryManager {
         if (settings.isolatedWorldId().isPresent()) {
             commands.checked(
                     List.of(
-                            "--git-dir=" + settings.repository(),
                             "symbolic-ref",
                             "HEAD",
                             "refs/heads/main"),
@@ -68,7 +67,6 @@ final class GitRepositoryManager {
         GitRepositoryPathGuard.requireDirectory(settings.repository());
         GitCommandResult result = commands.checked(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "rev-parse",
                         "--is-bare-repository"),
                 settings.repository(),
@@ -121,7 +119,6 @@ final class GitRepositoryManager {
                 attributes);
         commands.checked(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "lfs",
                         "install",
                         "--local"),
@@ -177,7 +174,6 @@ final class GitRepositoryManager {
             throws IOException, InterruptedException, GitStorageException {
         commands.checked(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "config",
                         "--local",
                         key,

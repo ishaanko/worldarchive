@@ -49,14 +49,14 @@ final class CleanupResultScreen extends Screen {
         if (failure != null) {
             message = failure;
         } else {
-            String text = "Reclaimed "
+            String text = "Freed "
                     + StorageScreen.bytes(result.reclaimedBytes())
-                    + ". Managed storage is now "
+                    + ". Backups now use "
                     + StorageScreen.bytes(result.bytesAfter())
                     + ".";
             if (!result.failures().isEmpty()) {
                 text += " " + result.failures().size()
-                        + " item(s) could not be completed. Completed removals are reflected above.";
+                        + " backup(s) could not be deleted; the rest were deleted.";
             }
             message = Component.literal(text).withStyle(
                     result.failures().isEmpty()

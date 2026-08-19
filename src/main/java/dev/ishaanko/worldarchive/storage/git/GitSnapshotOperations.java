@@ -29,9 +29,13 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** The blocking Git snapshot operations behind {@link GitBackupBackend}'s async entry points. */
 final class GitSnapshotOperations {
+    private static final Logger LOGGER = LoggerFactory.getLogger("WorldArchive");
+
     private static final Pattern SNAPSHOT_REF = Pattern.compile("refs/heads/worldarchive/([0-9a-f-]{36})/([0-9a-f-]{36})");
 
     private final GitBackendSettings settings;
@@ -142,7 +146,6 @@ final class GitSnapshotOperations {
         String prefix = "refs/heads/worldarchive/" + worldId.map(value -> value + "/").orElse("");
         GitCommandResult result = commands.checked(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "for-each-ref",
                         "--sort=-committerdate",
                         "--format=%(refname)%09%(objectname)%09%(committerdate:unix)",
@@ -289,7 +292,6 @@ final class GitSnapshotOperations {
             Files.createDirectory(checkout);
             commands.checked(
                     List.of(
-                            "--git-dir=" + settings.repository(),
                             "read-tree",
                             snapshot.commitId()),
                     checkout,
@@ -297,7 +299,6 @@ final class GitSnapshotOperations {
                     new byte[0]);
             commands.checked(
                     List.of(
-                            "--git-dir=" + settings.repository(),
                             "--work-tree=" + checkout,
                             "checkout-index",
                             "--all",
@@ -387,7 +388,6 @@ final class GitSnapshotOperations {
         try {
             commands.checked(
                     List.of(
-                            "--git-dir=" + settings.repository(),
                             "fetch",
                             "--no-tags",
                             "--no-write-fetch-head",
@@ -400,7 +400,6 @@ final class GitSnapshotOperations {
                     .orElseThrow(() -> new GitStorageException("Git remote did not provide the requested snapshot"));
             commands.checked(
                     List.of(
-                            "--git-dir=" + settings.repository(),
                             "lfs",
                             "fetch",
                             settings.remoteName(),
@@ -466,11 +465,16 @@ final class GitSnapshotOperations {
             if (remoteRefs.isEmpty()) {
                 return false;
             }
+            // Main moves off the deleted commit first: if that is blocked (branch
+            // protection), the deletion fails with nothing half-removed and every
+            // retry starts from the same state.
+            retargetDefaultBranchAfterDelete(remoteRefs.getFirst().commitId());
             deleteRemoteSnapshotRefs(remoteRefs, remoteRefs.getFirst().commitId());
             return true;
         }
         if (settings.remoteUrl().isPresent()) {
             GitSnapshot snapshot = refs.snapshotForCommit(worldId, backupId, current.get());
+            retargetDefaultBranchAfterDelete(current.get());
             deleteRemoteSnapshotRefs(remoteSnapshots.find(
                     worldId,
                     backupId,
@@ -494,7 +498,6 @@ final class GitSnapshotOperations {
             }
         }
         List<String> arguments = new ArrayList<>(List.of(
-                "--git-dir=" + settings.repository(),
                 "push",
                 "--atomic",
                 "--porcelain"));
@@ -579,7 +582,6 @@ final class GitSnapshotOperations {
         repository.configureRemote();
         commands.checked(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "lfs",
                         "push",
                         settings.remoteName(),
@@ -589,7 +591,6 @@ final class GitSnapshotOperations {
                 new byte[0]);
         commands.checked(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "push",
                         "--atomic",
                         "--porcelain",
@@ -599,6 +600,96 @@ final class GitSnapshotOperations {
                 Map.of(),
                 new byte[0]);
         legacyMigration.migrateLegacyRemoteRefs(snapshot.worldId());
+        try {
+            publishDefaultBranch(snapshot);
+        } catch (IOException | GitStorageException exception) {
+            // The snapshot branch is the source of truth; the default branch is a
+            // browsing convenience that branch protection may block without making
+            // the upload any less complete.
+            LOGGER.warn(
+                    "Remote default branch could not be updated: {}",
+                    safeMessage(exception));
+        }
+    }
+
+    /**
+     * Points the remote default branch at the given backup. Histories legitimately
+     * diverge when a world folder moves between machines, so the update is forced.
+     */
+    private void publishDefaultBranch(GitSnapshot snapshot)
+            throws IOException, InterruptedException, GitStorageException {
+        commands.checked(
+                List.of(
+                        "push",
+                        "--porcelain",
+                        settings.remoteName(),
+                        "+" + snapshot.refName() + ":" + GitRemoteSnapshotRef.DEFAULT_BRANCH),
+                settings.repository(),
+                Map.of(),
+                new byte[0]);
+    }
+
+    /**
+     * A deleted backup must stop being reachable from the remote. When the default
+     * branch points at the deleted commit, it moves to the newest snapshot left in
+     * the whole repository (legacy shared repositories hold several worlds).
+     * Remotes refuse to delete the branch their HEAD points at, so the last deletion
+     * parks the branch on an empty placeholder commit instead. Failures propagate so
+     * the deletion reports honestly that the remote still holds the content.
+     */
+    private void retargetDefaultBranchAfterDelete(String deletedCommit)
+            throws IOException, InterruptedException, GitStorageException {
+        Optional<String> remoteMain = refs.resolveRemote(GitRemoteSnapshotRef.DEFAULT_BRANCH);
+        if (remoteMain.isEmpty() || !remoteMain.orElseThrow().equals(deletedCommit)) {
+            return;
+        }
+        try {
+            retargetDefaultBranch(deletedCommit);
+        } catch (IOException | GitStorageException exception) {
+            throw new GitStorageException(
+                    "The remote refused to move its main branch off the deleted backup"
+                            + " (branch protection?). The backup was not deleted because"
+                            + " its content would stay visible on main.",
+                    exception);
+        }
+    }
+
+    private void retargetDefaultBranch(String deletedCommit)
+            throws IOException, InterruptedException, GitStorageException {
+        Optional<GitSnapshot> newestRemaining = listSnapshotsBlocking(Optional.empty())
+                .stream()
+                .filter(snapshot -> !snapshot.commitId().equals(deletedCommit))
+                .findFirst();
+        if (newestRemaining.isPresent()) {
+            publishDefaultBranch(newestRemaining.orElseThrow());
+            return;
+        }
+        String emptyTree = GitCommands.objectId(commands.checked(
+                List.of("mktree"),
+                settings.repository(),
+                Map.of(),
+                GitCommand.utf8Input("")).standardOutput());
+        String placeholder = GitCommands.objectId(commands.checked(
+                List.of("commit-tree", emptyTree),
+                settings.repository(),
+                Map.of(
+                        "GIT_AUTHOR_NAME", "WorldArchive",
+                        "GIT_AUTHOR_EMAIL", "worldarchive@localhost",
+                        "GIT_COMMITTER_NAME", "WorldArchive",
+                        "GIT_COMMITTER_EMAIL", "worldarchive@localhost",
+                        "GIT_AUTHOR_DATE", "1970-01-01T00:00:00Z",
+                        "GIT_COMMITTER_DATE", "1970-01-01T00:00:00Z"),
+                GitCommand.utf8Input("WorldArchive: all backups were deleted"))
+                .standardOutput());
+        commands.checked(
+                List.of(
+                        "push",
+                        "--porcelain",
+                        settings.remoteName(),
+                        "+" + placeholder + ":" + GitRemoteSnapshotRef.DEFAULT_BRANCH),
+                settings.repository(),
+                Map.of(),
+                new byte[0]);
     }
 
     private void rejectRepositoryWorldOverlap(Path worldDirectory) throws GitStorageException {

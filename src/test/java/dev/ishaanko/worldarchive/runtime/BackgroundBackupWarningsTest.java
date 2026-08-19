@@ -58,10 +58,9 @@ final class BackgroundBackupWarningsTest {
                 DestinationResult.failed(DestinationType.GIT, "write failed")));
         BackupResult skipped = result(List.of());
 
-        assertNotice(
+        assertEquals(
                 "Creating backup... Keep Minecraft open until it finishes.",
-                BackgroundBackupWarnings.NoticeSeverity.SUCCESS,
-                BackgroundBackupWarnings.worldExitStartedNotice());
+                BackgroundBackupWarnings.worldExitStartedMessage());
         assertNotice(
                 "Backup finished. You can safely quit Minecraft.",
                 BackgroundBackupWarnings.NoticeSeverity.SUCCESS,

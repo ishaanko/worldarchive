@@ -49,7 +49,6 @@ final class GitHistoryImporter {
             requireBoundedAdvertisedHeads(settings, commands, repository);
             commands.checked(
                     List.of(
-                            "--git-dir=" + temporary,
                             "fetch",
                             "--no-tags",
                             "--no-write-fetch-head",
@@ -87,7 +86,6 @@ final class GitHistoryImporter {
             throws IOException, InterruptedException, GitStorageException {
         List<String> refs = commands.checked(
                 List.of(
-                        "--git-dir=" + repository,
                         "for-each-ref",
                         "--format=%(refname)",
                         IMPORT_REFS),
@@ -103,7 +101,6 @@ final class GitHistoryImporter {
         for (String ref : refs) {
             GitCommandResult history = commands.checked(
                     List.of(
-                            "--git-dir=" + repository,
                             "rev-list",
                             "--reverse",
                             "--topo-order",
@@ -136,7 +133,6 @@ final class GitHistoryImporter {
             String pinnedRef = "refs/worldarchive/candidates/" + candidate.manifest().backupId();
             commands.checked(
                     List.of(
-                            "--git-dir=" + repository,
                             "update-ref",
                             pinnedRef,
                             candidate.commitId()),
@@ -158,7 +154,6 @@ final class GitHistoryImporter {
             throws IOException, InterruptedException {
         GitCommandResult encoded = commands.run(
                 List.of(
-                        "--git-dir=" + repository,
                         "show",
                         commit + ":" + GitBackupBackend.MANIFEST_PATH),
                 repository,

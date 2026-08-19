@@ -16,12 +16,9 @@ import dev.ishaanko.worldarchive.model.SensitiveDataRedactor;
 import dev.ishaanko.worldarchive.model.WorldId;
 import java.io.IOException;
 import java.math.BigDecimal;
-import java.nio.channels.FileChannel;
-import java.nio.channels.FileLock;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
@@ -29,9 +26,6 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.locks.ReentrantLock;
 
 /** Atomic UTF-8 JSON persistence and migration for {@link WorldArchiveConfig}. */
 public final class WorldArchiveConfigStore {
@@ -42,20 +36,15 @@ public final class WorldArchiveConfigStore {
             .disableHtmlEscaping()
             .create();
 
-    private static final ConcurrentMap<Path, ReentrantLock> JVM_LOCKS = new ConcurrentHashMap<>();
-
     private final Path file;
 
-    private final Path lockFile;
-
-    private final ReentrantLock jvmLock;
+    private final LockedFileStore lockedFileStore;
 
     public WorldArchiveConfigStore(Path file) throws IOException {
         Path normalized = file.toAbsolutePath().normalize();
         rejectSymlink(normalized, "Configuration file");
         this.file = PathSafety.canonicalize(normalized);
-        this.lockFile = this.file.resolveSibling(this.file.getFileName() + ".lock");
-        this.jvmLock = JVM_LOCKS.computeIfAbsent(this.file, ignored -> new ReentrantLock());
+        this.lockedFileStore = new LockedFileStore(this.file, ConfigurationException::new);
     }
 
     /** Loads and, when needed, atomically migrates using the complete set of known source worlds. */
@@ -417,28 +406,13 @@ public final class WorldArchiveConfigStore {
         return triggers;
     }
 
-    private <T> T withLock(IoSupplier<T> operation) throws IOException {
-        jvmLock.lock();
-        try {
-            Path parent = file.getParent();
-            if (parent == null) {
-                throw new ConfigurationException("Configuration path has no parent directory");
-            }
-            Files.createDirectories(parent);
-            rejectSymlink(file, "Configuration file");
-            rejectSymlink(lockFile, "Configuration lock file");
-            try (FileChannel channel = FileChannel.open(
-                            lockFile,
-                            StandardOpenOption.CREATE,
-                            StandardOpenOption.WRITE,
-                            LinkOption.NOFOLLOW_LINKS);
-                    FileLock ignored = channel.lock()) {
-                rejectSymlink(file, "Configuration file");
-                return operation.get();
-            }
-        } finally {
-            jvmLock.unlock();
+    private <T> T withLock(LockedFileStore.IoSupplier<T> operation) throws IOException {
+        Path parent = file.getParent();
+        if (parent == null) {
+            throw new ConfigurationException("Configuration path has no parent directory");
         }
+        Files.createDirectories(parent);
+        return lockedFileStore.withLock(operation);
     }
 
     private static JsonObject parseObject(String json) throws ConfigurationException {
@@ -682,10 +656,5 @@ public final class WorldArchiveConfigStore {
         if (Files.isSymbolicLink(path)) {
             throw new ConfigurationException(description + " must not be a symbolic link");
         }
-    }
-
-    @FunctionalInterface
-    private interface IoSupplier<T> {
-        T get() throws IOException;
     }
 }

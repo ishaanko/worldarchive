@@ -27,9 +27,14 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 
-/** Copies a stable world view once into private outside-world staging. */
+/** Copies a stable world view into private outside-world staging. */
 public final class FileSystemBackupCaptureFactory implements BackupCaptureFactory {
     private static final int COPY_BUFFER_BYTES = 64 * 1_024;
+
+    // A live world can write a handful of small files (player data, level.dat,
+    // POI data) even while chunk autosaving is paused. A capture that observed a
+    // change starts over; the writes are rare, so a retry almost always succeeds.
+    private static final int MAXIMUM_CAPTURE_ATTEMPTS = 3;
 
     private final CaptureWorkspace workspace;
 
@@ -75,8 +80,30 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
         Objects.requireNonNull(createdAt, "createdAt");
         Objects.requireNonNull(previousInventory, "previousInventory");
         Objects.requireNonNull(progressListener, "progressListener");
-        requireNotInterrupted();
+        SourceChangedException lastChange = null;
+        for (int attempt = 0; attempt < MAXIMUM_CAPTURE_ATTEMPTS; attempt++) {
+            requireNotInterrupted();
+            try {
+                return captureOnce(
+                        request,
+                        backupId,
+                        createdAt,
+                        previousInventory,
+                        progressListener);
+            } catch (SourceChangedException exception) {
+                lastChange = exception;
+            }
+        }
+        throw lastChange;
+    }
 
+    private CapturedBackup captureOnce(
+            CreateBackupRequest request,
+            BackupId backupId,
+            Instant createdAt,
+            Optional<WorldInventory> previousInventory,
+            CaptureProgressListener progressListener)
+            throws IOException, InterruptedException {
         Path source = request.worldDirectory();
         CaptureWorkspace.Lease lease = workspace.open(source);
         Path staging = lease.path();
@@ -133,7 +160,7 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
             CopyResult copied = copyFile(file.path(), target);
             observer.afterFileCopy(Path.of(file.portablePath()));
             if (copied.size() != file.fingerprint().size()) {
-                throw new IOException(
+                throw new SourceChangedException(
                         "World file changed size while it was being captured: "
                                 + file.portablePath());
             }
@@ -163,7 +190,7 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
             if (captured == null
                     || current.size() != captured.size()
                     || !current.sha256().equals(captured.sha256())) {
-                throw new IOException(
+                throw new SourceChangedException(
                         "World file contents changed while its private capture was being created: "
                                 + file.portablePath());
             }
@@ -288,14 +315,14 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
             if (byteCount != current.byteCount
                     || !directories.equals(current.directories)
                     || files.size() != current.files.size()) {
-                throw new IOException(
+                throw new SourceChangedException(
                         "World tree changed while its private capture was being created");
             }
             for (int index = 0; index < files.size(); index++) {
                 SourceFile expected = files.get(index);
                 SourceFile observed = current.files.get(index);
                 if (!expected.hasSameStableFile(observed)) {
-                    throw new IOException(
+                    throw new SourceChangedException(
                             "World tree changed while its private capture was being created");
                 }
             }
@@ -462,7 +489,7 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
         }
 
         private IOException changedFileException() {
-            return new IOException(
+            return new SourceChangedException(
                     "World file changed while its private capture was being created: "
                             + portablePath);
         }
@@ -517,6 +544,13 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
     }
 
     private record CopyResult(long size, String sha256) {
+    }
+
+    /** The live world wrote a file mid-capture; the capture restarts from scratch. */
+    private static final class SourceChangedException extends IOException {
+        private SourceChangedException(String message) {
+            super(message);
+        }
     }
 
     private enum EntryKind {

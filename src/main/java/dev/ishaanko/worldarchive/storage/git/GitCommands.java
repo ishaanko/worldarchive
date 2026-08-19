@@ -28,7 +28,34 @@ final class GitCommands {
             Path workingDirectory,
             Map<String, String> environment,
             byte[] input) throws IOException, InterruptedException, GitStorageException {
-        GitCommandResult result = run(arguments, workingDirectory, environment, input);
+        return checked(arguments, workingDirectory, environment, input, true);
+    }
+
+    /**
+     * Runs a checked command without injecting {@code --git-dir=}. Only the bootstrap {@code init
+     * --bare} call needs this: it must run before {@code settings.repository()} exists.
+     */
+    GitCommandResult checkedRaw(
+            List<String> arguments,
+            Path workingDirectory,
+            Map<String, String> environment,
+            byte[] input) throws IOException, InterruptedException, GitStorageException {
+        return checked(arguments, workingDirectory, environment, input, false);
+    }
+
+    private GitCommandResult checked(
+            List<String> arguments,
+            Path workingDirectory,
+            Map<String, String> environment,
+            byte[] input,
+            boolean injectGitDir) throws IOException, InterruptedException, GitStorageException {
+        GitCommandResult result = run(
+                arguments,
+                workingDirectory,
+                environment,
+                input,
+                settings.maximumOutputBytes(),
+                injectGitDir);
         if (!result.successful()) {
             throw new GitStorageException(failureMessage(result));
         }
@@ -49,7 +76,8 @@ final class GitCommands {
                 workingDirectory,
                 environment,
                 input,
-                settings.maximumOutputBytes());
+                settings.maximumOutputBytes(),
+                true);
     }
 
     GitCommandResult run(
@@ -58,8 +86,21 @@ final class GitCommands {
             Map<String, String> environment,
             byte[] input,
             int maximumOutputBytes) throws IOException, InterruptedException {
-        List<String> fullArguments = new ArrayList<>(arguments.size() + 1);
+        return run(arguments, workingDirectory, environment, input, maximumOutputBytes, true);
+    }
+
+    private GitCommandResult run(
+            List<String> arguments,
+            Path workingDirectory,
+            Map<String, String> environment,
+            byte[] input,
+            int maximumOutputBytes,
+            boolean injectGitDir) throws IOException, InterruptedException {
+        List<String> fullArguments = new ArrayList<>(arguments.size() + 2);
         fullArguments.add(settings.executable());
+        if (injectGitDir) {
+            fullArguments.add("--git-dir=" + settings.repository());
+        }
         fullArguments.addAll(arguments);
         return runner.run(new GitCommand(
                 fullArguments,

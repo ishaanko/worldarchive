@@ -123,14 +123,8 @@ final class GitSnapshotCreator {
             Map<String, String> environment)
             throws IOException, InterruptedException, GitStorageException {
         List<String> arguments = previousCommit
-                .map(previous -> List.of(
-                        "--git-dir=" + settings.repository(),
-                        "read-tree",
-                        previous))
-                .orElseGet(() -> List.of(
-                        "--git-dir=" + settings.repository(),
-                        "read-tree",
-                        "--empty"));
+                .map(previous -> List.of("read-tree", previous))
+                .orElseGet(() -> List.of("read-tree", "--empty"));
         commands.checked(arguments, workTree, environment, new byte[0]);
     }
 
@@ -149,7 +143,6 @@ final class GitSnapshotCreator {
                 "Staging Git snapshot");
         commands.checked(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "--work-tree=" + workTree,
                         "add",
                         "--all",
@@ -160,7 +153,7 @@ final class GitSnapshotCreator {
                 new byte[0]);
         injectManifest(snapshotManifest, workTree, environment);
         String tree = GitCommands.objectId(commands.checked(
-                List.of("--git-dir=" + settings.repository(), "write-tree"),
+                List.of("write-tree"),
                 workTree,
                 environment,
                 new byte[0]).standardOutput());
@@ -184,7 +177,6 @@ final class GitSnapshotCreator {
         commitEnvironment.put("GIT_COMMITTER_DATE", manifest.createdAt().toString());
         return GitCommands.objectId(commands.checked(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "commit-tree",
                         tree),
                 workTree,
@@ -200,7 +192,6 @@ final class GitSnapshotCreator {
             throws IOException, InterruptedException, GitStorageException {
         String blob = GitCommands.objectId(commands.checked(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "hash-object",
                         "-w",
                         "--stdin"),
@@ -209,7 +200,6 @@ final class GitSnapshotCreator {
                 GitSnapshotManifestCodec.encode(manifest)).standardOutput());
         commands.checked(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "update-index",
                         "--add",
                         "--cacheinfo",

@@ -215,8 +215,12 @@ class WorldGitSnapshotStoreIntegrationTest {
             assertTrue(remoteRef(firstRemote, GitRemoteSnapshotRef.current(secondSnapshot)).isEmpty());
             assertFalse(remoteRef(secondRemote, GitRemoteSnapshotRef.current(secondSnapshot)).isEmpty());
             assertTrue(remoteRef(secondRemote, GitRemoteSnapshotRef.current(firstSnapshot)).isEmpty());
-            assertTrue(remoteRef(firstRemote, "refs/heads/main").isEmpty());
-            assertTrue(remoteRef(secondRemote, "refs/heads/main").isEmpty());
+            assertEquals(
+                    remoteRef(firstRemote, GitRemoteSnapshotRef.current(firstSnapshot)),
+                    remoteRef(firstRemote, "refs/heads/main"));
+            assertEquals(
+                    remoteRef(secondRemote, GitRemoteSnapshotRef.current(secondSnapshot)),
+                    remoteRef(secondRemote, "refs/heads/main"));
         }
     }
 
@@ -262,7 +266,9 @@ class WorldGitSnapshotStoreIntegrationTest {
             assertEquals(
                     firstRemoteCommit,
                     remoteRef(remote, GitRemoteSnapshotRef.current(firstSnapshot)).orElseThrow());
-            assertTrue(remoteRef(remote, "refs/heads/main").isEmpty());
+            assertEquals(
+                    Optional.of(secondRemoteCommit),
+                    remoteRef(remote, "refs/heads/main"));
             assertTrue(remoteRef(store.repositoryFor(worldId), "refs/heads/main").isEmpty());
         } finally {
             executor.shutdownNow();

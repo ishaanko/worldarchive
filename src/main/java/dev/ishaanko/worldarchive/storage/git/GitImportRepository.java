@@ -102,7 +102,6 @@ final class GitImportRepository {
         for (String historyRef : historyRefs) {
             GitCommandResult history = commands.checked(
                     List.of(
-                            "--git-dir=" + settings.repository(),
                             "rev-list",
                             "--reverse",
                             "--first-parent",
@@ -130,7 +129,6 @@ final class GitImportRepository {
         }
         GitCommandResult shared = commands.checked(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "for-each-ref",
                         "--format=%(refname)",
                         "refs/heads/worldarchive-history/"),
@@ -172,7 +170,6 @@ final class GitImportRepository {
             throws IOException, InterruptedException {
         GitCommandResult encoded = commands.run(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "show",
                         commit + ":" + GitBackupBackend.MANIFEST_PATH),
                 settings.repository(),
@@ -228,7 +225,6 @@ final class GitImportRepository {
             throws IOException, InterruptedException, GitStorageException {
         commands.checked(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "fetch",
                         "--no-tags",
                         "--no-write-fetch-head",
@@ -260,7 +256,6 @@ final class GitImportRepository {
         String temporaryRemote = "worldarchive-recovery";
         commands.checked(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "-c",
                         "remote." + temporaryRemote + ".url=" + remoteUrl,
                         "lfs",
@@ -307,7 +302,6 @@ final class GitImportRepository {
             throws IOException, InterruptedException, GitStorageException {
         GitCommandResult result = commands.checked(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "rev-list",
                         "--parents",
                         "--max-count=1",
@@ -322,7 +316,6 @@ final class GitImportRepository {
             throws IOException, InterruptedException, GitStorageException {
         GitCommandResult result = commands.run(
                 List.of(
-                        "--git-dir=" + settings.repository(),
                         "merge-base",
                         "--is-ancestor",
                         ancestor,

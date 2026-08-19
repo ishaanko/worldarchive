@@ -40,10 +40,8 @@ final class BackgroundBackupWarnings {
         };
     }
 
-    static ExitNotice worldExitStartedNotice() {
-        return new ExitNotice(
-                "Creating backup... Keep Minecraft open until it finishes.",
-                NoticeSeverity.SUCCESS);
+    static String worldExitStartedMessage() {
+        return "Creating backup... Keep Minecraft open until it finishes.";
     }
 
     private static Optional<String> warning(
