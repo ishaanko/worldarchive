@@ -7,3 +7,8 @@ updates:
       interval: weekly
     labels:
       - needs-triage
+    groups:
+      # One combined PR per week instead of one PR per action.
+      actions:
+        patterns:
+          - "*"
