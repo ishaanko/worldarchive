@@ -5,7 +5,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.ishaanko.worldarchive.config.WorldIdentityStore;
-import dev.ishaanko.worldarchive.model.WorldId;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
