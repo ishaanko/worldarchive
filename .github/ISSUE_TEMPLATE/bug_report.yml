@@ -1,0 +1,116 @@
+name: Bug report
+description: Report broken behavior, regressions, crashes, or data problems.
+title: "[Bug]: "
+labels:
+  - bug
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for broken behavior, regressions, crashes, or backup/restore problems.
+        Feature requests belong in [Discussions](https://github.com/ishaanko/worldarchive/discussions/categories/ideas).
+        Search existing issues first and keep the report focused on one problem.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: I included enough detail to reproduce or investigate the problem.
+          required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of the mod is affected?
+      options:
+        - Backup capture (manual, on exit, or scheduled)
+        - Git snapshots or remote sync
+        - ZIP archives
+        - Restore, import, or recovery
+        - Cleanup
+        - Settings or UI screens
+        - Build, CI, or release tooling
+        - Docs
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Give a minimal, deterministic procedure.
+      placeholder: |
+        1. Open a single-player world
+        2. Set a scheduled backup interval of 5 minutes
+        3. Exit the world while a backup runs
+        4. Open the backup screen
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      placeholder: The exit backup completes and shows in the backup list.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      placeholder: The backup list shows no new entry and the log shows an error.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: impact
+    attributes:
+      label: Impact
+      description: How bad is this in practice?
+      options:
+        - Data loss or a corrupted backup
+        - Blocks backups or restores completely
+        - Major degradation or frequent failure
+        - Minor bug or occasional failure
+        - Cosmetic issue
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: WorldArchive version
+      description: Mod version, release tag, or commit SHA.
+      placeholder: 0.3.3 or main @ abc1234
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Minecraft version, Fabric Loader and API versions, Java version, Git/Git LFS versions if relevant.
+      placeholder: macOS 15.3, Minecraft 26.2, Fabric Loader 0.19.3, Java 25, Git 2.49
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or stack traces
+      description: Paste the most relevant part of the game log only. Redact remote URLs that contain credentials.
+      render: shell
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Workaround
+      description: If you found a temporary workaround, include it.
+      placeholder: A manual backup after the world loads works correctly.
