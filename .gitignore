@@ -1,7 +1,6 @@
 # Local reference and agent state
 .temp/
 .agent/
-AGENTS.md
 .worktrees/
 
 # Gradle and Java

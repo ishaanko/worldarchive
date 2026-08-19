@@ -21,7 +21,6 @@ def repositoryFilePaths = providers.provider {
     ]
     return repositoryDirectory.asFileTree.matching {
         exclude excludedDirectories
-        exclude 'AGENTS.md'
     }.files
         .findAll { it.isFile() }
         .collect {
