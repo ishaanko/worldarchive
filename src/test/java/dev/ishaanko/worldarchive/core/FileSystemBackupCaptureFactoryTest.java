@@ -28,6 +28,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -255,14 +257,18 @@ final class FileSystemBackupCaptureFactoryTest {
     }
 
     @Test
-    void detectsSourceMutationAndDeletesPrivateStaging() throws Exception {
+    void detectsPersistentSourceMutationAndDeletesPrivateStaging() throws Exception {
         Path world = Files.createDirectory(temporaryDirectory.resolve("world"));
         Files.writeString(world.resolve("level.dat"), "before", StandardCharsets.UTF_8);
         Path captures = temporaryDirectory.resolve("captures");
+        AtomicInteger mutations = new AtomicInteger();
         SourceCaptureObserver mutator = new SourceCaptureObserver() {
             @Override
             public void afterFileCopy(Path relativePath) throws IOException {
-                Files.writeString(world.resolve(relativePath), "after", StandardCharsets.UTF_8);
+                Files.writeString(
+                        world.resolve(relativePath),
+                        "after-" + mutations.incrementAndGet(),
+                        StandardCharsets.UTF_8);
             }
         };
         FileSystemBackupCaptureFactory factory = new FileSystemBackupCaptureFactory(captures, mutator);
@@ -277,6 +283,37 @@ final class FileSystemBackupCaptureFactoryTest {
         assertTrue(Files.isDirectory(captures));
         try (var entries = Files.list(captures)) {
             assertEquals(List.of(), entries.toList());
+        }
+    }
+
+    @Test
+    void oneTimeMidCaptureWriteIsRetriedAndCaptured() throws Exception {
+        Path world = Files.createDirectory(temporaryDirectory.resolve("world-retry"));
+        Files.writeString(world.resolve("a.dat"), "before", StandardCharsets.UTF_8);
+        Files.writeString(world.resolve("b.dat"), "stable", StandardCharsets.UTF_8);
+        AtomicBoolean mutated = new AtomicBoolean();
+        SourceCaptureObserver oneTimeMutator = new SourceCaptureObserver() {
+            @Override
+            public void afterFileCopy(Path relativePath) throws IOException {
+                if (relativePath.equals(Path.of("b.dat"))
+                        && mutated.compareAndSet(false, true)) {
+                    Files.writeString(world.resolve("a.dat"), "after!", StandardCharsets.UTF_8);
+                }
+            }
+        };
+        FileSystemBackupCaptureFactory factory = new FileSystemBackupCaptureFactory(
+                temporaryDirectory.resolve("captures-retry"), oneTimeMutator);
+
+        try (CapturedBackup captured = factory.capture(
+                request(world, BackupTrigger.MANUAL),
+                BackupId.create(),
+                CREATED_AT,
+                Optional.empty(),
+                CaptureProgressListener.NO_OP)) {
+            assertEquals(2, captured.inventory().fileCount());
+            assertEquals(
+                    "after!",
+                    Files.readString(captured.capture().worldDirectory().resolve("a.dat")));
         }
     }
 
@@ -462,11 +499,15 @@ final class FileSystemBackupCaptureFactoryTest {
         Files.writeString(world.resolve("b.dat"), "second", StandardCharsets.UTF_8);
         Path captures = temporaryDirectory.resolve("captures-file-content-final");
         FileTime changedTime = FileTime.from(Instant.parse("2026-07-17T12:04:00Z"));
+        AtomicInteger mutations = new AtomicInteger();
         SourceCaptureObserver mutator = new SourceCaptureObserver() {
             @Override
             public void afterFileCopy(Path relativePath) throws IOException {
                 if (relativePath.equals(Path.of("b.dat"))) {
-                    Files.writeString(first, "after!", StandardCharsets.UTF_8);
+                    Files.writeString(
+                            first,
+                            "chg--" + mutations.incrementAndGet(),
+                            StandardCharsets.UTF_8);
                     Files.setLastModifiedTime(first, changedTime);
                 }
             }
@@ -501,11 +542,15 @@ final class FileSystemBackupCaptureFactoryTest {
         Files.setLastModifiedTime(first, originalTime);
 
         Path captures = temporaryDirectory.resolve("captures-file-content-hidden");
+        AtomicInteger mutations = new AtomicInteger();
         SourceCaptureObserver mutator = new SourceCaptureObserver() {
             @Override
             public void afterFileCopy(Path relativePath) throws IOException {
                 if (relativePath.equals(Path.of("b.dat"))) {
-                    Files.writeString(first, "after!", StandardCharsets.UTF_8);
+                    Files.writeString(
+                            first,
+                            "chg--" + mutations.incrementAndGet(),
+                            StandardCharsets.UTF_8);
                     Files.setLastModifiedTime(first, originalTime);
                 }
             }

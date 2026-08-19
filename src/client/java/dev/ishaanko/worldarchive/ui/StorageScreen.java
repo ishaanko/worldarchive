@@ -1,7 +1,6 @@
 package dev.ishaanko.worldarchive.ui;
 
 import dev.ishaanko.worldarchive.config.StoragePolicy;
-import dev.ishaanko.worldarchive.model.SensitiveDataRedactor;
 import dev.ishaanko.worldarchive.storage.management.StorageForecast;
 import dev.ishaanko.worldarchive.storage.management.StorageOverview;
 import dev.ishaanko.worldarchive.ui.model.ScreenGeometry;
@@ -36,7 +35,7 @@ final class StorageScreen extends Screen {
     private StorageOverview overview;
 
     private Component status =
-            Component.literal("Measuring managed storage…").withStyle(ChatFormatting.GRAY);
+            Component.literal("Checking how much space backups use…").withStyle(ChatFormatting.GRAY);
 
     private String budget = "";
 
@@ -103,8 +102,8 @@ final class StorageScreen extends Screen {
         StoragePolicy policy = overview.policy();
         String total = bytes(overview.totalBytes());
         String budgetLabel = policy.budgetEnabled()
-                ? bytes(policy.budgetBytes())
-                : "No budget";
+                ? "limit " + bytes(policy.budgetBytes())
+                : "no limit set";
         addRenderableOnly(new StringWidget(
                 x,
                 38,
@@ -115,7 +114,7 @@ final class StorageScreen extends Screen {
         String breakdown = "Git " + bytes(overview.gitBytes())
                 + "  ·  ZIP " + bytes(overview.zipBytes());
         if (overview.unmeteredStoragePresent()) {
-            breakdown += "  ·  remote/linked copies unmetered";
+            breakdown += "  ·  copies on GitHub or in linked folders not counted";
         }
         StringWidget breakdownWidget = new StringWidget(
                 x,
@@ -125,7 +124,8 @@ final class StorageScreen extends Screen {
                 Component.literal(breakdown).withStyle(ChatFormatting.GRAY),
                 font);
         breakdownWidget.setTooltip(Tooltip.create(Component.literal(
-                "Counts safe managed file bytes. Git cleanup estimates can be lower because history shares objects.")));
+                "Counts backup files stored on this computer. Git backups share data"
+                        + " between snapshots, so cleanup can free less space than shown.")));
         addRenderableOnly(breakdownWidget);
         Component forecast = Component.literal(forecast(overview.forecast()))
                 .withStyle(overview.cleanupReviewRecommended()
@@ -136,7 +136,7 @@ final class StorageScreen extends Screen {
 
     private void addPolicyFields(int x, int contentWidth) {
         int labelWidth = Math.min(105, contentWidth / 3);
-        addRenderableOnly(Widgets.label(font, x, 106, labelWidth, 20, "Budget (GiB)"));
+        addRenderableOnly(Widgets.label(font, x, 106, labelWidth, 20, "Limit (GiB)"));
         EditBox budgetField = field(
                 x + labelWidth,
                 106,
@@ -146,7 +146,7 @@ final class StorageScreen extends Screen {
                     budget = value;
                     edited = true;
                 });
-        budgetField.setHint(Component.literal("0 disables"));
+        budgetField.setHint(Component.literal("Empty = no limit"));
 
         int gap = 4;
         int fieldWidth = (contentWidth - gap * 2) / 3;
@@ -165,15 +165,16 @@ final class StorageScreen extends Screen {
                 "Monthly",
                 monthly,
                 value -> monthly = value);
-        addRenderableOnly(new StringWidget(
-                x,
-                184,
-                contentWidth,
-                16,
-                Component.literal(
-                                "One story anchor per period; labeled backups are always protected.")
-                        .withStyle(ChatFormatting.GRAY),
-                font));
+        addRenderableOnly(new MultiLineTextWidget(
+                        x,
+                        184,
+                        Component.literal(
+                                        "How many daily, weekly, and monthly backups to keep."
+                                                + " Backups with a label are never deleted.")
+                                .withStyle(ChatFormatting.GRAY),
+                        font)
+                .setMaxWidth(contentWidth)
+                .setMaxRows(2));
     }
 
     private void addCountField(
@@ -232,7 +233,7 @@ final class StorageScreen extends Screen {
         review.active = !busy && overview.policy().budgetEnabled();
         if (!review.active) {
             review.setTooltip(Tooltip.create(Component.literal(
-                    "Set and save a storage budget first")));
+                    "Set and save a storage limit first")));
         }
         addRenderableWidget(review);
         addRenderableWidget(Button.builder(Component.literal("Back"), ignored -> onClose())
@@ -278,9 +279,9 @@ final class StorageScreen extends Screen {
                             monthly = Integer.toString(policy.monthlyCopies());
                         }
                         status = loaded.cleanupReviewRecommended()
-                                ? Component.literal("Storage review recommended")
+                                ? Component.literal("Backups are close to the limit · review cleanup")
                                         .withStyle(ChatFormatting.YELLOW)
-                                : Component.literal("Measured just now")
+                                : Component.literal("Up to date")
                                         .withStyle(ChatFormatting.GRAY);
                     }
                     rebuildWidgets();
@@ -298,7 +299,7 @@ final class StorageScreen extends Screen {
         }
         long token = ++revision;
         busy = true;
-        status = Component.literal("Saving storage policy…").withStyle(ChatFormatting.GRAY);
+        status = Component.literal("Saving…").withStyle(ChatFormatting.GRAY);
         rebuildWidgets();
         facade.saveStoragePolicy(world.worldId(), policy).whenComplete((ignored, throwable) ->
                 minecraft.execute(() -> {
@@ -319,7 +320,7 @@ final class StorageScreen extends Screen {
     private void review() {
         long token = ++revision;
         busy = true;
-        status = Component.literal("Building exact cleanup preview…")
+        status = Component.literal("Preparing cleanup preview…")
                 .withStyle(ChatFormatting.GRAY);
         rebuildWidgets();
         facade.prepareCleanup(world.worldId()).whenComplete((plan, throwable) ->
@@ -357,20 +358,20 @@ final class StorageScreen extends Screen {
                     Integer.parseInt(monthly));
         } catch (ArithmeticException | NumberFormatException exception) {
             throw new IllegalArgumentException(
-                    "Use a valid budget and whole-number retention counts",
+                    "Enter a number for the limit and whole numbers for the keep counts",
                     exception);
         }
     }
 
     private static String forecast(StorageForecast forecast) {
         return switch (forecast.state()) {
-            case DISABLED -> "Set a budget to enable forecasting";
-            case LEARNING -> "Learning growth rate · needs at least 7 days";
-            case STABLE -> "No sustained storage growth detected";
-            case REACHED -> "Configured budget reached";
+            case DISABLED -> "Set a storage limit to see a forecast";
+            case LEARNING -> "Watching how fast backups grow · ready after 7 days";
+            case STABLE -> "Backups are not growing";
+            case REACHED -> "Storage limit reached";
             case ESTIMATED -> "About "
                     + forecast.daysRemaining().orElseThrow()
-                    + " days until the budget";
+                    + " days until backups reach the limit";
         };
     }
 
@@ -396,23 +397,10 @@ final class StorageScreen extends Screen {
     }
 
     static Component failure(Throwable throwable) {
-        Throwable current = throwable == null
+        Throwable safe = throwable == null
                 ? new IllegalStateException("Storage operation returned no result")
                 : throwable;
-        while (current.getCause() != null
-                && (current instanceof java.util.concurrent.CompletionException
-                        || current instanceof java.util.concurrent.ExecutionException)) {
-            current = current.getCause();
-        }
-        String message = current.getMessage();
-        if (message == null || message.isBlank()) {
-            message = current.getClass().getSimpleName();
-        }
-        message = SensitiveDataRedactor.redact(message).replaceAll("[\\p{Cc}\\p{Cf}]", "");
-        if (message.length() > 220) {
-            message = message.substring(0, 219) + "…";
-        }
-        return Component.literal(message).withStyle(ChatFormatting.RED);
+        return Component.literal(FailureMessages.safe(safe, 220)).withStyle(ChatFormatting.RED);
     }
 
     @Override

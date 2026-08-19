@@ -703,7 +703,7 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
         Optional<String> issue = RuntimeStorageSafety.issue(
                 state.config(), worldPaths.snapshotPaths());
         if (stateRegistry.currentOrNull() == state) {
-            storageSafety.refresh(state.config(), worldPaths.snapshotPaths());
+            storageSafety.set(issue);
         }
         return issue;
     }
@@ -724,8 +724,12 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
         backgroundBackups.showRetainedWarning();
     }
 
-    void enqueueWorldExitNotice(BackgroundBackupWarnings.ExitNotice notice) {
-        backgroundBackups.enqueueWorldExitNotice(notice);
+    void beginBackupProgress(String message, Object progressKey) {
+        backgroundBackups.beginBackupProgress(message, progressKey);
+    }
+
+    ProgressListener backupProgressListener(Object progressKey) {
+        return backgroundBackups.backupProgressListener(progressKey);
     }
 
     RuntimeState requireCurrentState() {

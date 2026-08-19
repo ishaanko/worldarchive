@@ -1,7 +1,9 @@
 package dev.ishaanko.worldarchive.runtime;
 
 import dev.ishaanko.worldarchive.WorldArchiveMetadata;
+import dev.ishaanko.worldarchive.core.ProgressListener;
 import dev.ishaanko.worldarchive.model.BackupResult;
+import dev.ishaanko.worldarchive.ui.model.ProgressState;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -11,6 +13,7 @@ import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -20,7 +23,6 @@ import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.gui.components.toasts.SystemToast;
 import net.minecraft.network.chat.Component;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -49,6 +51,11 @@ final class RuntimeBackgroundBackupMonitor {
 
     private final AtomicBoolean retainedWarningShown = new AtomicBoolean();
 
+    // One progress toast per tracked backup, keyed by that backup's result future,
+    // so overlapping backups each finish their own toast.
+    private final ConcurrentMap<Object, BackupProgressToast> activeToasts =
+            new ConcurrentHashMap<>();
+
     RuntimeBackgroundBackupMonitor(
             Minecraft minecraft,
             Path noticeFile,
@@ -74,7 +81,7 @@ final class RuntimeBackgroundBackupMonitor {
         Objects.requireNonNull(result, "result");
         exitWork.add(result);
         result.whenComplete((value, throwable) -> {
-            observeExitResult(value, throwable);
+            observeExitResult(result, value, throwable);
             exitWork.remove(result);
         });
     }
@@ -133,6 +140,13 @@ final class RuntimeBackgroundBackupMonitor {
     }
 
     void observeExitResult(BackupResult result, Throwable throwable) {
+        observeExitResult(null, result, throwable);
+    }
+
+    private void observeExitResult(
+            Object progressKey,
+            BackupResult result,
+            Throwable throwable) {
         if (throwable != null) {
             failureLogger.accept(
                     "World-exit backup did not complete",
@@ -156,7 +170,7 @@ final class RuntimeBackgroundBackupMonitor {
                     exception);
         }
         warning.set(current);
-        enqueueWorldExitNotice(notice);
+        enqueueBackupNotice(progressKey, notice);
     }
 
     void showRetainedWarning() {
@@ -179,14 +193,43 @@ final class RuntimeBackgroundBackupMonitor {
         }
     }
 
-    void enqueueWorldExitNotice(
+    /** Shows the persistent progress toast for an unattended backup that just started. */
+    void beginBackupProgress(String message, Object progressKey) {
+        Objects.requireNonNull(progressKey, "progressKey");
+        if (closed.getAsBoolean()) {
+            return;
+        }
+        minecraft.execute(() -> {
+            if (closed.getAsBoolean()) {
+                return;
+            }
+            BackupProgressToast toast = new BackupProgressToast(minecraft.font, message);
+            activeToasts.put(progressKey, toast);
+            minecraft.gui.toastManager().addToast(toast);
+        });
+    }
+
+    /** Feeds that backup's progress toast; safe to call from any worker thread. */
+    ProgressListener backupProgressListener(Object progressKey) {
+        Objects.requireNonNull(progressKey, "progressKey");
+        return progress -> {
+            BackupProgressToast toast = activeToasts.get(progressKey);
+            if (toast != null) {
+                ProgressState state = ProgressState.from(progress);
+                toast.progress(state.message(), state.fraction());
+            }
+        };
+    }
+
+    private void enqueueBackupNotice(
+            Object progressKey,
             BackgroundBackupWarnings.ExitNotice notice) {
         if (closed.getAsBoolean()) {
             return;
         }
         minecraft.execute(() -> {
             if (!closed.getAsBoolean()) {
-                showWorldExitNotice(notice);
+                showBackupNotice(progressKey, notice);
             }
         });
     }
@@ -198,18 +241,17 @@ final class RuntimeBackgroundBackupMonitor {
                 false);
     }
 
-    private void showWorldExitNotice(
+    /** Finishes that backup's progress toast, or shows the outcome on its own toast. */
+    private void showBackupNotice(
+            Object progressKey,
             BackgroundBackupWarnings.ExitNotice notice) {
-        ChatFormatting color = switch (notice.severity()) {
-            case SUCCESS -> ChatFormatting.GREEN;
-            case WARNING -> ChatFormatting.YELLOW;
-            case ERROR -> ChatFormatting.RED;
-        };
-        SystemToast.addOrUpdate(
-                minecraft.gui.toastManager(),
-                SystemToast.SystemToastId.WORLD_BACKUP,
-                Component.literal("WorldArchive")
-                        .withStyle(ChatFormatting.BOLD),
-                Component.literal(notice.message()).withStyle(color));
+        BackupProgressToast toast = progressKey == null
+                ? null
+                : activeToasts.remove(progressKey);
+        if (toast == null) {
+            toast = new BackupProgressToast(minecraft.font, notice.message());
+            minecraft.gui.toastManager().addToast(toast);
+        }
+        toast.finish(notice.message(), notice.severity());
     }
 }

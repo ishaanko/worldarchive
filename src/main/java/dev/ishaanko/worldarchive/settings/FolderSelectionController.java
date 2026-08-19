@@ -1,6 +1,5 @@
 package dev.ishaanko.worldarchive.settings;
 
-import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.util.Objects;
 import java.util.Optional;
@@ -12,7 +11,7 @@ public final class FolderSelectionController {
     public synchronized Request begin(String currentValue) {
         Objects.requireNonNull(currentValue, "currentValue");
         long requestRevision = ++revision;
-        return new Request(requestRevision, parseInitialDirectory(currentValue));
+        return new Request(requestRevision, SettingsPaths.parseAbsolute(currentValue));
     }
 
     public synchronized void noteManualEdit() {
@@ -40,18 +39,6 @@ public final class FolderSelectionController {
             case FolderSelectionResult.Failed failed ->
                     new Application(true, currentValue, Optional.of(failed.message()));
         };
-    }
-
-    private static Optional<Path> parseInitialDirectory(String value) {
-        if (value.isBlank()) {
-            return Optional.empty();
-        }
-        try {
-            Path path = Path.of(value);
-            return path.isAbsolute() ? Optional.of(path.normalize()) : Optional.empty();
-        } catch (InvalidPathException exception) {
-            return Optional.empty();
-        }
     }
 
     public record Request(long revision, Optional<Path> initialDirectory) {

@@ -76,7 +76,7 @@ final class CleanupConfirmationScreen extends Screen {
                 contentWidth,
                 18,
                 Component.literal(
-                                "These exact local artifacts will disappear. This cannot be undone locally.")
+                                "These backups will be deleted from this computer. This cannot be undone.")
                         .withStyle(ChatFormatting.RED),
                 font));
         int pageSize = Math.max(1, Math.min(6, (height - 142) / 24));
@@ -143,7 +143,7 @@ final class CleanupConfirmationScreen extends Screen {
         next.active = !busy && page + 1 < pageCount;
         addRenderableWidget(next);
         Button clean = Button.builder(
-                        Component.literal("Remove " + items.size() + " Copies")
+                        Component.literal("Delete " + items.size() + " Backup(s)")
                                 .withStyle(ChatFormatting.RED),
                         ignored -> apply())
                 .bounds(x + (width + gap) * 2, buttonY, width, 20)

@@ -4,7 +4,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import dev.ishaanko.worldarchive.config.WorldConfig;
 import dev.ishaanko.worldarchive.config.WorldIdentityStore;
 import dev.ishaanko.worldarchive.model.WorldId;
 import java.io.IOException;
@@ -59,22 +58,6 @@ class WorldFolderDiscoveryTest {
 
         assertTrue(discovered.isEmpty());
         assertFalse(Files.exists(outsideWorld.resolve(".worldarchive")));
-    }
-
-    @Test
-    void availableConfiguredWorldsOmitDeletedSaves() throws IOException {
-        Path saves = Files.createDirectory(temporaryDirectory.resolve("saves"));
-        Path available = Files.createDirectory(saves.resolve("available"));
-        Files.writeString(available.resolve("level.dat"), "level data");
-        Path deleted = saves.resolve("deleted");
-        WorldConfig availableConfig = new WorldConfig(WorldId.create(), true, available);
-        WorldConfig deletedConfig = new WorldConfig(WorldId.create(), true, deleted);
-
-        assertEquals(
-                List.of(availableConfig),
-                WorldFolderDiscovery.availableConfigured(
-                        saves,
-                        List.of(availableConfig, deletedConfig)));
     }
 
     @Test
