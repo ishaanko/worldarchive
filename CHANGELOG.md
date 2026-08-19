@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.3.4 (2026-08-19)
+
+### Added
+
+- A persistent progress toast now shows the state of a world-exit backup, so a
+  backup that runs while you leave a world stays visible until it completes.
+
+### Changed
+
+- Worlds are captured off the server thread, and progress redraws are
+  coalesced. Backups cause less stutter in game.
+- The storage, cleanup, and settings screens use plainer language.
+- The project now has CI, contributing guidelines, and issue and pull request
+  templates on GitHub.
+
+### Fixed
+
+- Backups no longer fail when the world writes files during the capture phase.
+- Autosave stays paused while overlapping captures are in flight, and resumes
+  when the last capture finishes. Overlapping manual, scheduled, and exit
+  backups can no longer let a save run during a capture.
+- A still-running capture from a previous world no longer blocks backups in
+  the next world you open.
+- The remote main branch points at the newest backup after every sync and
+  after a backup deletion. If the remote main branch is protected and cannot
+  be moved off a deleted backup, the deletion fails with a clear message and
+  nothing is removed.
+
 ## 0.3.3 (2026-08-13)
 
 ### Added
