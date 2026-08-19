@@ -16,6 +16,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          # The release-notes step needs the previous tag for a compare link.
+          fetch-depth: 0
 
       - name: Set up JDK 25
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
@@ -29,13 +32,29 @@ jobs:
       - name: Build and check
         run: ./gradlew build
 
-      # Attach the mod jar (not the sources jar) to a GitHub release.
+      # Attach the mod jar (not the sources jar) to a GitHub release. The
+      # release notes are the tag's section from CHANGELOG.md, so keep that
+      # section written for users, in full sentences.
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           jar=$(find build/libs -name '*.jar' ! -name '*-sources.jar' | head -n 1)
           test -n "$jar"
+          version="${GITHUB_REF_NAME#v}"
+          awk -v ver="$version" \
+            '$0 ~ "^## " ver " " { found = 1; next } /^## / { found = 0 } found' \
+            CHANGELOG.md > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "CHANGELOG.md has no section for $version" >&2
+            exit 1
+          fi
+          previous=$(git describe --tags --abbrev=0 "$GITHUB_REF_NAME^" 2>/dev/null || true)
+          if [ -n "$previous" ]; then
+            printf '\n**Full changelog**: %s\n' \
+              "https://github.com/${GITHUB_REPOSITORY}/compare/${previous}...${GITHUB_REF_NAME}" \
+              >> release-notes.md
+          fi
           gh release create "$GITHUB_REF_NAME" "$jar" \
             --title "WorldArchive $GITHUB_REF_NAME" \
-            --generate-notes
+            --notes-file release-notes.md
