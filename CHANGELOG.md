@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- A backup that writes the Git and the ZIP destination together now shows one
+  combined progress. Before, the two destinations reported to the same toast
+  and the bar moved backward.
+- Sync returns immediately when the backup is already synchronized with the
+  remote. The mod no longer verifies and pushes the snapshot again.
+
 ## 0.3.4 (2026-08-19)
 
 ### Added

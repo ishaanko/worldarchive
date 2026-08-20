@@ -459,22 +459,29 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
                 OperationPhase.WRITING,
                 0,
                 captured.capture().manifest().sourceByteCount(),
-                "Writing backup destinations");
+                DestinationProgressAggregator.WRITING_MESSAGE);
+        DestinationProgressAggregator aggregator = new DestinationProgressAggregator(
+                operation.plan.backends().stream().map(BackupBackend::destinationType).toList(),
+                captured.capture().manifest().sourceByteCount());
         List<CompletableFuture<DestinationResult>> outcomes = new ArrayList<>(operation.plan.backends().size());
         for (BackupBackend backend : operation.plan.backends()) {
+            DestinationType expectedDestination = backend.destinationType();
             CompletableFuture<DestinationResult> source;
             try {
                 CompletionStage<DestinationResult> stage = Objects.requireNonNull(
                         backend.createBackup(
                                 captured.capture(),
-                                progress -> forwardDestinationProgress(operation, progress)),
+                                progress -> forwardDestinationProgress(
+                                        operation,
+                                        aggregator,
+                                        expectedDestination,
+                                        progress)),
                         "Backup backend returned a null stage");
                 source = stage.toCompletableFuture();
             } catch (Throwable throwable) {
                 source = CompletableFuture.failedFuture(throwable);
             }
             operation.destinationTasks.add(source);
-            DestinationType expectedDestination = backend.destinationType();
             outcomes.add(source.handle((result, throwable) -> destinationOutcome(
                     expectedDestination,
                     result,
@@ -651,10 +658,28 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
         }
     }
 
+    /**
+     * Reports the progress of one destination.
+     *
+     * <p>While more than one destination writes, the progress of all of them is combined into one
+     * stream. The phase and the message of a single backend must not reach the listeners then,
+     * because a backend that completes first would look like the whole backup is complete.</p>
+     */
     private void forwardDestinationProgress(
             CreateOperation operation,
+            DestinationProgressAggregator aggregator,
+            DestinationType destination,
             OperationProgress progress) {
         if (operation.cancelled.get()) {
+            return;
+        }
+        if (aggregator.aggregates()) {
+            report(
+                    operation,
+                    OperationPhase.WRITING,
+                    aggregator.accept(destination, progress),
+                    aggregator.totalUnits(),
+                    DestinationProgressAggregator.WRITING_MESSAGE);
             return;
         }
         report(
