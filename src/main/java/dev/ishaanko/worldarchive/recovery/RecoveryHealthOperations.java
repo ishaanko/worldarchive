@@ -116,29 +116,38 @@ final class RecoveryHealthOperations {
             if (git.isEmpty()) {
                 return current.result();
             }
+            DestinationResult local = git.orElseThrow();
             OperationId operationId = OperationId.create();
+            // The catalog already knows this snapshot is on the remote. Another verify and push
+            // would repeat all the hashing and network work and change nothing.
+            if (local.status() == DestinationStatus.SUCCESS
+                    && local.syncStatus() == SyncStatus.SYNCED) {
+                RecoverySupport.report(progressListener, RecoverySupport.progress(
+                        operationId, current, BackupOperation.SYNC, OperationPhase.COMPLETE,
+                        1, 1, "Backup is already synchronized"));
+                return current.result();
+            }
             RecoverySupport.report(progressListener, RecoverySupport.progress(
                     operationId, current, BackupOperation.SYNC, OperationPhase.PREPARING,
                     0, 1, "Preparing Git synchronization"));
             DestinationResult synchronizedResult;
             RecoveryDestination adapter = destinations.get(DestinationType.GIT);
             if (adapter == null) {
-                synchronizedResult = pendingSync(git.orElseThrow(),
-                        "Git destination is unavailable", SyncStatus.FAILED);
+                synchronizedResult = pendingSync(
+                        local, "Git destination is unavailable", SyncStatus.FAILED);
             } else {
                 try {
                     cancellation.checkpoint();
-                    synchronizedResult = mergeSync(
-                            git.orElseThrow(), adapter.sync(current, git.orElseThrow()));
+                    synchronizedResult = mergeSync(local, adapter.sync(current, local));
                 } catch (InterruptedException exception) {
                     Thread.currentThread().interrupt();
                     throw exception;
                 } catch (Exception exception) {
-                    synchronizedResult = pendingSync(git.orElseThrow(),
-                            "Git synchronization failed", SyncStatus.FAILED);
+                    synchronizedResult = pendingSync(
+                            local, "Git synchronization failed", SyncStatus.FAILED);
                 }
             }
-            RecoverySupport.DestinationKey key = RecoverySupport.DestinationKey.from(git.orElseThrow());
+            RecoverySupport.DestinationKey key = RecoverySupport.DestinationKey.from(local);
             DestinationResult replacement = synchronizedResult;
             BackupRecord updated = cancellation.mandatoryCommit(() ->
                     RecoverySupport.updateCatalog(catalog, backupId, existing -> existing.stream()

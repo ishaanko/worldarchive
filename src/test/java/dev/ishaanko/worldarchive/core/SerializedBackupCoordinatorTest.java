@@ -42,6 +42,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiFunction;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.function.UnaryOperator;
@@ -602,6 +603,130 @@ final class SerializedBackupCoordinatorTest {
         }
     }
 
+    @Test
+    void combinesTheProgressOfBothDestinationsIntoOneStream() throws Exception {
+        Map<DestinationType, ProgressListener> listeners = new ConcurrentHashMap<>();
+        Map<DestinationType, CompletableFuture<DestinationResult>> releases = new ConcurrentHashMap<>();
+        List<OperationProgress> reported = java.util.Collections.synchronizedList(new ArrayList<>());
+        SerializedBackupCoordinator coordinator = coordinator(
+                new InMemoryCatalog(),
+                new InMemoryInventoryStore(),
+                new FakeCaptureFactory(temporaryDirectory.resolve("captures-combined")),
+                List.of(
+                        pendingBackend(DestinationType.GIT, listeners, releases),
+                        pendingBackend(DestinationType.ZIP, listeners, releases)),
+                BackupCaptureGate.DIRECT,
+                new LockingWorldOperationGate());
+
+        CompletionStage<BackupResult> operation = coordinator.createBackup(
+                request(WorldId.create(), "world-combined", BackupTrigger.MANUAL, Optional.empty()),
+                reported::add);
+        await(() -> listeners.size() == 2);
+        listeners.get(DestinationType.ZIP).onProgress(backendProgress(
+                OperationPhase.WRITING, 900, 1_000, "Writing ZIP backup"));
+        listeners.get(DestinationType.GIT).onProgress(backendProgress(
+                OperationPhase.READING, 3, 6, "Synchronizing Git snapshot"));
+        listeners.get(DestinationType.ZIP).onProgress(backendProgress(
+                OperationPhase.COMPLETE, 1_000, 1_000, "ZIP backup complete"));
+
+        List<OperationProgress> writing = List.copyOf(reported).stream()
+                .dropWhile(progress -> progress.phase() != OperationPhase.WRITING)
+                .toList();
+        assertEquals(
+                List.of(OperationPhase.WRITING),
+                writing.stream().map(OperationProgress::phase).distinct().toList());
+        assertEquals(
+                List.of("Writing backup destinations"),
+                writing.stream().map(OperationProgress::message).distinct().toList());
+        assertEquals(4, writing.size());
+        assertTrue(
+                writing.getLast().completedUnits() > 0,
+                "The combined progress must advance while the destinations write");
+        assertMonotonic(writing);
+
+        releases.get(DestinationType.ZIP).complete(DestinationResult.success(DestinationType.ZIP, "zip"));
+        releases.get(DestinationType.GIT).complete(DestinationResult.success(DestinationType.GIT, "ref"));
+        assertEquals(
+                BackupStatus.SUCCESS,
+                operation.toCompletableFuture().get(5, TimeUnit.SECONDS).status());
+    }
+
+    @Test
+    void oneDestinationKeepsItsOwnProgressAndRedactsTheMessage() throws Exception {
+        Map<DestinationType, ProgressListener> listeners = new ConcurrentHashMap<>();
+        Map<DestinationType, CompletableFuture<DestinationResult>> releases = new ConcurrentHashMap<>();
+        List<OperationProgress> reported = java.util.Collections.synchronizedList(new ArrayList<>());
+        SerializedBackupCoordinator coordinator = coordinator(
+                new InMemoryCatalog(),
+                new InMemoryInventoryStore(),
+                new FakeCaptureFactory(temporaryDirectory.resolve("captures-single")),
+                List.of(pendingBackend(DestinationType.GIT, listeners, releases)),
+                BackupCaptureGate.DIRECT,
+                new LockingWorldOperationGate());
+
+        CompletionStage<BackupResult> operation = coordinator.createBackup(
+                request(WorldId.create(), "world-single", BackupTrigger.MANUAL, Optional.empty()),
+                reported::add);
+        await(() -> listeners.size() == 1);
+        listeners.get(DestinationType.GIT).onProgress(backendProgress(
+                OperationPhase.VERIFYING,
+                3,
+                6,
+                "Pushing to https://user:secret@example.com/world.git"));
+
+        OperationProgress forwarded = reported.getLast();
+        assertEquals(OperationPhase.VERIFYING, forwarded.phase());
+        assertEquals(3, forwarded.completedUnits());
+        assertEquals(6, forwarded.totalUnits());
+        assertEquals(
+                "Pushing to https://[REDACTED]@example.com/world.git",
+                forwarded.message());
+
+        releases.get(DestinationType.GIT).complete(DestinationResult.success(DestinationType.GIT, "ref"));
+        assertEquals(
+                BackupStatus.SUCCESS,
+                operation.toCompletableFuture().get(5, TimeUnit.SECONDS).status());
+    }
+
+    /** Backend that publishes its progress listener and waits for the test to release its result. */
+    private static FakeBackend pendingBackend(
+            DestinationType destination,
+            Map<DestinationType, ProgressListener> listeners,
+            Map<DestinationType, CompletableFuture<DestinationResult>> releases) {
+        return new FakeBackend(destination, (capture, listener) -> {
+            CompletableFuture<DestinationResult> release = new CompletableFuture<>();
+            releases.put(destination, release);
+            listeners.put(destination, listener);
+            return release;
+        });
+    }
+
+    private static OperationProgress backendProgress(
+            OperationPhase phase,
+            long completed,
+            long total,
+            String message) {
+        return new OperationProgress(
+                OperationId.create(),
+                WorldId.create(),
+                Optional.of(BackupId.create()),
+                BackupOperation.CREATE,
+                phase,
+                completed,
+                total,
+                message);
+    }
+
+    private static void assertMonotonic(List<OperationProgress> reported) {
+        long previous = 0;
+        for (OperationProgress progress : reported) {
+            assertTrue(
+                    progress.completedUnits() >= previous,
+                    "Combined progress moved backward to " + progress.completedUnits());
+            previous = progress.completedUnits();
+        }
+    }
+
     private SerializedBackupCoordinator coordinator(
             BackupCatalog catalog,
             WorldInventoryStore inventories,
@@ -698,13 +823,19 @@ final class SerializedBackupCoordinatorTest {
     private static final class FakeBackend implements BackupBackend {
         private final DestinationType destination;
 
-        private final Function<BackupCapture, CompletionStage<DestinationResult>> result;
+        private final BiFunction<BackupCapture, ProgressListener, CompletionStage<DestinationResult>> result;
 
         private final AtomicInteger calls = new AtomicInteger();
 
         private FakeBackend(
                 DestinationType destination,
                 Function<BackupCapture, CompletionStage<DestinationResult>> result) {
+            this(destination, (capture, ignored) -> result.apply(capture));
+        }
+
+        private FakeBackend(
+                DestinationType destination,
+                BiFunction<BackupCapture, ProgressListener, CompletionStage<DestinationResult>> result) {
             this.destination = destination;
             this.result = result;
         }
@@ -724,7 +855,7 @@ final class SerializedBackupCoordinatorTest {
                 BackupCapture capture,
                 ProgressListener progressListener) {
             calls.incrementAndGet();
-            return result.apply(capture);
+            return result.apply(capture, progressListener);
         }
     }
 
