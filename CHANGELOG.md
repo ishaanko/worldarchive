@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- A backup that writes the Git and the ZIP destination together now shows one
+  combined progress. Before, the two destinations reported to the same toast
+  and the bar moved backward.
+
 ## 0.3.4 (2026-08-19)
 
 ### Added
