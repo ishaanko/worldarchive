@@ -2,6 +2,7 @@ package dev.ishaanko.worldarchive.recovery;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -711,6 +712,52 @@ class BackupRecoveryServiceMaintenanceTest extends BackupRecoveryServiceTestSupp
     }
 
     @Test
+    void syncReturnsImmediatelyWhenTheSnapshotIsAlreadySynced() {
+        Fixture fixture = fixture(DestinationType.GIT);
+        BackupRecord synced = gitRecord(fixture, SyncStatus.SYNCED);
+        InMemoryCatalog catalog = new InMemoryCatalog(synced);
+        FakeDestination git = new FakeDestination(DestinationType.GIT, fixture.worldId());
+        BackupRecoveryService service = service(
+                catalog,
+                Map.of(DestinationType.GIT, git),
+                new MutableClock(CREATED_AT.plusSeconds(2)));
+
+        BackupResult result = service.syncBackup(fixture.backupId(), ProgressListener.NO_OP)
+                .toCompletableFuture()
+                .join();
+
+        assertEquals(synced.result(), result);
+        assertEquals(0, git.syncCalls.get());
+        assertSame(synced, catalog.findUnchecked(fixture.backupId()).orElseThrow());
+    }
+
+    @Test
+    void syncStillRunsWhenTheSnapshotIsSuccessfulButNotSynced() {
+        Fixture fixture = fixture(DestinationType.GIT);
+        BackupRecord pending = gitRecord(fixture, SyncStatus.PENDING);
+        InMemoryCatalog catalog = new InMemoryCatalog(pending);
+        FakeDestination git = new FakeDestination(DestinationType.GIT, fixture.worldId());
+        git.syncResult = destination(pending.result(), DestinationType.GIT)
+                .withSync(SyncStatus.SYNCED);
+        BackupRecoveryService service = service(
+                catalog,
+                Map.of(DestinationType.GIT, git),
+                new MutableClock(CREATED_AT.plusSeconds(2)));
+
+        BackupResult result = service.syncBackup(fixture.backupId(), ProgressListener.NO_OP)
+                .toCompletableFuture()
+                .join();
+
+        assertEquals(1, git.syncCalls.get());
+        assertEquals(SyncStatus.SYNCED, destination(result, DestinationType.GIT).syncStatus());
+        assertEquals(
+                SyncStatus.SYNCED,
+                destination(
+                        catalog.findUnchecked(fixture.backupId()).orElseThrow().result(),
+                        DestinationType.GIT).syncStatus());
+    }
+
+    @Test
     void healthMergesConfiguredAndMissingDestinationsDeterministically() {
         Fixture fixture = fixture(DestinationType.ZIP);
         FakeDestination zip = new FakeDestination(DestinationType.ZIP, fixture.worldId());
@@ -728,4 +775,14 @@ class BackupRecoveryServiceMaintenanceTest extends BackupRecoveryServiceTestSupp
         assertEquals(DestinationHealthStatus.HEALTHY, health.get(1).status());
     }
 
+    /** Builds a record whose single successful Git destination carries the given sync state. */
+    private static BackupRecord gitRecord(Fixture fixture, SyncStatus sync) {
+        return new BackupRecord(
+                fixture.record().manifest(),
+                BackupResult.aggregate(
+                        fixture.backupId(),
+                        fixture.worldId(),
+                        List.of(fixture.destination(DestinationType.GIT).withSync(sync)),
+                        fixture.record().result().completedAt()));
+    }
 }
