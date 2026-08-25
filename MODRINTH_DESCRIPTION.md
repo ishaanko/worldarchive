@@ -26,7 +26,7 @@ WorldArchive never deletes backups on its own. Guided cleanup shows a preview an
 
 - Minecraft 26.2
 - Fabric Loader 0.19.3 or newer
-- Fabric API 0.157.0+26.2
+- Fabric API 0.157.0 or newer
 - Mod Menu 20.0.1 or newer
 - Java 25
 
