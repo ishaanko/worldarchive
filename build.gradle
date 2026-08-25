@@ -50,8 +50,7 @@ dependencies {
 
 processResources {
     def resourceProperties = [
-        version: project.version,
-        fabric_api_version: project.fabric_api_version
+        version: project.version
     ]
     inputs.properties resourceProperties
 
