@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.5.1 (2026-08-24)
+
+### Fixed
+
+- The mod now accepts Fabric API 0.157.0 or newer. Before, it required the
+  exact Fabric API version it was built with, so each Fabric API update
+  stopped the mod from loading until a new WorldArchive release.
+
 ## 0.3.5 (2026-08-22)
 
 ### Changed
