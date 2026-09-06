@@ -838,6 +838,33 @@ class BackupRecoveryServiceMaintenanceTest extends BackupRecoveryServiceTestSupp
     }
 
     @Test
+    void deleteBackupsHandsBackATokenPairedWithTheWrongBackup() {
+        WorldId worldId = WorldId.create();
+        Fixture first = fixture(worldId, DestinationType.ZIP);
+        Fixture second = fixture(worldId, DestinationType.ZIP);
+        FakeDestination zip = new FakeDestination(DestinationType.ZIP, worldId);
+        InMemoryCatalog catalog = new InMemoryCatalog(first.record(), second.record());
+        BackupRecoveryService service = service(
+                catalog, Map.of(DestinationType.ZIP, zip), Clock.systemUTC());
+        DeleteBackupRequest valid = prepared(service, first);
+        DeleteBackupRequest mismatched = new DeleteBackupRequest(
+                second.backupId(), prepared(service, second).confirmationToken());
+        DeleteBackupRequest wrongBackup = new DeleteBackupRequest(
+                first.backupId(), mismatched.confirmationToken());
+
+        assertRecoveryFailure(() -> service.deleteBackups(
+                        List.of(valid, wrongBackup), ProgressListener.NO_OP)
+                .toCompletableFuture().join());
+        assertEquals(0, zip.deleteCalls.get());
+
+        List<BackupResult> retried = service.deleteBackups(
+                        List.of(valid, mismatched), ProgressListener.NO_OP)
+                .toCompletableFuture().join();
+        assertTrue(retried.stream().allMatch(result -> result.status() == BackupStatus.SUCCESS));
+        assertTrue(catalog.records.isEmpty());
+    }
+
+    @Test
     void deleteBackupsReportsOneFailedBackupWithoutStoppingTheOthers() {
         WorldId worldId = WorldId.create();
         Fixture kept = fixture(worldId, DestinationType.ZIP);
