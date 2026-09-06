@@ -785,4 +785,115 @@ class BackupRecoveryServiceMaintenanceTest extends BackupRecoveryServiceTestSupp
                         List.of(fixture.destination(DestinationType.GIT).withSync(sync)),
                         fixture.record().result().completedAt()));
     }
+
+    @Test
+    void deleteBackupsRemovesEveryConfirmedBackupInRequestOrder() {
+        WorldId worldId = WorldId.create();
+        Fixture first = fixture(worldId, DestinationType.ZIP);
+        Fixture second = fixture(worldId, DestinationType.GIT, DestinationType.ZIP);
+        FakeDestination git = new FakeDestination(DestinationType.GIT, worldId);
+        FakeDestination zip = new FakeDestination(DestinationType.ZIP, worldId);
+        InMemoryCatalog catalog = new InMemoryCatalog(first.record(), second.record());
+        BackupRecoveryService service = service(
+                catalog, destinationMap(git, zip), Clock.systemUTC());
+
+        List<BackupResult> results = service.deleteBackups(
+                        List.of(prepared(service, second), prepared(service, first)),
+                        ProgressListener.NO_OP)
+                .toCompletableFuture().join();
+
+        assertEquals(List.of(second.backupId(), first.backupId()),
+                results.stream().map(BackupResult::backupId).toList());
+        assertTrue(results.stream().allMatch(result -> result.status() == BackupStatus.SUCCESS));
+        assertTrue(catalog.records.isEmpty());
+        assertEquals(1, git.deleteCalls.get());
+        assertEquals(2, zip.deleteCalls.get());
+    }
+
+    @Test
+    void deleteBackupsDeletesNothingWhenOneConfirmationIsInvalid() {
+        WorldId worldId = WorldId.create();
+        Fixture first = fixture(worldId, DestinationType.ZIP);
+        Fixture second = fixture(worldId, DestinationType.ZIP);
+        FakeDestination zip = new FakeDestination(DestinationType.ZIP, worldId);
+        InMemoryCatalog catalog = new InMemoryCatalog(first.record(), second.record());
+        BackupRecoveryService service = service(
+                catalog, Map.of(DestinationType.ZIP, zip), Clock.systemUTC());
+        DeleteBackupRequest valid = prepared(service, first);
+        DeleteBackupRequest forged = new DeleteBackupRequest(
+                second.backupId(), dev.ishaanko.worldarchive.core.OperationId.create());
+
+        assertRecoveryFailure(() -> service.deleteBackups(
+                        List.of(valid, forged), ProgressListener.NO_OP)
+                .toCompletableFuture().join());
+
+        assertEquals(0, zip.deleteCalls.get());
+        assertEquals(2, catalog.records.size());
+    }
+
+    @Test
+    void deleteBackupsReportsOneFailedBackupWithoutStoppingTheOthers() {
+        WorldId worldId = WorldId.create();
+        Fixture kept = fixture(worldId, DestinationType.ZIP);
+        Fixture vanished = fixture(worldId, DestinationType.ZIP);
+        FakeDestination zip = new FakeDestination(DestinationType.ZIP, worldId);
+        InMemoryCatalog catalog = new InMemoryCatalog(kept.record(), vanished.record());
+        BackupRecoveryService service = service(
+                catalog, Map.of(DestinationType.ZIP, zip), Clock.systemUTC());
+        DeleteBackupRequest keptRequest = prepared(service, kept);
+        DeleteBackupRequest vanishedRequest = prepared(service, vanished);
+        catalog.records.remove(vanished.backupId());
+
+        List<BackupResult> results = service.deleteBackups(
+                        List.of(keptRequest, vanishedRequest), ProgressListener.NO_OP)
+                .toCompletableFuture().join();
+
+        assertEquals(BackupStatus.SUCCESS, results.get(0).status());
+        assertEquals(BackupStatus.FAILED, results.get(1).status());
+        assertEquals(vanished.backupId(), results.get(1).backupId());
+        assertTrue(results.get(1).destinations().getFirst().message().orElseThrow()
+                .contains("not found"));
+        assertTrue(catalog.records.isEmpty());
+        assertEquals(1, zip.deleteCalls.get());
+    }
+
+    @Test
+    void deleteBackupsRunsSameWorldDeletionsConcurrently() throws Exception {
+        WorldId worldId = WorldId.create();
+        Fixture first = fixture(worldId, DestinationType.ZIP);
+        Fixture second = fixture(worldId, DestinationType.ZIP);
+        FakeDestination zip = new FakeDestination(DestinationType.ZIP, worldId);
+        zip.deletionBlock = new BlockingStep();
+        InMemoryCatalog catalog = new InMemoryCatalog(first.record(), second.record());
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            BackupRecoveryService service = service(
+                    catalog,
+                    Map.of(DestinationType.ZIP, zip),
+                    Clock.systemUTC(),
+                    RestoredWorldMetadataFinalizer.NO_OP,
+                    executor);
+            List<DeleteBackupRequest> requests = List.of(
+                    prepared(service, first), prepared(service, second));
+
+            Future<List<BackupResult>> deletion = service.deleteBackups(
+                    requests, ProgressListener.NO_OP).toCompletableFuture();
+            zip.deletionBlock.awaitEntered();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (zip.deleteCalls.get() < 2 && System.nanoTime() < deadline) {
+                Thread.sleep(5);
+            }
+            assertEquals(2, zip.deleteCalls.get(), "second deletion waited for the first");
+            zip.deletionBlock.release();
+
+            List<BackupResult> results = deletion.get(5, TimeUnit.SECONDS);
+            assertTrue(results.stream().allMatch(result -> result.status() == BackupStatus.SUCCESS));
+            assertTrue(catalog.records.isEmpty());
+        }
+    }
+
+    private static DeleteBackupRequest prepared(BackupRecoveryService service, Fixture fixture) {
+        DeletePreparation preparation = service.prepareDelete(fixture.backupId())
+                .toCompletableFuture().join();
+        return new DeleteBackupRequest(fixture.backupId(), preparation.confirmationToken());
+    }
 }

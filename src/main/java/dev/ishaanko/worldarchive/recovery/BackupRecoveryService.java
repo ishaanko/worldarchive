@@ -187,7 +187,7 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
         this.restoreOperation = new RecoveryRestoreOperation(
                 catalog, destinations, identityStore, metadataFinalizer, operationGate, directoryMove);
         this.deleteOperation = new RecoveryDeleteOperation(
-                catalog, destinations, deletions, operationGate, clock,
+                catalog, destinations, deletions, operationGate, executor, clock,
                 requireShortLifetime(confirmationLifetime));
         this.healthOperations = new RecoveryHealthOperations(catalog, destinations, operationGate, clock);
     }
@@ -230,6 +230,16 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
         Objects.requireNonNull(progressListener, "progressListener");
         return submit(cancellation ->
                 deleteOperation.deleteBlocking(request, progressListener, cancellation));
+    }
+
+    @Override
+    public CompletionStage<List<BackupResult>> deleteBackups(
+            List<DeleteBackupRequest> requests,
+            ProgressListener progressListener) {
+        List<DeleteBackupRequest> copy = List.copyOf(requests);
+        Objects.requireNonNull(progressListener, "progressListener");
+        return submit(cancellation ->
+                deleteOperation.deleteManyBlocking(copy, progressListener, cancellation));
     }
 
     @Override

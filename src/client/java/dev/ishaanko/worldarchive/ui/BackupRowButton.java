@@ -6,7 +6,7 @@ import java.time.format.DateTimeFormatter;
 import java.time.format.FormatStyle;
 import java.util.Locale;
 import java.util.Objects;
-import java.util.function.Consumer;
+import java.util.function.BiConsumer;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
@@ -41,7 +41,7 @@ final class BackupRowButton extends AbstractButton {
 
     private final Font font;
 
-    private final Consumer<BackupRow> onSelected;
+    private final BiConsumer<BackupRow, InputWithModifiers> onSelected;
 
     private final Tooltip detailsTooltip;
 
@@ -54,7 +54,7 @@ final class BackupRowButton extends AbstractButton {
             int height,
             BackupRow row,
             Font font,
-            Consumer<BackupRow> onSelected) {
+            BiConsumer<BackupRow, InputWithModifiers> onSelected) {
         super(x, y, width, height, narration(row));
         this.row = Objects.requireNonNull(row, "row");
         this.font = Objects.requireNonNull(font, "font");
@@ -68,9 +68,10 @@ final class BackupRowButton extends AbstractButton {
         this.selected = selected;
     }
 
+    /** Passes the click modifiers along so the browser can extend or toggle the selection. */
     @Override
     public void onPress(InputWithModifiers input) {
-        onSelected.accept(row);
+        onSelected.accept(row, input);
     }
 
     @Override
@@ -153,7 +154,8 @@ final class BackupRowButton extends AbstractButton {
         return Component.literal(primaryLine(row) + ". " + detailLine(row));
     }
 
-    private static String primaryLine(BackupRow row) {
+    /** One-line identity used by the row, its tooltip, and the multi-delete confirmation. */
+    static String primaryLine(BackupRow row) {
         String label = row.label().map(value -> " — " + value).orElse("");
         return DATE_FORMAT.format(row.createdAt()) + label + " · " + trigger(row);
     }

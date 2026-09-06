@@ -25,6 +25,14 @@ public interface BackupMaintenanceService {
             DeleteBackupRequest request,
             ProgressListener progressListener);
 
+    /**
+     * Deletes several confirmed backups as one operation. Results arrive in request order;
+     * a backup that could not be deleted is reported as failed instead of failing the batch.
+     */
+    CompletionStage<List<BackupResult>> deleteBackups(
+            List<DeleteBackupRequest> requests,
+            ProgressListener progressListener);
+
     CompletionStage<BackupResult> verifyBackup(
             BackupId backupId,
             ProgressListener progressListener);

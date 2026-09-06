@@ -8,22 +8,32 @@ import dev.ishaanko.worldarchive.core.DeleteBackupRequest;
 import dev.ishaanko.worldarchive.core.DeletePreparation;
 import dev.ishaanko.worldarchive.core.OperationId;
 import dev.ishaanko.worldarchive.core.OperationPhase;
+import dev.ishaanko.worldarchive.core.OperationProgress;
 import dev.ishaanko.worldarchive.core.ProgressListener;
 import dev.ishaanko.worldarchive.core.WorldOperationGate;
 import dev.ishaanko.worldarchive.model.BackupId;
+import dev.ishaanko.worldarchive.model.BackupManifest;
 import dev.ishaanko.worldarchive.model.BackupRecord;
 import dev.ishaanko.worldarchive.model.BackupResult;
 import dev.ishaanko.worldarchive.model.DestinationResult;
 import dev.ishaanko.worldarchive.model.DestinationStatus;
 import dev.ishaanko.worldarchive.model.SensitiveDataRedactor;
+import dev.ishaanko.worldarchive.model.WorldId;
 import java.io.IOException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /** Executes delete confirmation issuance and the destination-deletion operation. */
 final class RecoveryDeleteOperation {
@@ -37,6 +47,8 @@ final class RecoveryDeleteOperation {
 
     private final WorldOperationGate operationGate;
 
+    private final Executor executor;
+
     private final Clock clock;
 
     private final Duration confirmationLifetime;
@@ -49,12 +61,14 @@ final class RecoveryDeleteOperation {
             RecoveryDestinations destinations,
             BackupDeletionRegistry deletions,
             WorldOperationGate operationGate,
+            Executor executor,
             Clock clock,
             Duration confirmationLifetime) {
         this.catalog = Objects.requireNonNull(catalog, "catalog");
         this.destinations = Objects.requireNonNull(destinations, "destinations");
         this.deletions = Objects.requireNonNull(deletions, "deletions");
         this.operationGate = Objects.requireNonNull(operationGate, "operationGate");
+        this.executor = Objects.requireNonNull(executor, "executor");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.confirmationLifetime =
                 Objects.requireNonNull(confirmationLifetime, "confirmationLifetime");
@@ -79,6 +93,111 @@ final class RecoveryDeleteOperation {
             ProgressListener progressListener,
             OperationCancellation cancellation) throws Exception {
         cancellation.checkpoint();
+        DeleteConfirmation confirmation = claimConfirmation(request);
+        BackupRecord record = RecoverySupport.requireRecord(catalog, request.backupId());
+        try (WorldOperationGate.Permit ignored = operationGate.enter(record.manifest().worldId())) {
+            return deleteInsideGate(confirmation, progressListener, cancellation);
+        }
+    }
+
+    /**
+     * Deletes several confirmed backups in one operation. Every confirmation is claimed
+     * before any storage changes, so one bad token deletes nothing. Backups in the same
+     * world share one gate permit and run concurrently; each destination store still
+     * serializes its own writes. Results come back in request order, and a backup whose
+     * deletion could not start is reported as failed rather than dropped.
+     */
+    List<BackupResult> deleteManyBlocking(
+            List<DeleteBackupRequest> requests,
+            ProgressListener progressListener,
+            OperationCancellation cancellation) throws Exception {
+        cancellation.checkpoint();
+        if (requests.isEmpty()) {
+            throw new BackupRecoveryException("Select at least one backup to delete");
+        }
+        Map<WorldId, List<DeleteConfirmation>> byWorld = new LinkedHashMap<>();
+        Map<BackupId, DeleteConfirmation> claimed = new LinkedHashMap<>();
+        for (DeleteBackupRequest request : requests) {
+            if (claimed.containsKey(request.backupId())) {
+                throw new BackupRecoveryException("The same backup was selected twice");
+            }
+            DeleteConfirmation confirmation = claimConfirmation(request);
+            claimed.put(request.backupId(), confirmation);
+            byWorld.computeIfAbsent(confirmation.manifest().worldId(), ignored -> new ArrayList<>())
+                    .add(confirmation);
+        }
+        OperationId operationId = OperationId.create();
+        int total = claimed.size();
+        AtomicInteger completed = new AtomicInteger();
+        Map<BackupId, BackupResult> results = new ConcurrentHashMap<>();
+        for (Map.Entry<WorldId, List<DeleteConfirmation>> world : byWorld.entrySet()) {
+            RecoverySupport.report(progressListener, batchProgress(
+                    operationId, world.getKey(), OperationPhase.PREPARING,
+                    completed.get(), total, "Preparing to delete " + total + " backups"));
+            try (WorldOperationGate.Permit ignored = operationGate.enter(world.getKey())) {
+                cancellation.checkpoint();
+                List<CompletableFuture<Void>> tasks = new ArrayList<>();
+                for (DeleteConfirmation confirmation : world.getValue()) {
+                    tasks.add(CompletableFuture.runAsync(() -> {
+                        results.put(confirmation.backupId(), deleteOrReport(
+                                confirmation, cancellation));
+                        int done = completed.incrementAndGet();
+                        RecoverySupport.report(progressListener, batchProgress(
+                                operationId, world.getKey(), OperationPhase.WRITING,
+                                done, total, "Deleting backups (" + done + " of " + total + ")"));
+                    }, executor));
+                }
+                joinAll(tasks);
+            }
+        }
+        RecoverySupport.report(progressListener, batchProgress(
+                operationId, byWorld.keySet().iterator().next(), OperationPhase.COMPLETE,
+                total, total, "Finished deleting backups"));
+        return requests.stream()
+                .map(request -> results.get(request.backupId()))
+                .toList();
+    }
+
+    private BackupResult deleteOrReport(
+            DeleteConfirmation confirmation,
+            OperationCancellation cancellation) {
+        try {
+            return deleteInsideGate(confirmation, ProgressListener.NO_OP, cancellation);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            return failedResult(confirmation, exception);
+        } catch (Exception exception) {
+            return failedResult(confirmation, exception);
+        }
+    }
+
+    /** Waits for every task even after an interrupt; each one is committing storage changes. */
+    private static void joinAll(List<CompletableFuture<Void>> tasks) throws InterruptedException {
+        boolean interrupted = false;
+        try {
+            for (CompletableFuture<Void> task : tasks) {
+                while (true) {
+                    try {
+                        task.get();
+                        break;
+                    } catch (InterruptedException exception) {
+                        interrupted = true;
+                    } catch (java.util.concurrent.ExecutionException exception) {
+                        throw new CompletionException(exception.getCause());
+                    }
+                }
+            }
+        } finally {
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        if (Thread.currentThread().isInterrupted()) {
+            throw new InterruptedException("Backup deletion was cancelled");
+        }
+    }
+
+    private DeleteConfirmation claimConfirmation(DeleteBackupRequest request) {
         DeleteConfirmation confirmation = confirmations.claim(request.confirmationToken())
                 .orElse(null);
         Instant now = clock.instant();
@@ -87,11 +206,18 @@ final class RecoveryDeleteOperation {
                 || !now.isBefore(confirmation.expiresAt())) {
             throw new BackupRecoveryException("Delete confirmation is invalid, expired, or already used");
         }
-        BackupRecord record = RecoverySupport.requireRecord(catalog, request.backupId());
+        return confirmation;
+    }
+
+    private BackupResult deleteInsideGate(
+            DeleteConfirmation confirmation,
+            ProgressListener progressListener,
+            OperationCancellation cancellation) throws Exception {
+        BackupId backupId = confirmation.backupId();
         boolean deletionIntentRecorded = false;
-        try (WorldOperationGate.Permit ignored = operationGate.enter(record.manifest().worldId())) {
+        try {
             cancellation.checkpoint();
-            BackupRecord current = RecoverySupport.requireRecord(catalog, request.backupId());
+            BackupRecord current = RecoverySupport.requireRecord(catalog, backupId);
             confirmation.requireMatches(current);
             deletions.record(current.manifest().backupId());
             deletionIntentRecorded = true;
@@ -142,14 +268,14 @@ final class RecoveryDeleteOperation {
                     current.manifest().backupId(),
                     current.manifest().worldId(),
                     attempts,
-                    completionTime(current));
+                    completionTime(current.manifest()));
             RecoverySupport.report(progressListener, RecoverySupport.progress(
                     operationId, current, BackupOperation.DELETE, OperationPhase.COMPLETE,
                     present.size(), present.size(), "Destination deletion complete"));
             return result;
         } finally {
-            if (deletionIntentRecorded && catalog.find(request.backupId()).isPresent()) {
-                deletions.restore(request.backupId());
+            if (deletionIntentRecorded && catalog.find(backupId).isPresent()) {
+                deletions.restore(backupId);
             }
         }
     }
@@ -171,6 +297,47 @@ final class RecoveryDeleteOperation {
             persistSuccessfulDeletion(current, RecoverySupport.DestinationKey.from(destination));
         }
         return removed ? DeletionOutcome.succeeded() : DeletionOutcome.failed(Optional.empty());
+    }
+
+    /**
+     * Turns a deletion that could not start into a result the caller can show next to the
+     * others. Every destination the user confirmed is marked failed with the reason. A
+     * confirmation without destinations has nothing to mark, so that failure propagates.
+     */
+    private BackupResult failedResult(DeleteConfirmation confirmation, Exception failure) {
+        if (confirmation.destinationTypes().isEmpty()) {
+            throw failure instanceof RuntimeException unchecked
+                    ? unchecked
+                    : new CompletionException(failure);
+        }
+        String reason = deletionFailureMessage(safeFailureReason(failure));
+        List<DestinationResult> attempts = confirmation.destinationTypes().stream()
+                .sorted()
+                .map(type -> DestinationResult.failed(type, reason))
+                .toList();
+        return BackupResult.aggregate(
+                confirmation.backupId(),
+                confirmation.manifest().worldId(),
+                attempts,
+                completionTime(confirmation.manifest()));
+    }
+
+    private static OperationProgress batchProgress(
+            OperationId operationId,
+            WorldId worldId,
+            OperationPhase phase,
+            long completed,
+            long total,
+            String message) {
+        return new OperationProgress(
+                operationId,
+                worldId,
+                Optional.empty(),
+                BackupOperation.DELETE,
+                phase,
+                completed,
+                total,
+                message);
     }
 
     private static Optional<String> safeFailureReason(Exception exception) {
@@ -238,8 +405,8 @@ final class RecoveryDeleteOperation {
                 .toList());
     }
 
-    private Instant completionTime(BackupRecord record) {
+    private Instant completionTime(BackupManifest manifest) {
         Instant now = clock.instant();
-        return now.isBefore(record.manifest().createdAt()) ? record.manifest().createdAt() : now;
+        return now.isBefore(manifest.createdAt()) ? manifest.createdAt() : now;
     }
 }

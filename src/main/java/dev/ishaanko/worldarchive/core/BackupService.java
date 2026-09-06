@@ -34,6 +34,10 @@ public interface BackupService {
             DeleteBackupRequest request,
             ProgressListener progressListener);
 
+    CompletionStage<List<BackupResult>> deleteBackups(
+            List<DeleteBackupRequest> requests,
+            ProgressListener progressListener);
+
     CompletionStage<BackupResult> verifyBackup(
             BackupId backupId,
             ProgressListener progressListener);
