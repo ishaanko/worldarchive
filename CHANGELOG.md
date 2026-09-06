@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- A World Backups icon sits at the far right of the square icons on the title
+  screen and on the pause screen. On the title screen it opens the list of
+  backed-up worlds; in a world it opens that world's backups.
+
 ## 0.3.5.1 (2026-08-24)
 
 ### Fixed

@@ -3,6 +3,7 @@ package dev.ishaanko.worldarchive;
 import dev.ishaanko.worldarchive.runtime.WorldArchiveRuntime;
 import dev.ishaanko.worldarchive.settings.ClientSettingsAccess;
 import dev.ishaanko.worldarchive.ui.EditWorldBackupIntegration;
+import dev.ishaanko.worldarchive.ui.IconRowBackupIntegration;
 import dev.ishaanko.worldarchive.ui.SelectWorldBackupIntegration;
 import net.fabricmc.api.ClientModInitializer;
 import org.slf4j.Logger;
@@ -17,6 +18,7 @@ public final class WorldArchiveClient implements ClientModInitializer {
         WorldArchiveRuntime runtime = WorldArchiveRuntime.initialize();
         SelectWorldBackupIntegration.register(() -> runtime);
         EditWorldBackupIntegration.register(() -> runtime);
+        IconRowBackupIntegration.register(() -> runtime, runtime::openBrowser);
         LOGGER.info("{} initialized.", WorldArchiveMetadata.MOD_NAME);
     }
 }
