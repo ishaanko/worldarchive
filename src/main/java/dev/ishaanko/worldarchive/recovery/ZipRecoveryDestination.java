@@ -122,9 +122,9 @@ final class ZipRecoveryDestination implements RecoveryDestination {
     public DestinationHealth health(Optional<WorldId> worldId) throws Exception {
         Objects.requireNonNull(worldId, "worldId");
         if (worldId.isPresent()) {
-            stores.store(worldId.orElseThrow()).listCompleteArchives();
+            stores.store(worldId.orElseThrow()).listArchives();
         } else {
-            stores.defaultStore().listCompleteArchives();
+            stores.defaultStore().listArchives();
         }
         return new DestinationHealth(
                 DestinationType.ZIP,
