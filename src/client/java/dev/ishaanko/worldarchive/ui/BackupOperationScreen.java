@@ -5,6 +5,7 @@ import dev.ishaanko.worldarchive.core.ProgressListener;
 import dev.ishaanko.worldarchive.core.RestoreBackupResult;
 import dev.ishaanko.worldarchive.model.BackupResult;
 import dev.ishaanko.worldarchive.ui.model.BackupOutcomeSummary;
+import dev.ishaanko.worldarchive.ui.model.DeleteBatchSummary;
 import dev.ishaanko.worldarchive.ui.model.DestinationOutcomeView;
 import dev.ishaanko.worldarchive.ui.model.ProgressState;
 import dev.ishaanko.worldarchive.ui.model.ScreenGeometry;
@@ -88,6 +89,22 @@ final class BackupOperationScreen<T> extends Screen {
                 title,
                 starter,
                 result -> backupPresentation(operation, result));
+    }
+
+    /** Shows one combined outcome for a multi-backup delete instead of one screen per backup. */
+    static BackupOperationScreen<List<BackupResult>> deleteBatch(
+            Screen parent,
+            String title,
+            OperationStarter<List<BackupResult>> starter) {
+        return new BackupOperationScreen<>(parent, title, starter, results -> {
+            DeleteBatchSummary summary = DeleteBatchSummary.from(results);
+            ChatFormatting color = switch (summary.status()) {
+                case SUCCESS, SKIPPED -> ChatFormatting.GREEN;
+                case PARTIAL_SUCCESS -> ChatFormatting.YELLOW;
+                case FAILED -> ChatFormatting.RED;
+            };
+            return new Presentation(summary.headline(), summary.details(), color);
+        });
     }
 
     static BackupOperationScreen<RestoreBackupResult> restore(

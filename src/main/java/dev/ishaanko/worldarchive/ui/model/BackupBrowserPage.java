@@ -3,36 +3,43 @@ package dev.ishaanko.worldarchive.ui.model;
 import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.BackupRecord;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
-import java.util.Optional;
+import java.util.Set;
 
-/** Materialized backup-browser page with a selection only when that row is visible. */
+/**
+ * Materialized backup-browser page. {@code matchingBackupIds} lists every backup that passes
+ * the filter across all pages, so select-all and the selection count cover hidden rows;
+ * {@code selectedBackupIds} is the part of the selection that is visible on this page.
+ */
 public record BackupBrowserPage(
         List<BackupRow> rows,
         long totalRows,
         int pageIndex,
         int pageCount,
         int pageSize,
-        Optional<BackupId> selectedBackupId) {
+        List<BackupId> matchingBackupIds,
+        Set<BackupId> selectedBackupIds) {
     public BackupBrowserPage {
         rows = List.copyOf(rows);
         if (totalRows < 0 || pageIndex < 0 || pageCount < 1 || pageSize < 1) {
             throw new IllegalArgumentException("Invalid page dimensions");
         }
-        selectedBackupId = Objects.requireNonNull(selectedBackupId, "selectedBackupId");
-        BackupId selected = selectedBackupId.orElse(null);
-        if (selected != null
-                && rows.stream().noneMatch(row -> row.backupId().equals(selected))) {
-            throw new IllegalArgumentException("Selection must refer to a visible row");
+        matchingBackupIds = List.copyOf(matchingBackupIds);
+        selectedBackupIds = Set.copyOf(selectedBackupIds);
+        for (BackupId selected : selectedBackupIds) {
+            if (rows.stream().noneMatch(row -> row.backupId().equals(selected))) {
+                throw new IllegalArgumentException("Selection must refer to visible rows");
+            }
         }
     }
 
     public static BackupBrowserPage create(
             List<BackupRecord> records,
             BackupBrowserQuery query,
-            Optional<BackupId> requestedSelection) {
+            Set<BackupId> requestedSelection) {
         Objects.requireNonNull(records, "records");
         Objects.requireNonNull(query, "query");
         Objects.requireNonNull(requestedSelection, "requestedSelection");
@@ -46,21 +53,27 @@ public record BackupBrowserPage(
         int first = pageIndex * query.pageSize();
         int last = Math.min(first + query.pageSize(), filtered.size());
         List<BackupRow> rows = filtered.subList(first, last);
-        Optional<BackupId> selection = requestedSelection
-                .filter(id -> rows.stream().anyMatch(row -> row.backupId().equals(id)));
+        Set<BackupId> visibleSelection = new LinkedHashSet<>();
+        for (BackupRow row : rows) {
+            if (requestedSelection.contains(row.backupId())) {
+                visibleSelection.add(row.backupId());
+            }
+        }
         return new BackupBrowserPage(
                 rows,
                 filtered.size(),
                 pageIndex,
                 pageCount,
                 query.pageSize(),
-                selection);
+                filtered.stream().map(BackupRow::backupId).toList(),
+                visibleSelection);
     }
 
-    public Optional<BackupRow> selectedRow() {
-        return selectedBackupId.flatMap(id -> rows.stream()
-                .filter(row -> row.backupId().equals(id))
-                .findFirst());
+    /** Visible selected rows in page order. */
+    public List<BackupRow> selectedRows() {
+        return rows.stream()
+                .filter(row -> selectedBackupIds.contains(row.backupId()))
+                .toList();
     }
 
     private static boolean matches(BackupRow row, String filter) {

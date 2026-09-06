@@ -147,7 +147,10 @@ abstract class BackupRecoveryServiceTestSupport {
     }
 
     static Fixture fixture(DestinationType... destinationTypes) {
-        WorldId worldId = WorldId.create();
+        return fixture(WorldId.create(), destinationTypes);
+    }
+
+    static Fixture fixture(WorldId worldId, DestinationType... destinationTypes) {
         BackupId backupId = BackupId.create();
         BackupManifest manifest = BackupManifest.create(
                 backupId,
