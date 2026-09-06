@@ -312,8 +312,27 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
         return PROCESS_LOCKS.computeIfAbsent(key, ignored -> new ReentrantLock());
     }
 
-    /** Lists only generated archives that have a complete, parseable checksum sibling. */
+    /**
+     * Lists generated archives after copying, hashing, and fully inspecting each one. This
+     * is the import-grade listing: every returned artifact matched its checksum sidecar and
+     * passed structural verification. It reads every byte of the store, so callers that only
+     * need identities and sizes use {@link #listArchives()}.
+     */
     public List<ZipBackupArtifact> listCompleteArchives() throws IOException {
+        return listArtifacts(this::collectCompleteArchives);
+    }
+
+    /**
+     * Lists managed archive pairs from their filenames, checksum sidecars, and embedded
+     * manifests. It never copies or hashes an archive, so storage overviews and health
+     * checks stay fast on large stores. The returned checksum is the sidecar value, not a
+     * recomputed digest; verify an archive before restoring from it.
+     */
+    public List<ZipBackupArtifact> listArchives() throws IOException {
+        return listArtifacts(this::collectArchives);
+    }
+
+    private List<ZipBackupArtifact> listArtifacts(ArchiveCollector collector) throws IOException {
         if (!Files.exists(root, LinkOption.NOFOLLOW_LINKS)) {
             ManagedPathGuard.requireExistingAncestors(
                     root, "ZIP destination contains an unsafe path component");
@@ -334,7 +353,7 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
                 Path worldDirectory = root.resolve(worldDirectoryName);
                 try (ManagedDirectoryAccess directory = ManagedDirectoryAccess.open(
                         root, worldDirectory)) {
-                    collectCompleteArchives(directory, worldId, artifacts);
+                    collector.collect(directory, worldId, artifacts);
                 } catch (IOException | RuntimeException exception) {
                     // Unsafe or concurrently replaced world directories are not catalog entries.
                 }
@@ -690,6 +709,51 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
                 // An incomplete or malformed pair is not a catalog entry; other pairs remain visible.
             }
         }
+    }
+
+    private void collectArchives(
+            ManagedDirectoryAccess directory,
+            WorldId worldId,
+            List<ZipBackupArtifact> artifacts) throws IOException {
+        for (String archiveName : directory.listNames()) {
+            if (!ManagedZipArchive.matchesFilename(archiveName)) {
+                continue;
+            }
+            try {
+                ManagedZipArchive managed = managedArchive(directory.resolve(archiveName));
+                if (!managed.worldId().equals(worldId)) {
+                    continue;
+                }
+                directory.requireRegularFile(
+                        archiveName, "Managed ZIP archive is not a regular file");
+                String checksum = readChecksum(
+                        directory, managed.checksumName(), archiveName);
+                BackupManifest manifest;
+                try (SeekableByteChannel archive = directory.openRead(archiveName)) {
+                    manifest = ZipArchiveInspector.readLeadingManifest(archive);
+                }
+                if (!manifest.worldId().equals(managed.worldId())
+                        || !manifest.backupId().equals(managed.backupId())) {
+                    continue;
+                }
+                artifacts.add(new ZipBackupArtifact(
+                        manifest,
+                        managed.archive(),
+                        managed.checksum(),
+                        checksum));
+            } catch (IOException | RuntimeException exception) {
+                // An incomplete or malformed pair is not listed; other pairs remain visible.
+            }
+        }
+    }
+
+    /** One strategy for turning a managed world directory into listed artifacts. */
+    @FunctionalInterface
+    private interface ArchiveCollector {
+        void collect(
+                ManagedDirectoryAccess directory,
+                WorldId worldId,
+                List<ZipBackupArtifact> artifacts) throws IOException;
     }
 
     private static Inspection requireValidInspection(
