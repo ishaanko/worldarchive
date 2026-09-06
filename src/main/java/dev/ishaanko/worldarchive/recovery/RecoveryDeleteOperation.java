@@ -115,14 +115,9 @@ final class RecoveryDeleteOperation {
         if (requests.isEmpty()) {
             throw new BackupRecoveryException("Select at least one backup to delete");
         }
+        Map<BackupId, DeleteConfirmation> claimed = claimAll(requests);
         Map<WorldId, List<DeleteConfirmation>> byWorld = new LinkedHashMap<>();
-        Map<BackupId, DeleteConfirmation> claimed = new LinkedHashMap<>();
-        for (DeleteBackupRequest request : requests) {
-            if (claimed.containsKey(request.backupId())) {
-                throw new BackupRecoveryException("The same backup was selected twice");
-            }
-            DeleteConfirmation confirmation = claimConfirmation(request);
-            claimed.put(request.backupId(), confirmation);
+        for (DeleteConfirmation confirmation : claimed.values()) {
             byWorld.computeIfAbsent(confirmation.manifest().worldId(), ignored -> new ArrayList<>())
                     .add(confirmation);
         }
@@ -194,6 +189,29 @@ final class RecoveryDeleteOperation {
         }
         if (Thread.currentThread().isInterrupted()) {
             throw new InterruptedException("Backup deletion was cancelled");
+        }
+    }
+
+    /**
+     * Claims every token or none. A rejected batch hands the already claimed tokens back
+     * to the ledger, so the caller can fix the bad request and retry with the same tokens.
+     */
+    private Map<BackupId, DeleteConfirmation> claimAll(List<DeleteBackupRequest> requests) {
+        Map<BackupId, DeleteConfirmation> claimed = new LinkedHashMap<>();
+        Map<OperationId, DeleteConfirmation> restorable = new LinkedHashMap<>();
+        try {
+            for (DeleteBackupRequest request : requests) {
+                if (claimed.containsKey(request.backupId())) {
+                    throw new BackupRecoveryException("The same backup was selected twice");
+                }
+                DeleteConfirmation confirmation = claimConfirmation(request);
+                claimed.put(request.backupId(), confirmation);
+                restorable.put(request.confirmationToken(), confirmation);
+            }
+            return claimed;
+        } catch (RuntimeException exception) {
+            restorable.forEach(confirmations::put);
+            throw exception;
         }
     }
 

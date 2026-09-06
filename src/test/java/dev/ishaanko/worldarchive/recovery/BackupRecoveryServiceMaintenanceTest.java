@@ -829,6 +829,12 @@ class BackupRecoveryServiceMaintenanceTest extends BackupRecoveryServiceTestSupp
 
         assertEquals(0, zip.deleteCalls.get());
         assertEquals(2, catalog.records.size());
+
+        // The rejected batch handed the valid token back, so it still works on its own.
+        List<BackupResult> retried = service.deleteBackups(List.of(valid), ProgressListener.NO_OP)
+                .toCompletableFuture().join();
+        assertEquals(BackupStatus.SUCCESS, retried.getFirst().status());
+        assertEquals(1, zip.deleteCalls.get());
     }
 
     @Test
