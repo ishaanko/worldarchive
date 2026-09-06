@@ -924,6 +924,34 @@ class BackupRecoveryServiceMaintenanceTest extends BackupRecoveryServiceTestSupp
         }
     }
 
+    @Test
+    void deleteBackupsCompletesOnASingleThreadExecutor() throws Exception {
+        WorldId worldId = WorldId.create();
+        Fixture first = fixture(worldId, DestinationType.ZIP);
+        Fixture second = fixture(worldId, DestinationType.ZIP);
+        Fixture third = fixture(worldId, DestinationType.ZIP);
+        FakeDestination zip = new FakeDestination(DestinationType.ZIP, worldId);
+        InMemoryCatalog catalog = new InMemoryCatalog(
+                first.record(), second.record(), third.record());
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            BackupRecoveryService service = service(
+                    catalog,
+                    Map.of(DestinationType.ZIP, zip),
+                    Clock.systemUTC(),
+                    RestoredWorldMetadataFinalizer.NO_OP,
+                    executor);
+            List<DeleteBackupRequest> requests = List.of(
+                    prepared(service, first), prepared(service, second), prepared(service, third));
+
+            List<BackupResult> results = service.deleteBackups(requests, ProgressListener.NO_OP)
+                    .toCompletableFuture().get(5, TimeUnit.SECONDS);
+
+            assertEquals(3, results.size());
+            assertTrue(results.stream().allMatch(result -> result.status() == BackupStatus.SUCCESS));
+            assertTrue(catalog.records.isEmpty());
+        }
+    }
+
     private static DeleteBackupRequest prepared(BackupRecoveryService service, Fixture fixture) {
         DeletePreparation preparation = service.prepareDelete(fixture.backupId())
                 .toCompletableFuture().join();
