@@ -30,6 +30,15 @@ public interface BackupCoordinator {
 
     Optional<OperationProgress> currentOperation(WorldId worldId);
 
+    /**
+     * Requests that one running create operation stop and remove whatever it already wrote.
+     *
+     * <p>Returns {@code true} when the request was accepted; the operation's stage then settles
+     * once the rollback is done. Returns {@code false} when the operation is unknown, already
+     * finalizing, or already asked to cancel.</p>
+     */
+    boolean cancelBackup(OperationId operationId);
+
     default boolean isBusy(WorldId worldId) {
         return currentOperation(worldId).isPresent();
     }

@@ -7,7 +7,6 @@ import dev.ishaanko.worldarchive.model.BackupRecord;
 import dev.ishaanko.worldarchive.model.BackupResult;
 import dev.ishaanko.worldarchive.model.BackupTrigger;
 import dev.ishaanko.worldarchive.model.DestinationResult;
-import dev.ishaanko.worldarchive.model.DestinationStatus;
 import dev.ishaanko.worldarchive.model.DestinationType;
 import dev.ishaanko.worldarchive.model.SensitiveDataRedactor;
 import dev.ishaanko.worldarchive.model.WorldId;
@@ -300,6 +299,41 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
         return maintenanceService;
     }
 
+    @Override
+    public boolean cancelBackup(OperationId operationId) {
+        Objects.requireNonNull(operationId, "operationId");
+        CreateOperation operation = findOperation(operationId);
+        if (operation == null) {
+            return false;
+        }
+        // Before destinations start, the future's own cancellation stops everything cleanly.
+        if (operation.result.cancel(true)) {
+            return true;
+        }
+        if (!operation.cancellationState.compareAndSet(
+                CancellationState.COMMITTING,
+                CancellationState.CANCELLATION_REQUESTED)) {
+            return false;
+        }
+        operation.cancelled.set(true);
+        operation.interruptRequested.set(true);
+        for (CompletableFuture<?> destination : operation.destinationTasks) {
+            destination.cancel(true);
+        }
+        return true;
+    }
+
+    private CreateOperation findOperation(OperationId operationId) {
+        for (WorldLane<CreateOperation> lane : lanes.values()) {
+            CreateOperation match = lane.find(
+                    operation -> operation.operationId.equals(operationId));
+            if (match != null) {
+                return match;
+            }
+        }
+        return null;
+    }
+
     private CompletionStage<BackupResult> enqueue(CreateOperation operation) {
         WorldLane<CreateOperation> lane = lanes.computeIfAbsent(
                 operation.request.worldId(), ignored -> new WorldLane<>());
@@ -482,6 +516,11 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
                 source = CompletableFuture.failedFuture(throwable);
             }
             operation.destinationTasks.add(source);
+            // A cancel that raced this loop saw an incomplete task list; re-check so
+            // every task registered after the cancel is still interrupted.
+            if (operation.cancelled.get()) {
+                source.cancel(true);
+            }
             outcomes.add(source.handle((result, throwable) -> destinationOutcome(
                     expectedDestination,
                     result,
@@ -494,8 +533,12 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
     private void finalizeDestinations(
             CreateOperation operation,
             List<CompletableFuture<DestinationResult>> outcomes) {
-        if (operation.cancelled.get()) {
-            finish(operation, null, new CancellationException("Backup was cancelled"));
+        // Claiming COMMITTED closes the cancellation window; a failed claim means a mid-commit
+        // cancel was accepted and the published artifacts must roll back.
+        if (!operation.cancellationState.compareAndSet(
+                CancellationState.COMMITTING,
+                CancellationState.COMMITTED)) {
+            rollBackCancelledDestinations(operation, outcomes);
             return;
         }
         try {
@@ -510,7 +553,7 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
                     operation.request.worldId(),
                     destinations,
                     completionTime(manifest));
-            if (hasDurableDestination(destinations)) {
+            if (destinations.stream().anyMatch(CancelledBackupRollback::isDurable)) {
                 report(
                         operation,
                         OperationPhase.PUBLISHING,
@@ -532,6 +575,54 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
                 }
             }
             finish(operation, result, null);
+        } catch (Throwable throwable) {
+            finish(operation, null, throwable);
+        }
+    }
+
+    /** Asks every backend to discard the cancelled backup, then settles the operation. */
+    private void rollBackCancelledDestinations(
+            CreateOperation operation,
+            List<CompletableFuture<DestinationResult>> outcomes) {
+        try {
+            BackupManifest manifest = Objects.requireNonNull(operation.capture.get(), "capture")
+                    .capture()
+                    .manifest();
+            report(operation, OperationPhase.PUBLISHING, 0, 0,
+                    "Removing the cancelled backup from every destination");
+            CancelledBackupRollback
+                    .rollBack(
+                            operation.plan.backends(),
+                            manifest,
+                            outcomes.stream().map(CompletableFuture::join).toList(),
+                            completionTime(manifest))
+                    .whenComplete((outcome, throwable) ->
+                            finishCancelledOperation(operation, outcome, throwable));
+        } catch (Throwable throwable) {
+            finish(operation, null, throwable);
+        }
+    }
+
+    /** Surviving artifacts are recorded in the catalog; the change inventory never advances. */
+    private void finishCancelledOperation(
+            CreateOperation operation,
+            CancelledBackupRollback.RollbackOutcome outcome,
+            Throwable rollbackFailure) {
+        try {
+            if (rollbackFailure != null) {
+                finish(operation, null, rollbackFailure);
+                return;
+            }
+            if (outcome.record().isPresent()) {
+                catalog.add(outcome.record().orElseThrow());
+            }
+            if (outcome.unconfirmed().isPresent()) {
+                finish(operation, null, outcome.unconfirmed().orElseThrow());
+            } else if (outcome.record().isPresent()) {
+                finish(operation, outcome.record().orElseThrow().result(), null);
+            } else {
+                finish(operation, null, new CancellationException("Backup was cancelled"));
+            }
         } catch (Throwable throwable) {
             finish(operation, null, throwable);
         }
@@ -780,11 +871,6 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
                     "Destination failed before a trustworthy result was available");
         }
         return result;
-    }
-
-    private static boolean hasDurableDestination(List<DestinationResult> destinations) {
-        return destinations.stream().anyMatch(result -> result.status() == DestinationStatus.SUCCESS
-                || result.status() == DestinationStatus.PENDING_SYNC);
     }
 
     private static String completionMessage(BackupResult result) {

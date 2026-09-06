@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Added
+
+- The pause screen shows a small World Backups button beside the Friends
+  button in a single-player world. The button opens the backup browser for
+  the current world.
+- The backup progress screen has a Cancel button. Cancel stops the backup
+  and removes the data the backup wrote. If some data cannot be removed, the
+  mod keeps that data and records it in the backup list.
+
 ### Changed
 
 - A backup that writes the Git and the ZIP destination together now shows one

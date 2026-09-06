@@ -3,6 +3,7 @@ package dev.ishaanko.worldarchive.runtime;
 import dev.ishaanko.worldarchive.core.BackupCoordinator;
 import dev.ishaanko.worldarchive.core.CaptureProgressListener;
 import dev.ishaanko.worldarchive.core.CreateBackupRequest;
+import dev.ishaanko.worldarchive.core.OperationId;
 import dev.ishaanko.worldarchive.core.OperationProgress;
 import dev.ishaanko.worldarchive.core.PreparedBackup;
 import dev.ishaanko.worldarchive.core.ProgressListener;
@@ -149,6 +150,17 @@ final class RuntimeBackupCoordinator implements BackupCoordinator {
                 .map(state -> state.coordinator().currentOperation(worldId))
                 .flatMap(Optional::stream)
                 .findFirst();
+    }
+
+    @Override
+    public boolean cancelBackup(OperationId operationId) {
+        Objects.requireNonNull(operationId, "operationId");
+        if (runtime.isClosed()) {
+            return false;
+        }
+        // Retained states can still be finishing a backup, so every coordinator is asked.
+        return runtime.states().retained().stream()
+                .anyMatch(state -> state.coordinator().cancelBackup(operationId));
     }
 
     private void releaseAbandonedPrepared(

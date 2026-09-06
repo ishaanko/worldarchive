@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import dev.ishaanko.worldarchive.config.WorldArchiveConfig;
 import dev.ishaanko.worldarchive.config.WorldConfig;
+import dev.ishaanko.worldarchive.model.BackupManifest;
 import dev.ishaanko.worldarchive.model.BackupTrigger;
 import dev.ishaanko.worldarchive.model.DestinationResult;
 import dev.ishaanko.worldarchive.model.DestinationType;
@@ -104,6 +105,11 @@ final class ConfiguredBackupDestinationSelectorTest {
                 return CompletableFuture.completedFuture(DestinationResult.success(
                         destination,
                         destination.name().toLowerCase()));
+            }
+
+            @Override
+            public CompletionStage<Boolean> discardBackup(BackupManifest manifest) {
+                return CompletableFuture.completedFuture(true);
             }
         };
     }

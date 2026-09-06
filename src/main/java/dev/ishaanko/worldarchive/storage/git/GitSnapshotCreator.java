@@ -110,6 +110,11 @@ final class GitSnapshotCreator {
                     commit,
                     manifest.createdAt());
             verifier.verify(snapshot);
+            // A cancelled backup must not publish its ref after the rollback already ran;
+            // the ref update is the snapshot's only visible step, so gate it here.
+            if (Thread.currentThread().isInterrupted()) {
+                throw new InterruptedException("Snapshot publication stopped by cancellation");
+            }
             refs.updateWithRollback(snapshotRef, commit, Optional.empty());
             return snapshot;
         } finally {

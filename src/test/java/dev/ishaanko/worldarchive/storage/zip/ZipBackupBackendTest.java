@@ -13,6 +13,8 @@ import dev.ishaanko.worldarchive.model.BackupManifest;
 import dev.ishaanko.worldarchive.model.BackupTrigger;
 import dev.ishaanko.worldarchive.model.DestinationStatus;
 import dev.ishaanko.worldarchive.model.WorldId;
+import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -20,6 +22,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
@@ -97,6 +100,82 @@ class ZipBackupBackendTest {
             assertEquals(DestinationStatus.SUCCESS, result.status());
             assertTrue(Files.isDirectory(overrideRoot.resolve(worldId.toString())));
             assertFalse(Files.exists(defaultRoot));
+        }
+    }
+
+    @Test
+    void cancellingTheCreateStageInterruptsTheWriterAndLeavesNothing() throws Exception {
+        Path world = Files.createDirectory(temporaryDirectory.resolve("cancel-world"));
+        byte[] contents = "cancel world data".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        Files.write(world.resolve("level.dat"), contents);
+        BackupManifest manifest = manifest(contents);
+        CountDownLatch entered = new CountDownLatch(1);
+        ZipStoreHooks hooks = new ZipStoreHooks() {
+            @Override
+            public void archiveCompleted(Path partialArchive) throws IOException {
+                entered.countDown();
+                try {
+                    Thread.sleep(10_000);
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    throw new InterruptedIOException("interrupted mid-write");
+                }
+            }
+        };
+        Path root = temporaryDirectory.resolve("cancel-archives");
+        ZipBackupStore store = new ZipBackupStore(root, hooks);
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            ZipBackupBackend backend = new ZipBackupBackend(store, executor);
+            var stage = backend.createBackup(new BackupCapture(world, manifest), ignored -> {
+            }).toCompletableFuture();
+            assertTrue(entered.await(10, TimeUnit.SECONDS));
+
+            assertTrue(stage.cancel(true));
+        }
+        // The executor has drained, so the interrupted writer has fully unwound.
+        assertTrue(store.listCompleteArchives().isEmpty());
+        assertFalse(containsArchiveFiles(root));
+    }
+
+    @Test
+    void discardBackupRemovesThePublishedArchiveAndChecksum() throws Exception {
+        Path world = Files.createDirectory(temporaryDirectory.resolve("discard-world"));
+        byte[] contents = "discard world data".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        Files.write(world.resolve("level.dat"), contents);
+        BackupManifest manifest = manifest(contents);
+        Path root = temporaryDirectory.resolve("discard-archives");
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            ZipBackupBackend backend = new ZipBackupBackend(root, executor);
+            var created = backend.createBackup(new BackupCapture(world, manifest), ignored -> {
+            }).toCompletableFuture().get(10, TimeUnit.SECONDS);
+            assertEquals(DestinationStatus.SUCCESS, created.status());
+            Path archive = root.resolve(manifest.worldId().toString())
+                    .resolve(ZipBackupStore.archiveFilename(manifest));
+            assertTrue(Files.exists(archive));
+
+            assertTrue(backend.discardBackup(manifest)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS));
+
+            assertFalse(Files.exists(archive));
+            assertFalse(Files.exists(archive.resolveSibling(
+                    archive.getFileName().toString() + ".sha256")));
+            // An already-absent backup also reports the destination as clean.
+            assertTrue(backend.discardBackup(manifest)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS));
+        }
+    }
+
+    private static boolean containsArchiveFiles(Path root) throws IOException {
+        if (!Files.isDirectory(root)) {
+            return false;
+        }
+        try (var files = Files.walk(root)) {
+            return files.anyMatch(path -> {
+                String name = path.getFileName().toString();
+                return name.endsWith(".zip")
+                        || name.endsWith(".partial")
+                        || name.endsWith(".sha256");
+            });
         }
     }
 

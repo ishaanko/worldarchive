@@ -20,6 +20,13 @@ public interface BackupService {
             CreateBackupRequest request,
             ProgressListener progressListener);
 
+    /**
+     * Requests that one running create operation stop and remove what it already wrote.
+     * Returns {@code true} when the request was accepted; the create stage settles after
+     * the rollback finishes.
+     */
+    boolean cancelBackup(OperationId operationId);
+
     CompletionStage<List<BackupRecord>> listBackups(Optional<WorldId> worldId);
 
     CompletionStage<Optional<BackupRecord>> findBackup(BackupId backupId);

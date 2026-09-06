@@ -43,6 +43,17 @@ public interface GitSnapshotStore extends BackupBackend, AutoCloseable {
 
     CompletionStage<Boolean> deleteLocalSnapshot(WorldId worldId, BackupId backupId);
 
+    /**
+     * Rolls back a cancelled create operation's snapshot. {@code deleteSnapshot} already handles
+     * every state a cancel can leave behind: no refs at all, a local ref only, or a ref that
+     * reached the remote (removed remote-first). An absent snapshot also counts as discarded.
+     */
+    @Override
+    default CompletionStage<Boolean> discardBackup(BackupManifest manifest) {
+        return deleteSnapshot(manifest.worldId(), manifest.backupId())
+                .thenApply(ignored -> true);
+    }
+
     CompletionStage<GitVerification> hydrateExternalSnapshot(
             WorldId worldId,
             BackupId backupId,
