@@ -260,10 +260,11 @@ public final class EditWorldBackupIntegration {
                 return;
             }
             minecraft.setScreenAndShow(new BackupCreateScreen(screen, label -> minecraft.setScreenAndShow(
-                    BackupOperationScreen.backupResult(
+                    BackupOperationScreen.cancellableBackup(
                             screen,
                             "Creating backup",
-                            listener -> facade.createManualBackup(context, label, listener)))));
+                            listener -> facade.createManualBackup(context, label, listener),
+                            operationId -> facade.backupService().cancelBackup(operationId)))));
         }
 
         private void openBrowser() {

@@ -1,5 +1,6 @@
 {
     "modmenu.descriptionTranslation.worldarchive": "Creates dependable local backups of your single-player worlds.",
+    "screen.worldarchive.backups_button": "World Backups",
     "screen.worldarchive.settings.archive_folder": "Archive folder",
     "screen.worldarchive.settings.back": "Back",
     "screen.worldarchive.settings.browse": "Browse...",
@@ -39,6 +40,7 @@
     "screen.worldarchive.settings.validation_failed": "Settings validation failed; review the destination paths",
     "screen.worldarchive.settings.world_count": "%s configured world(s)",
     "screen.worldarchive.settings.world_enabled": "Back up this world",
+    "screen.worldarchive.settings.world_exit": "World exit",
     "screen.worldarchive.settings.world_remote_hint": "Optional URL for this world",
     "screen.worldarchive.settings.world_remote_steps": "Paste this world's GitHub repository URL here. Each new backup uploads automatically. If an upload fails, the mod tries again with the next backup.",
     "screen.worldarchive.settings.world_remote_url": "Git remote",
@@ -46,10 +48,9 @@
     "screen.worldarchive.settings.world_zip_destination": "ZIP folder",
     "screen.worldarchive.settings.world_zip_hint": "Inherited from ZIP tab",
     "screen.worldarchive.settings.world_zip_tooltip": "Optional folder for this world's ZIP backups. If not selected, the folder from the ZIP tab is used.",
-    "screen.worldarchive.settings.world_exit": "World exit",
+    "screen.worldarchive.settings.zip_enabled": "Enable ZIP backups",
+    "screen.worldarchive.settings.zip_folder_title": "Select WorldArchive ZIP folder",
     "screen.worldarchive.worlds.done": "Done",
     "screen.worldarchive.worlds.settings": "Settings",
-    "screen.worldarchive.worlds.title": "World Backups",
-    "screen.worldarchive.settings.zip_enabled": "Enable ZIP backups",
-    "screen.worldarchive.settings.zip_folder_title": "Select WorldArchive ZIP folder"
+    "screen.worldarchive.worlds.title": "World Backups"
 }

@@ -10,6 +10,7 @@ import dev.ishaanko.worldarchive.core.BackupCapture;
 import dev.ishaanko.worldarchive.core.ConfiguredBackupDestinationSelector;
 import dev.ishaanko.worldarchive.core.CreateBackupRequest;
 import dev.ishaanko.worldarchive.core.ProgressListener;
+import dev.ishaanko.worldarchive.model.BackupManifest;
 import dev.ishaanko.worldarchive.model.BackupTrigger;
 import dev.ishaanko.worldarchive.model.DestinationResult;
 import dev.ishaanko.worldarchive.model.DestinationType;
@@ -82,6 +83,11 @@ final class RuntimeDestinationSelectorTest {
                 return CompletableFuture.completedFuture(DestinationResult.success(
                         destination,
                         destination.name().toLowerCase()));
+            }
+
+            @Override
+            public CompletionStage<Boolean> discardBackup(BackupManifest manifest) {
+                return CompletableFuture.completedFuture(true);
             }
         };
     }

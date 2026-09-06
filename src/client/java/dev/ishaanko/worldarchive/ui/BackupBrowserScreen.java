@@ -437,9 +437,12 @@ public final class BackupBrowserScreen extends Screen {
     }
 
     private void promptManualBackup() {
-        minecraft.setScreenAndShow(new BackupCreateScreen(this, label -> openResultOperation(
-                "Creating backup",
-                listener -> facade.createManualBackup(world, label, listener))));
+        minecraft.setScreenAndShow(new BackupCreateScreen(this, label -> minecraft.setScreenAndShow(
+                BackupOperationScreen.cancellableBackup(
+                        this,
+                        "Creating backup",
+                        listener -> facade.createManualBackup(world, label, listener),
+                        operationId -> facade.backupService().cancelBackup(operationId)))));
     }
 
     private void prepareDelete(BackupRow row) {
@@ -488,12 +491,6 @@ public final class BackupBrowserScreen extends Screen {
                         listener -> service.deleteBackup(request, listener));
             }));
         }));
-    }
-
-    private void openResultOperation(
-            String operationTitle,
-            BackupOperationScreen.OperationStarter<dev.ishaanko.worldarchive.model.BackupResult> starter) {
-        openResultOperation(BackupOperation.CREATE, operationTitle, starter);
     }
 
     private void openResultOperation(

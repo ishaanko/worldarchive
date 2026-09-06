@@ -5,6 +5,7 @@ import dev.ishaanko.worldarchive.core.BackupService;
 import dev.ishaanko.worldarchive.core.CreateBackupRequest;
 import dev.ishaanko.worldarchive.core.DeleteBackupRequest;
 import dev.ishaanko.worldarchive.core.DeletePreparation;
+import dev.ishaanko.worldarchive.core.OperationId;
 import dev.ishaanko.worldarchive.core.ProgressListener;
 import dev.ishaanko.worldarchive.core.RestoreBackupRequest;
 import dev.ishaanko.worldarchive.core.RestoreBackupResult;
@@ -38,6 +39,11 @@ final class RuntimeBackupService implements BackupService {
             CreateBackupRequest request,
             ProgressListener progressListener) {
         return coordinator.createBackup(request, progressListener);
+    }
+
+    @Override
+    public boolean cancelBackup(OperationId operationId) {
+        return coordinator.cancelBackup(operationId);
     }
 
     @Override

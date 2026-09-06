@@ -9,14 +9,17 @@ import dev.ishaanko.worldarchive.core.OperationPhase;
 import dev.ishaanko.worldarchive.core.Observers;
 import dev.ishaanko.worldarchive.core.OperationProgress;
 import dev.ishaanko.worldarchive.core.ProgressListener;
+import dev.ishaanko.worldarchive.model.BackupManifest;
 import dev.ishaanko.worldarchive.model.DestinationResult;
 import dev.ishaanko.worldarchive.model.DestinationType;
 import dev.ishaanko.worldarchive.model.VerificationStatus;
 import java.io.IOException;
 import java.nio.file.AccessDeniedException;
 import java.nio.file.FileSystemException;
+import java.nio.file.Path;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
 
@@ -59,7 +62,9 @@ public final class ZipBackupBackend implements BackupBackend {
         Objects.requireNonNull(progressListener, "progressListener");
         OperationId operationId = OperationId.create();
         long totalBytes = capture.manifest().sourceByteCount();
-        return AsyncTasks.supply(executor, () -> {
+        // Interruptible, so a cancelled backup stops the writer; the store then removes
+        // its own partial files while it unwinds.
+        return AsyncTasks.supplyInterruptibly(executor, () -> {
             report(progressListener, progress(
                     operationId, capture, OperationPhase.PREPARING, 0, totalBytes,
                     "Preparing ZIP backup"));
@@ -80,6 +85,27 @@ public final class ZipBackupBackend implements BackupBackend {
                         operationId, capture, OperationPhase.FAILED, 0, totalBytes,
                         "ZIP backup failed"));
                 return DestinationResult.failed(DestinationType.ZIP, safeFailure(exception));
+            }
+        });
+    }
+
+    @Override
+    public CompletionStage<Boolean> discardBackup(BackupManifest manifest) {
+        Objects.requireNonNull(manifest, "manifest");
+        // Not interruptible: the rollback of a cancelled backup must run to completion.
+        return AsyncTasks.supply(executor, () -> {
+            try {
+                ZipBackupStore store = stores.store(manifest.worldId());
+                Path archive = store.root()
+                        .resolve(manifest.worldId().toString())
+                        .resolve(ZipBackupStore.archiveFilename(manifest))
+                        .normalize();
+                store.delete(archive);
+                // An already-absent pair also means the destination no longer holds it.
+                return true;
+            } catch (IOException | SecurityException exception) {
+                throw new CompletionException(
+                        "Cancelled ZIP backup could not be removed", exception);
             }
         });
     }
