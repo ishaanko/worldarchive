@@ -204,9 +204,13 @@ final class RecoveryDeleteOperation {
                 if (claimed.containsKey(request.backupId())) {
                     throw new BackupRecoveryException("The same backup was selected twice");
                 }
-                DeleteConfirmation confirmation = claimConfirmation(request);
-                claimed.put(request.backupId(), confirmation);
-                restorable.put(request.confirmationToken(), confirmation);
+                // Record the token before validating it, so a mismatch also rolls back.
+                DeleteConfirmation issued = confirmations.claim(request.confirmationToken())
+                        .orElse(null);
+                if (issued != null) {
+                    restorable.put(request.confirmationToken(), issued);
+                }
+                claimed.put(request.backupId(), requireValid(request, issued));
             }
             return claimed;
         } catch (RuntimeException exception) {
@@ -216,8 +220,13 @@ final class RecoveryDeleteOperation {
     }
 
     private DeleteConfirmation claimConfirmation(DeleteBackupRequest request) {
-        DeleteConfirmation confirmation = confirmations.claim(request.confirmationToken())
-                .orElse(null);
+        return requireValid(
+                request, confirmations.claim(request.confirmationToken()).orElse(null));
+    }
+
+    private DeleteConfirmation requireValid(
+            DeleteBackupRequest request,
+            DeleteConfirmation confirmation) {
         Instant now = clock.instant();
         if (confirmation == null
                 || !confirmation.backupId().equals(request.backupId())
