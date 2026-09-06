@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
@@ -21,7 +22,7 @@ import net.minecraft.client.gui.screens.TitleScreen;
 /**
  * Adds the WorldArchive shortcut at the far right of the square-icon row on the title screen
  * and the pause screen. On the title screen it opens the world list; in a world it opens
- * that world's backups.
+ * that world's backups, or the world list while the live world is still being resolved.
  */
 public final class IconRowBackupIntegration {
     private static final int GAP = 4;
@@ -30,7 +31,7 @@ public final class IconRowBackupIntegration {
 
     private static volatile Supplier<? extends BackupClientFacade> facadeSupplier;
 
-    private static volatile Runnable openLiveWorldBackups;
+    private static volatile BooleanSupplier openLiveWorldBackups;
 
     private IconRowBackupIntegration() {
     }
@@ -38,12 +39,12 @@ public final class IconRowBackupIntegration {
     /**
      * Registers the global Fabric screen hook. Repeated calls update the actions.
      *
-     * @param facade supplies the facade the title-screen world list needs
-     * @param openLiveWorld opens the backup browser for the world that is currently loaded
+     * @param facade supplies the facade the world list needs
+     * @param openLiveWorld opens the browser for the loaded world and reports whether it did
      */
     public static void register(
             Supplier<? extends BackupClientFacade> facade,
-            Runnable openLiveWorld) {
+            BooleanSupplier openLiveWorld) {
         facadeSupplier = Objects.requireNonNull(facade, "facade");
         openLiveWorldBackups = Objects.requireNonNull(openLiveWorld, "openLiveWorld");
         if (REGISTERED.compareAndSet(false, true)) {
@@ -57,7 +58,11 @@ public final class IconRowBackupIntegration {
             action = ignored -> minecraft.setScreenAndShow(
                     new BackupWorldsScreen(screen, currentFacade()));
         } else if (screen instanceof PauseScreen && minecraft.hasSingleplayerServer()) {
-            action = ignored -> currentLiveWorldAction().run();
+            action = ignored -> {
+                if (!currentLiveWorldAction().getAsBoolean()) {
+                    minecraft.setScreenAndShow(new BackupWorldsScreen(screen, currentFacade()));
+                }
+            };
         } else {
             return;
         }
@@ -130,8 +135,8 @@ public final class IconRowBackupIntegration {
         return Objects.requireNonNull(supplier.get(), "facadeSupplier result");
     }
 
-    private static Runnable currentLiveWorldAction() {
-        Runnable action = openLiveWorldBackups;
+    private static BooleanSupplier currentLiveWorldAction() {
+        BooleanSupplier action = openLiveWorldBackups;
         if (action == null) {
             throw new IllegalStateException("WorldArchive backup action has not been registered");
         }
