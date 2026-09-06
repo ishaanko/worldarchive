@@ -29,11 +29,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
+import java.util.Queue;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 /** Executes delete confirmation issuance and the destination-deletion operation. */
 final class RecoveryDeleteOperation {
@@ -131,18 +135,18 @@ final class RecoveryDeleteOperation {
                     completed.get(), total, "Preparing to delete " + total + " backups"));
             try (WorldOperationGate.Permit ignored = operationGate.enter(world.getKey())) {
                 cancellation.checkpoint();
-                List<CompletableFuture<Void>> tasks = new ArrayList<>();
+                List<Runnable> tasks = new ArrayList<>();
                 for (DeleteConfirmation confirmation : world.getValue()) {
-                    tasks.add(CompletableFuture.runAsync(() -> {
+                    tasks.add(() -> {
                         results.put(confirmation.backupId(), deleteOrReport(
                                 confirmation, cancellation));
                         int done = completed.incrementAndGet();
                         RecoverySupport.report(progressListener, batchProgress(
                                 operationId, world.getKey(), OperationPhase.WRITING,
                                 done, total, "Deleting backups (" + done + " of " + total + ")"));
-                    }, executor));
+                    });
                 }
-                joinAll(tasks);
+                runAll(tasks);
             }
         }
         RecoverySupport.report(progressListener, batchProgress(
@@ -166,26 +170,51 @@ final class RecoveryDeleteOperation {
         }
     }
 
-    /** Waits for every task even after an interrupt; each one is committing storage changes. */
-    private static void joinAll(List<CompletableFuture<Void>> tasks) throws InterruptedException {
-        boolean interrupted = false;
-        try {
-            for (CompletableFuture<Void> task : tasks) {
-                while (true) {
-                    try {
-                        task.get();
-                        break;
-                    } catch (InterruptedException exception) {
-                        interrupted = true;
-                    } catch (java.util.concurrent.ExecutionException exception) {
-                        throw new CompletionException(exception.getCause());
-                    }
+    /**
+     * Runs the tasks with the executor and this thread pulling from one shared queue. The
+     * caller never blocks on work that only the executor could start, so a bounded or
+     * single-threaded executor cannot deadlock. Every task finishes even after an
+     * interrupt, because each one is committing storage changes.
+     */
+    private void runAll(List<Runnable> tasks) throws InterruptedException {
+        Queue<Runnable> pending = new ConcurrentLinkedQueue<>(tasks);
+        CountDownLatch finished = new CountDownLatch(tasks.size());
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Runnable drain = () -> {
+            Runnable task;
+            while ((task = pending.poll()) != null) {
+                try {
+                    task.run();
+                } catch (Throwable exception) {
+                    failure.compareAndSet(null, exception);
+                } finally {
+                    finished.countDown();
                 }
             }
-        } finally {
-            if (interrupted) {
-                Thread.currentThread().interrupt();
+        };
+        for (int helper = 1; helper < tasks.size(); helper++) {
+            try {
+                executor.execute(drain);
+            } catch (RejectedExecutionException exception) {
+                break;
             }
+        }
+        drain.run();
+        boolean interrupted = false;
+        while (true) {
+            try {
+                finished.await();
+                break;
+            } catch (InterruptedException exception) {
+                interrupted = true;
+            }
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
+        Throwable failed = failure.get();
+        if (failed != null) {
+            throw new CompletionException(failed);
         }
         if (Thread.currentThread().isInterrupted()) {
             throw new InterruptedException("Backup deletion was cancelled");
