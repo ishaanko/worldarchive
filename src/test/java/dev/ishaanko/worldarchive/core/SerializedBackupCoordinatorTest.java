@@ -591,6 +591,45 @@ final class SerializedBackupCoordinatorTest {
     }
 
     @Test
+    void cancellationKeepsAGitSnapshotWhoseSyncWasInterrupted() throws Exception {
+        CountDownLatch pushing = new CountDownLatch(1);
+        FakeBackend git = new FakeBackend(DestinationType.GIT, ignored -> AsyncTasks.supplyInterruptible(
+                coordinatorExecutor,
+                () -> {
+                    pushing.countDown();
+                    try {
+                        Thread.sleep(Long.MAX_VALUE);
+                    } catch (InterruptedException exception) {
+                        // The local snapshot exists; only the remote push was cut short.
+                        return DestinationResult.pendingSync(
+                                DestinationType.GIT, "snapshot", "Remote synchronization was cancelled");
+                    }
+                    return DestinationResult.success(DestinationType.GIT, "snapshot");
+                }));
+        InMemoryCatalog catalog = new InMemoryCatalog();
+        SerializedBackupCoordinator coordinator = coordinator(
+                catalog,
+                new InMemoryInventoryStore(),
+                new FakeCaptureFactory(temporaryDirectory.resolve("captures-pending-sync")),
+                List.of(git),
+                BackupCaptureGate.DIRECT,
+                new LockingWorldOperationGate());
+        WorldId worldId = WorldId.create();
+        CompletionStage<BackupResult> operation = coordinator.createBackup(
+                request(worldId, "world-pending-sync", BackupTrigger.MANUAL, Optional.empty()),
+                ProgressListener.NO_OP);
+        assertTrue(pushing.await(5, TimeUnit.SECONDS));
+
+        assertTrue(operation.toCompletableFuture().cancel(true));
+        await(() -> !coordinator.isBusy(worldId));
+
+        assertEquals(1, catalog.records.size());
+        assertEquals(
+                DestinationStatus.PENDING_SYNC,
+                destination(catalog.records.getFirst().result(), DestinationType.GIT).status());
+    }
+
+    @Test
     void sharedWorldGateBlocksCreateUntilExternalMaintenancePermitCloses() throws Exception {
         LockingWorldOperationGate operationGate = new LockingWorldOperationGate();
         WorldId worldId = WorldId.create();

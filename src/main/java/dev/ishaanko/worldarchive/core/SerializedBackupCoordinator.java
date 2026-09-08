@@ -477,8 +477,8 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
             }
             operation.destinationTasks.add(source);
             if (operation.cancelled.get()) {
-                // A cancellation that raced this loop already interrupted the earlier tasks.
-                source.cancel(operation.interruptRequested.get());
+                // A cancellation that raced this loop already stopped the earlier tasks.
+                stopDestination(source, operation.interruptRequested.get());
             }
             outcomes.add(source.handle((result, throwable) -> destinationOutcome(
                     expectedDestination,
@@ -575,6 +575,19 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
             }
         }
         for (CompletableFuture<?> destination : operation.destinationTasks) {
+            stopDestination(destination, mayInterrupt);
+        }
+    }
+
+    /**
+     * Stops one destination's work. A destination that can be interrupted keeps its own
+     * outcome, so a snapshot it already published is still recorded; any other stage is
+     * cancelled outright.
+     */
+    private static void stopDestination(CompletableFuture<?> destination, boolean mayInterrupt) {
+        if (destination instanceof AsyncTasks.InterruptibleFuture<?> interruptible) {
+            interruptible.stop(mayInterrupt);
+        } else {
             destination.cancel(mayInterrupt);
         }
     }
