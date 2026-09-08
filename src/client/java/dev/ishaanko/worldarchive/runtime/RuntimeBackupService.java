@@ -107,6 +107,15 @@ final class RuntimeBackupService implements BackupService {
     }
 
     @Override
+    public CompletionStage<List<BackupResult>> deleteBackups(
+            List<DeleteBackupRequest> requests,
+            ProgressListener progressListener) {
+        return withHealthyState(state -> state.coordinator()
+                .maintenanceService()
+                .deleteBackups(requests, progressListener));
+    }
+
+    @Override
     public CompletionStage<BackupResult> verifyBackup(
             BackupId backupId,
             ProgressListener progressListener) {

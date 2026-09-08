@@ -272,6 +272,33 @@ class ZipBackupStoreTest {
     }
 
     @Test
+    void listArchivesReadsIdentityWithoutHashingTheArchive() throws Exception {
+        CreatedBackup created = createSimpleBackup(CREATED_AT);
+        ZipBackupStore store = created.store();
+        assertEquals(store.listCompleteArchives(), store.listArchives());
+
+        // Trailing bytes break the sidecar checksum but leave the leading manifest readable.
+        Files.write(
+                created.artifact().archivePath(),
+                new byte[] {1, 2, 3},
+                StandardOpenOption.APPEND);
+
+        assertTrue(store.listCompleteArchives().isEmpty());
+        assertEquals(List.of(created.artifact()), store.listArchives());
+    }
+
+    @Test
+    void listArchivesSkipsPairsWithoutAUsableChecksumSidecar() throws Exception {
+        CreatedBackup created = createSimpleBackup(CREATED_AT);
+        CreatedBackup unpaired = createSimpleBackup(CREATED_AT.plusSeconds(1));
+        CreatedBackup malformed = createSimpleBackup(CREATED_AT.plusSeconds(2));
+        Files.delete(unpaired.artifact().checksumPath());
+        Files.writeString(malformed.artifact().checksumPath(), "not a checksum line\n");
+
+        assertEquals(List.of(created.artifact()), created.store().listArchives());
+    }
+
+    @Test
     void sourceSymlinkIsRejectedWhereSupported() throws Exception {
         Path world = Files.createDirectories(temporaryDirectory.resolve("world"));
         Path target = Files.writeString(world.resolve("target.txt"), "target");

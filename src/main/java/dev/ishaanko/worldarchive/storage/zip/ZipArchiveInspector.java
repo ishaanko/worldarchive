@@ -88,6 +88,40 @@ final class ZipArchiveInspector {
                 .orElseThrow(() -> new IOException("ZIP archive manifest is missing"));
     }
 
+    /**
+     * Reads the embedded manifest without verifying the archive. The writer stores the
+     * manifest as the first entry, so this normally decompresses only that entry. It gives
+     * listings an identity and a creation time; call {@link #inspect} before trusting the
+     * world files.
+     */
+    static BackupManifest readLeadingManifest(SeekableByteChannel archive) throws IOException {
+        long archiveSize = archive.size();
+        if (archiveSize <= 0 || archiveSize > ZipLimits.MAXIMUM_ARCHIVE_BYTES) {
+            throw new IOException("ZIP archive has an invalid size");
+        }
+        archive.position(0);
+        long[] uncompressedBytes = {0, ZipLimits.maximumUncompressedBytes(archiveSize)};
+        InputStream channelInput = new NonClosingInputStream(Channels.newInputStream(archive));
+        try (ZipInputStream zip = new ZipInputStream(channelInput, StandardCharsets.UTF_8)) {
+            ZipEntry entry;
+            while ((entry = zip.getNextEntry()) != null) {
+                requireNotInterrupted();
+                if (entry.getName().equals(ZipArchiveFormat.MANIFEST_ENTRY)
+                        && !entry.isDirectory()) {
+                    byte[] encoded = readLimited(
+                            zip,
+                            entry.getSize(),
+                            ZipArchiveFormat.MAXIMUM_MANIFEST_BYTES,
+                            uncompressedBytes);
+                    return ZipMetadataCodec.decodeManifest(encoded);
+                }
+                drain(zip, uncompressedBytes);
+                zip.closeEntry();
+            }
+        }
+        throw new IOException("ZIP archive manifest is missing");
+    }
+
     private static BackupManifest decodeManifest(byte[] encoded, Set<String> problems) {
         if (encoded == null) {
             problems.add("Archive manifest is missing.");

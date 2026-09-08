@@ -7,6 +7,23 @@
 - A World Backups icon sits at the far right of the square icons on the title
   screen and on the pause screen. On the title screen it opens the list of
   backed-up worlds; in a world it opens that world's backups.
+- The backup browser can select several backups at once. Ctrl or Cmd click
+  toggles a row, Shift click extends the selection, and "Select all" picks
+  every backup that matches the filter. One confirmation deletes all of them,
+  and the result screen shows how many were removed and which ones failed.
+
+### Changed
+
+- The storage screen opens in seconds on large archives. Before, it copied,
+  hashed, and fully unpacked every ZIP backup on each visit, which took more
+  than ten minutes on big stores. The scan now reads only each archive's
+  filename, checksum sidecar, and embedded manifest. Import still verifies
+  every archive in full.
+- Deleting several backups runs them together inside one per-world lock
+  instead of one full operation per backup. Git and ZIP work overlaps.
+- The worlds screen and the ZIP health check use the same fast scan.
+- Measuring the Git repository size reads one set of file attributes per file
+  instead of three.
 
 ## 0.3.5.1 (2026-08-24)
 
