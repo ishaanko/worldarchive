@@ -59,7 +59,8 @@ public final class ZipBackupBackend implements BackupBackend {
         Objects.requireNonNull(progressListener, "progressListener");
         OperationId operationId = OperationId.create();
         long totalBytes = capture.manifest().sourceByteCount();
-        return AsyncTasks.supply(executor, () -> {
+        // Cancelling the stage interrupts the write; the store discards the partial archive.
+        return AsyncTasks.supplyInterruptible(executor, () -> {
             report(progressListener, progress(
                     operationId, capture, OperationPhase.PREPARING, 0, totalBytes,
                     "Preparing ZIP backup"));

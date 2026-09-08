@@ -7,13 +7,17 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.ishaanko.worldarchive.catalog.BackupCatalog;
+import dev.ishaanko.worldarchive.core.CoordinatorFakes.BlockingCatalog;
+import dev.ishaanko.worldarchive.core.CoordinatorFakes.FakeBackend;
+import dev.ishaanko.worldarchive.core.CoordinatorFakes.FakeCaptureFactory;
+import dev.ishaanko.worldarchive.core.CoordinatorFakes.InMemoryCatalog;
+import dev.ishaanko.worldarchive.core.CoordinatorFakes.InMemoryInventoryStore;
+import dev.ishaanko.worldarchive.core.CoordinatorFakes.UnusedMaintenanceService;
 import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.BackupManifest;
-import dev.ishaanko.worldarchive.model.BackupRecord;
 import dev.ishaanko.worldarchive.model.BackupResult;
 import dev.ishaanko.worldarchive.model.BackupStatus;
 import dev.ishaanko.worldarchive.model.BackupTrigger;
-import dev.ishaanko.worldarchive.model.DestinationHealth;
 import dev.ishaanko.worldarchive.model.DestinationResult;
 import dev.ishaanko.worldarchive.model.DestinationStatus;
 import dev.ishaanko.worldarchive.model.DestinationType;
@@ -22,7 +26,6 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.MessageDigest;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -42,10 +45,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.BiFunction;
 import java.util.function.BooleanSupplier;
-import java.util.function.Function;
-import java.util.function.UnaryOperator;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -527,6 +527,70 @@ final class SerializedBackupCoordinatorTest {
     }
 
     @Test
+    void cancellationDuringDestinationWritesStopsThemAndRecordsNothing() throws Exception {
+        CompletableFuture<DestinationResult> writing = new CompletableFuture<>();
+        FakeBackend backend = new FakeBackend(DestinationType.ZIP, ignored -> writing);
+        InMemoryCatalog catalog = new InMemoryCatalog();
+        InMemoryInventoryStore inventories = new InMemoryInventoryStore();
+        SerializedBackupCoordinator coordinator = coordinator(
+                catalog,
+                inventories,
+                new FakeCaptureFactory(temporaryDirectory.resolve("captures-writing")),
+                List.of(backend),
+                BackupCaptureGate.DIRECT,
+                new LockingWorldOperationGate());
+        WorldId worldId = WorldId.create();
+        CompletionStage<BackupResult> operation = coordinator.createBackup(
+                request(worldId, "world-writing", BackupTrigger.MANUAL, Optional.empty()),
+                ProgressListener.NO_OP);
+        await(() -> backend.calls.get() == 1);
+
+        assertTrue(operation.toCompletableFuture().cancel(true));
+
+        assertTrue(writing.isCancelled());
+        await(() -> !coordinator.isBusy(worldId));
+        assertThrows(
+                java.util.concurrent.CancellationException.class,
+                () -> operation.toCompletableFuture().join());
+        assertEquals(List.of(), catalog.records);
+        assertEquals(Map.of(), inventories.values);
+    }
+
+    @Test
+    void cancellationKeepsAndRecordsDestinationsThatAlreadyFinished() throws Exception {
+        CompletableFuture<DestinationResult> gitWriting = new CompletableFuture<>();
+        FakeBackend zip = FakeBackend.success(DestinationType.ZIP);
+        FakeBackend git = new FakeBackend(DestinationType.GIT, ignored -> gitWriting);
+        InMemoryCatalog catalog = new InMemoryCatalog();
+        SerializedBackupCoordinator coordinator = coordinator(
+                catalog,
+                new InMemoryInventoryStore(),
+                new FakeCaptureFactory(temporaryDirectory.resolve("captures-partial")),
+                List.of(zip, git),
+                BackupCaptureGate.DIRECT,
+                new LockingWorldOperationGate());
+        WorldId worldId = WorldId.create();
+        CompletionStage<BackupResult> operation = coordinator.createBackup(
+                request(worldId, "world-partial", BackupTrigger.MANUAL, Optional.empty()),
+                ProgressListener.NO_OP);
+        await(() -> git.calls.get() == 1);
+
+        assertTrue(operation.toCompletableFuture().cancel(true));
+        await(() -> !coordinator.isBusy(worldId));
+
+        assertTrue(operation.toCompletableFuture().isCancelled());
+        assertEquals(1, catalog.records.size());
+        BackupResult recorded = catalog.records.getFirst().result();
+        assertEquals(BackupStatus.PARTIAL_SUCCESS, recorded.status());
+        assertEquals(
+                DestinationStatus.SUCCESS,
+                destination(recorded, DestinationType.ZIP).status());
+        assertEquals(
+                "Cancelled before this destination finished",
+                destination(recorded, DestinationType.GIT).message().orElseThrow());
+    }
+
+    @Test
     void sharedWorldGateBlocksCreateUntilExternalMaintenancePermitCloses() throws Exception {
         LockingWorldOperationGate operationGate = new LockingWorldOperationGate();
         WorldId worldId = WorldId.create();
@@ -760,6 +824,13 @@ final class SerializedBackupCoordinatorTest {
         return manifest.worldId() + ":" + manifest.label().orElse("none");
     }
 
+    private static DestinationResult destination(BackupResult result, DestinationType type) {
+        return result.destinations().stream()
+                .filter(destination -> destination.destination() == type)
+                .findFirst()
+                .orElseThrow();
+    }
+
     private static void await(BooleanSupplier condition) throws Exception {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         while (!condition.getAsBoolean()) {
@@ -767,231 +838,6 @@ final class SerializedBackupCoordinatorTest {
                 throw new AssertionError("Condition was not satisfied before timeout");
             }
             Thread.sleep(10);
-        }
-    }
-
-    private static final class FakeCaptureFactory implements BackupCaptureFactory {
-        private final Path root;
-
-        private final AtomicInteger calls = new AtomicInteger();
-
-        private final WorldInventory inventory;
-
-        private volatile java.util.function.Consumer<CreateBackupRequest> observer = ignored -> {
-        };
-
-        private FakeCaptureFactory(Path root) throws Exception {
-            this.root = root;
-            byte[] contents = "contents".getBytes(StandardCharsets.UTF_8);
-            this.inventory = WorldInventory.create(List.of(new WorldInventory.Entry(
-                    "level.dat",
-                    contents.length,
-                    java.util.HexFormat.of().formatHex(
-                            MessageDigest.getInstance("SHA-256").digest(contents)))));
-        }
-
-        @Override
-        public CapturedBackup capture(
-                CreateBackupRequest request,
-                BackupId backupId,
-                Instant createdAt,
-                Optional<WorldInventory> previousInventory,
-                CaptureProgressListener progressListener) throws IOException {
-            observer.accept(request);
-            Files.createDirectories(root);
-            Path staging = Files.createDirectory(root.resolve("capture-" + calls.incrementAndGet()));
-            long changed = previousInventory.map(inventory::changedFilesSince).orElse(inventory.fileCount());
-            BackupManifest manifest = BackupManifest.create(
-                    backupId,
-                    request.worldId(),
-                    request.worldName(),
-                    request.label(),
-                    createdAt,
-                    request.trigger(),
-                    inventory.fileCount(),
-                    inventory.byteCount(),
-                    changed,
-                    inventory.contentSha256(),
-                    inventory.inventorySha256());
-            return new CapturedBackup(
-                    new BackupCapture(staging, manifest),
-                    inventory,
-                    () -> Files.deleteIfExists(staging));
-        }
-    }
-
-    private static final class FakeBackend implements BackupBackend {
-        private final DestinationType destination;
-
-        private final BiFunction<BackupCapture, ProgressListener, CompletionStage<DestinationResult>> result;
-
-        private final AtomicInteger calls = new AtomicInteger();
-
-        private FakeBackend(
-                DestinationType destination,
-                Function<BackupCapture, CompletionStage<DestinationResult>> result) {
-            this(destination, (capture, ignored) -> result.apply(capture));
-        }
-
-        private FakeBackend(
-                DestinationType destination,
-                BiFunction<BackupCapture, ProgressListener, CompletionStage<DestinationResult>> result) {
-            this.destination = destination;
-            this.result = result;
-        }
-
-        private static FakeBackend success(DestinationType destination) {
-            return new FakeBackend(destination, ignored -> CompletableFuture.completedFuture(
-                    DestinationResult.success(destination, destination.name().toLowerCase())));
-        }
-
-        @Override
-        public DestinationType destinationType() {
-            return destination;
-        }
-
-        @Override
-        public CompletionStage<DestinationResult> createBackup(
-                BackupCapture capture,
-                ProgressListener progressListener) {
-            calls.incrementAndGet();
-            return result.apply(capture, progressListener);
-        }
-    }
-
-    private static final class InMemoryInventoryStore implements WorldInventoryStore {
-        private final Map<WorldId, WorldInventory> values = new ConcurrentHashMap<>();
-
-        private IOException loadFailure;
-
-        @Override
-        public Optional<WorldInventory> load(WorldId worldId) throws IOException {
-            if (loadFailure != null) {
-                throw loadFailure;
-            }
-            return Optional.ofNullable(values.get(worldId));
-        }
-
-        @Override
-        public void save(WorldId worldId, WorldInventory inventory) {
-            values.put(worldId, inventory);
-        }
-    }
-
-    private static class InMemoryCatalog implements BackupCatalog {
-        protected final List<BackupRecord> records = java.util.Collections.synchronizedList(new ArrayList<>());
-
-        @Override
-        public void add(BackupRecord record) throws IOException {
-            records.add(record);
-        }
-
-        @Override
-        public Optional<BackupRecord> find(BackupId backupId) {
-            return records.stream()
-                    .filter(record -> record.manifest().backupId().equals(backupId))
-                    .findFirst();
-        }
-
-        @Override
-        public List<BackupRecord> listAll() {
-            return List.copyOf(records);
-        }
-
-        @Override
-        public List<BackupRecord> list(WorldId worldId) {
-            return records.stream()
-                    .filter(record -> record.manifest().worldId().equals(worldId))
-                    .toList();
-        }
-
-        @Override
-        public Optional<BackupRecord> update(
-                BackupId backupId,
-                UnaryOperator<BackupRecord> update) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public boolean remove(BackupId backupId) {
-            return records.removeIf(record -> record.manifest().backupId().equals(backupId));
-        }
-    }
-
-    private static final class BlockingCatalog extends InMemoryCatalog {
-        private final CountDownLatch entered = new CountDownLatch(1);
-
-        private final CountDownLatch release = new CountDownLatch(1);
-
-        @Override
-        public void add(BackupRecord record) throws IOException {
-            entered.countDown();
-            try {
-                if (!release.await(5, TimeUnit.SECONDS)) {
-                    throw new IOException("Timed out waiting to publish test catalog record");
-                }
-            } catch (InterruptedException exception) {
-                Thread.currentThread().interrupt();
-                throw new IOException("Interrupted while publishing test catalog record", exception);
-            }
-            super.add(record);
-        }
-    }
-
-    private static final class UnusedMaintenanceService implements BackupMaintenanceService {
-        @Override
-        public CompletionStage<List<BackupRecord>> listBackups(Optional<WorldId> worldId) {
-            return CompletableFuture.failedFuture(new UnsupportedOperationException());
-        }
-
-        @Override
-        public CompletionStage<Optional<BackupRecord>> findBackup(BackupId backupId) {
-            return CompletableFuture.failedFuture(new UnsupportedOperationException());
-        }
-
-        @Override
-        public CompletionStage<RestoreBackupResult> restoreBackup(
-                RestoreBackupRequest request,
-                ProgressListener progressListener) {
-            return CompletableFuture.failedFuture(new UnsupportedOperationException());
-        }
-
-        @Override
-        public CompletionStage<DeletePreparation> prepareDelete(BackupId backupId) {
-            return CompletableFuture.failedFuture(new UnsupportedOperationException());
-        }
-
-        @Override
-        public CompletionStage<BackupResult> deleteBackup(
-                DeleteBackupRequest request,
-                ProgressListener progressListener) {
-            return CompletableFuture.failedFuture(new UnsupportedOperationException());
-        }
-
-        @Override
-        public CompletionStage<List<BackupResult>> deleteBackups(
-                List<DeleteBackupRequest> requests,
-                ProgressListener progressListener) {
-            return CompletableFuture.failedFuture(new UnsupportedOperationException());
-        }
-
-        @Override
-        public CompletionStage<BackupResult> verifyBackup(
-                BackupId backupId,
-                ProgressListener progressListener) {
-            return CompletableFuture.failedFuture(new UnsupportedOperationException());
-        }
-
-        @Override
-        public CompletionStage<BackupResult> syncBackup(
-                BackupId backupId,
-                ProgressListener progressListener) {
-            return CompletableFuture.failedFuture(new UnsupportedOperationException());
-        }
-
-        @Override
-        public CompletionStage<List<DestinationHealth>> health(Optional<WorldId> worldId) {
-            return CompletableFuture.failedFuture(new UnsupportedOperationException());
         }
     }
 }

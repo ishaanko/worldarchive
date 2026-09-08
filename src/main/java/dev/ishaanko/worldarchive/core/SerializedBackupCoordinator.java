@@ -440,14 +440,8 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
             CreateOperation operation,
             CapturedBackup captured) {
         synchronized (operation) {
-            if (operation.cancellationState.compareAndSet(
-                    CancellationState.CANCELLABLE,
-                    CancellationState.COMMITTING)) {
-                // Destination publication is now the operation's point of no return.
-            } else if (operation.cancellationState.get() == CancellationState.CANCELLATION_REQUESTED) {
+            if (operation.cancelled.get()) {
                 finish(operation, null, new CancellationException("Backup was cancelled"));
-                return;
-            } else {
                 return;
             }
         }
@@ -482,6 +476,10 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
                 source = CompletableFuture.failedFuture(throwable);
             }
             operation.destinationTasks.add(source);
+            if (operation.cancelled.get()) {
+                // A cancellation that raced this loop already interrupted the earlier tasks.
+                source.cancel(operation.interruptRequested.get());
+            }
             outcomes.add(source.handle((result, throwable) -> destinationOutcome(
                     expectedDestination,
                     result,
@@ -491,13 +489,21 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
                 .whenComplete((ignored, throwable) -> finalizeDestinations(operation, outcomes));
     }
 
+    /**
+     * Records what the destinations produced. Recording is the point of no return: a
+     * cancellation that arrives later is refused. A cancellation that arrived while the
+     * destinations wrote still records any destination that had already finished, so a
+     * complete artifact is never left out of the catalog.
+     */
     private void finalizeDestinations(
             CreateOperation operation,
             List<CompletableFuture<DestinationResult>> outcomes) {
-        if (operation.cancelled.get()) {
-            finish(operation, null, new CancellationException("Backup was cancelled"));
-            return;
+        synchronized (operation) {
+            operation.cancellationState.compareAndSet(
+                    CancellationState.CANCELLABLE,
+                    CancellationState.COMMITTING);
         }
+        boolean cancelled = operation.cancelled.get();
         try {
             List<DestinationResult> destinations = outcomes.stream()
                     .map(CompletableFuture::join)
@@ -530,6 +536,10 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
                             manifest.sourceByteCount(),
                             "Backup complete; change inventory could not be updated");
                 }
+            }
+            if (cancelled) {
+                finish(operation, null, new CancellationException("Backup was cancelled"));
+                return;
             }
             finish(operation, result, null);
         } catch (Throwable throwable) {
@@ -774,6 +784,11 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
             DestinationType expectedDestination,
             DestinationResult result,
             Throwable throwable) {
+        if (throwable instanceof CancellationException) {
+            return DestinationResult.failed(
+                    expectedDestination,
+                    "Cancelled before this destination finished");
+        }
         if (throwable != null || result == null || result.destination() != expectedDestination) {
             return DestinationResult.failed(
                     expectedDestination,

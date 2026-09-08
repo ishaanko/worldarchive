@@ -19,6 +19,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.RejectedExecutionException;
@@ -419,7 +420,8 @@ final class RuntimeLifecycle {
                 PendingLiveBackup exit = stopped.value().orElseThrow();
                 runtime.beginBackupProgress(
                         BackgroundBackupWarnings.worldExitStartedMessage(),
-                        exit.result());
+                        exit.result(),
+                        () -> cancelExitBackup(exit));
                 boolean quitting;
                 synchronized (lock) {
                     quitting = clientStopping;
@@ -608,8 +610,27 @@ final class RuntimeLifecycle {
     }
 
     private void captureAndDispatch(PendingLiveBackup pending) {
-        PreparedBackup prepared = prepareCapture(pending);
+        if (!pending.beginCapture()) {
+            pending.fail(cancelled());
+            return;
+        }
+        PreparedBackup prepared;
+        boolean proceed;
+        try {
+            prepared = prepareCapture(pending);
+        } finally {
+            proceed = pending.endCapture();
+        }
         if (prepared == null) {
+            return;
+        }
+        if (!proceed) {
+            try {
+                prepared.close();
+            } catch (IOException exception) {
+                runtime.logFailure("A cancelled capture could not be released", exception);
+            }
+            pending.fail(cancelled());
             return;
         }
         CompletionStage<BackupResult> operation;
@@ -631,10 +652,29 @@ final class RuntimeLifecycle {
             }
             return;
         }
-        operation.whenComplete((result, throwable) -> completeBackup(
+        CompletableFuture<BackupResult> future = operation.toCompletableFuture();
+        if (!pending.dispatched(future)) {
+            future.cancel(true);
+        }
+        future.whenComplete((result, throwable) -> completeBackup(
                 pending,
                 result,
                 throwable));
+    }
+
+    /**
+     * Cancel button handler. Safe to call from the render thread: the coordinator
+     * cancel runs on a worker because it may release captured files.
+     */
+    private void cancelExitBackup(PendingLiveBackup pending) {
+        CompletableFuture<BackupResult> running = pending.requestCancel();
+        if (running != null) {
+            runtime.submit(() -> running.cancel(true));
+        }
+    }
+
+    private static CancellationException cancelled() {
+        return new CancellationException("Backup was cancelled");
     }
 
     private PreparedBackup prepareCapture(PendingLiveBackup pending) {
@@ -652,9 +692,14 @@ final class RuntimeLifecycle {
             if (exception instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
-            pending.fail(WorldArchiveRuntime.safeFailure(
-                    exception,
-                    "World capture could not be prepared"));
+            if (pending.isCancelled()) {
+                // The Cancel button interrupted the capture thread; that is not a failure.
+                pending.fail(cancelled());
+            } else {
+                pending.fail(WorldArchiveRuntime.safeFailure(
+                        exception,
+                        "World capture could not be prepared"));
+            }
             if (exception instanceof Error error) {
                 throw error;
             }
@@ -775,6 +820,14 @@ final class RuntimeLifecycle {
 
         private final CompletableFuture<Void> settled = new CompletableFuture<>();
 
+        // Guarded by this. A cancellation interrupts the capture thread while the
+        // world is copied, and cancels the coordinator operation once dispatched.
+        private boolean cancelRequested;
+
+        private Thread captureThread;
+
+        private CompletableFuture<BackupResult> operation;
+
         private PendingLiveBackup(
                 RuntimeState state,
                 IntegratedServer server,
@@ -812,6 +865,57 @@ final class RuntimeLifecycle {
 
         private CompletableFuture<Void> settled() {
             return settled;
+        }
+
+        /**
+         * Asks the backup to stop. While the world is copied this interrupts the capture
+         * thread and returns null. Once dispatched it returns the running operation, which
+         * the caller cancels off-thread; the coordinator refuses once it records the
+         * result, and the backup then completes normally.
+         */
+        private synchronized CompletableFuture<BackupResult> requestCancel() {
+            if (result.isDone()) {
+                return null;
+            }
+            cancelRequested = true;
+            if (captureThread != null) {
+                captureThread.interrupt();
+                return null;
+            }
+            return operation;
+        }
+
+        private synchronized boolean isCancelled() {
+            return cancelRequested;
+        }
+
+        /** Claims the calling thread for the capture; false when cancelled before it began. */
+        private synchronized boolean beginCapture() {
+            if (cancelRequested) {
+                return false;
+            }
+            captureThread = Thread.currentThread();
+            return true;
+        }
+
+        /**
+         * Releases the capture thread and clears an interrupt a cancellation may have
+         * left on it. Returns false when the backup must not continue to its destinations.
+         */
+        private boolean endCapture() {
+            boolean proceed;
+            synchronized (this) {
+                captureThread = null;
+                proceed = !cancelRequested;
+            }
+            Thread.interrupted();
+            return proceed;
+        }
+
+        /** Records the running operation; false when a cancellation arrived first. */
+        private synchronized boolean dispatched(CompletableFuture<BackupResult> future) {
+            operation = Objects.requireNonNull(future, "future");
+            return !cancelRequested;
         }
 
         private void succeed(BackupResult value) {

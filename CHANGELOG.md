@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- The backup toast that appears after you leave a world has a Cancel button.
+  It stops the backup while the world is copied or while the destinations
+  write. A destination that had already finished is kept and recorded. Once
+  the backup is being recorded in the catalog it can no longer be cancelled.
+
 ## 0.3.6 (2026-09-08)
 
 ### Added
