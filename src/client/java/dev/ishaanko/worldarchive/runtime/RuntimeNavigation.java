@@ -72,10 +72,11 @@ final class RuntimeNavigation {
         transitionToRestoredWorld(returnTo, result, true);
     }
 
-    void openBrowser() {
+    /** Opens the live world's browser; false when no world is resolved or the runtime is not ready. */
+    boolean openBrowser() {
         BackupWorldContext world = runtime.currentLiveWorld();
         if (world == null || runtime.unavailable()) {
-            return;
+            return false;
         }
         Minecraft minecraft = runtime.services().minecraft();
         minecraft.execute(() -> {
@@ -86,6 +87,7 @@ final class RuntimeNavigation {
                         runtime));
             }
         });
+        return true;
     }
 
     boolean sourceDirectoryAvailable(BackupWorldContext world) {
