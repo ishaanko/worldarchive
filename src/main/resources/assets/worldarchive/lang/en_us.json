@@ -1,5 +1,6 @@
 {
     "modmenu.descriptionTranslation.worldarchive": "Creates dependable local backups of your single-player worlds.",
+    "screen.worldarchive.backups_button": "World Backups",
     "screen.worldarchive.settings.archive_folder": "Archive folder",
     "screen.worldarchive.settings.back": "Back",
     "screen.worldarchive.settings.browse": "Browse...",

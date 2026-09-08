@@ -4,6 +4,9 @@
 
 ### Added
 
+- A World Backups icon sits at the far right of the square icons on the title
+  screen and on the pause screen. On the title screen it opens the list of
+  backed-up worlds; in a world it opens that world's backups.
 - The backup browser can select several backups at once. Ctrl or Cmd click
   toggles a row, Shift click extends the selection, and "Select all" picks
   every backup that matches the filter. One confirmation deletes all of them,
