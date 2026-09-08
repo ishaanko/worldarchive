@@ -2,18 +2,22 @@ package dev.ishaanko.worldarchive.ui.model;
 
 import java.util.Collections;
 import java.util.EnumMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 
 /** Pure action policy shared by screens and screen tests. */
 public final class BackupActionPolicy {
     private BackupActionPolicy() {
     }
 
+    /**
+     * Evaluates every action for the current selection. Delete accepts any number of rows;
+     * restore, sync, and verify need exactly one.
+     */
     public static Map<BackupAction, BackupActionAvailability> evaluate(
             BackupBrowserCapabilities capabilities,
-            Optional<BackupRow> selection) {
+            List<BackupRow> selection) {
         Objects.requireNonNull(capabilities, "capabilities");
         Objects.requireNonNull(selection, "selection");
         EnumMap<BackupAction, BackupActionAvailability> result = new EnumMap<>(BackupAction.class);
@@ -43,12 +47,21 @@ public final class BackupActionPolicy {
             disableSelectionActions(result, ActionDisabledReason.NO_SELECTION);
             return Collections.unmodifiableMap(result);
         }
-        BackupRow row = selection.orElseThrow();
+        boolean allDurable = selection.stream().allMatch(BackupRow::hasDurableCopy);
+        result.put(
+                BackupAction.DELETE,
+                allDurable ? enabled() : disabled(ActionDisabledReason.NO_DURABLE_COPY));
+        if (selection.size() > 1) {
+            result.put(BackupAction.RESTORE, disabled(ActionDisabledReason.MULTIPLE_SELECTED));
+            result.put(BackupAction.VERIFY, disabled(ActionDisabledReason.MULTIPLE_SELECTED));
+            result.put(BackupAction.SYNC, disabled(ActionDisabledReason.MULTIPLE_SELECTED));
+            return Collections.unmodifiableMap(result);
+        }
+        BackupRow row = selection.getFirst();
         BackupActionAvailability durable = row.hasDurableCopy()
                 ? enabled()
                 : disabled(ActionDisabledReason.NO_DURABLE_COPY);
         result.put(BackupAction.RESTORE, durable);
-        result.put(BackupAction.DELETE, durable);
         result.put(BackupAction.VERIFY, durable);
 
         BackupActionAvailability sync;

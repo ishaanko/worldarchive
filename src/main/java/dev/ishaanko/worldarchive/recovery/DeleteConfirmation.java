@@ -35,6 +35,13 @@ record DeleteConfirmation(
                 expiresAt);
     }
 
+    /** Destination types the user approved; used to report a deletion that never started. */
+    Set<DestinationType> destinationTypes() {
+        return destinations.stream()
+                .map(ConfirmedDestination::type)
+                .collect(Collectors.toUnmodifiableSet());
+    }
+
     void requireMatches(BackupRecord current) {
         if (!manifest.equals(current.manifest())
                 || !destinations.equals(destinations(current))) {

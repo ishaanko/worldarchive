@@ -6,6 +6,7 @@ import dev.ishaanko.worldarchive.core.DeleteBackupRequest;
 import dev.ishaanko.worldarchive.core.DeletePreparation;
 import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.BackupRecord;
+import dev.ishaanko.worldarchive.model.BackupResult;
 import dev.ishaanko.worldarchive.ui.model.ActionDisabledReason;
 import dev.ishaanko.worldarchive.ui.model.BackupAction;
 import dev.ishaanko.worldarchive.ui.model.BackupActionAvailability;
@@ -18,10 +19,14 @@ import dev.ishaanko.worldarchive.ui.model.BackupSort;
 import dev.ishaanko.worldarchive.ui.model.ConfirmationKind;
 import dev.ishaanko.worldarchive.ui.model.ConfirmationState;
 import dev.ishaanko.worldarchive.ui.model.ScreenGeometry;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.components.Button;
@@ -29,9 +34,17 @@ import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.components.StringWidget;
 import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.input.InputWithModifiers;
 import net.minecraft.network.chat.Component;
 
-/** Native backup browser scoped to one persistent world identity. */
+/**
+ * Native backup browser scoped to one persistent world identity.
+ *
+ * <p>Rows support multi-selection: a plain click selects one row, Ctrl or Cmd click toggles a
+ * row, Shift click extends from the last clicked row, and "Select all" covers every row that
+ * matches the filter. The selection survives paging and filtering so a large cleanup can be
+ * assembled across pages; only Delete accepts more than one row.</p>
+ */
 public final class BackupBrowserScreen extends Screen {
     private static final int ROW_HEIGHT = 38;
 
@@ -49,6 +62,8 @@ public final class BackupBrowserScreen extends Screen {
 
     /** Covers both sequential five-minute Git tool probes plus scheduling headroom. */
     private static final int MAXIMUM_CAPABILITY_POLLS = 660;
+
+    private static final int CONFIRMATION_PREVIEW_ROWS = 5;
 
     private final Screen parent;
 
@@ -69,7 +84,12 @@ public final class BackupBrowserScreen extends Screen {
 
     private int pageIndex;
 
-    private BackupId selectedBackupId;
+    private final Set<BackupId> selectedBackupIds = new LinkedHashSet<>();
+
+    /** Last row clicked without Shift; Shift click selects from here to the clicked row. */
+    private BackupId selectionAnchor;
+
+    private List<BackupRow> visibleRows = List.of();
 
     private Component status = Component.literal("Loading backups…").withStyle(ChatFormatting.GRAY);
 
@@ -163,7 +183,6 @@ public final class BackupBrowserScreen extends Screen {
         int contentX = ScreenGeometry.centerX(width, contentWidth);
         addRenderableOnly(Widgets.title(font, contentX, 5, contentWidth, 18, title));
         addRenderableOnly(Widgets.muted(font, contentX, 22, contentWidth, 16, world.displayName()));
-        addFilterAndSort(contentX, contentWidth);
 
         int paginationY = Math.max(
                 88,
@@ -172,17 +191,19 @@ public final class BackupBrowserScreen extends Screen {
         int rowCapacity = Math.max(1, (paginationY - rowTop) / (ROW_HEIGHT + ROW_GAP));
         BackupBrowserPage page = page(rowCapacity);
         pageIndex = page.pageIndex();
-        selectedBackupId = page.selectedBackupId().orElse(null);
+        visibleRows = page.rows();
+        addFilterAndSort(page, contentX, contentWidth);
         addRows(page, contentX, contentWidth, rowTop);
         addPagination(page, contentX, contentWidth, paginationY);
         addWarning(contentX, contentWidth);
         addStatus(contentX, contentWidth);
-        addActions(page, contentX, contentWidth);
+        addActions(contentX, contentWidth);
     }
 
-    private void addFilterAndSort(int x, int contentWidth) {
-        int sortWidth = Math.min(150, Math.max(84, contentWidth / 3));
-        int filterWidth = contentWidth - sortWidth - 4;
+    private void addFilterAndSort(BackupBrowserPage page, int x, int contentWidth) {
+        int sortWidth = Math.min(120, Math.max(72, contentWidth / 4));
+        int selectWidth = Math.min(90, Math.max(60, contentWidth / 5));
+        int filterWidth = contentWidth - sortWidth - selectWidth - 8;
         EditBox filterBox = new EditBox(
                 font,
                 x,
@@ -199,7 +220,6 @@ public final class BackupBrowserScreen extends Screen {
             }
             filter = value;
             pageIndex = 0;
-            selectedBackupId = null;
             rebuildWidgets();
             if (filterWidget != null) {
                 setInitialFocus(filterWidget);
@@ -222,11 +242,30 @@ public final class BackupBrowserScreen extends Screen {
                 .build();
         sortButton.active = !busy;
         addRenderableWidget(sortButton);
+
+        boolean allMatchingSelected = !page.matchingBackupIds().isEmpty()
+                && selectedBackupIds.containsAll(page.matchingBackupIds());
+        Button selectButton = Button.builder(
+                        Component.literal(allMatchingSelected ? "Clear" : "Select all"),
+                        ignored -> {
+                            if (allMatchingSelected) {
+                                selectedBackupIds.clear();
+                            } else {
+                                selectedBackupIds.addAll(page.matchingBackupIds());
+                            }
+                            rebuildWidgets();
+                        })
+                .bounds(x + filterWidth + sortWidth + 8, 41, selectWidth, 20)
+                .build();
+        selectButton.active = !busy && !page.matchingBackupIds().isEmpty();
+        selectButton.setTooltip(Tooltip.create(Component.literal(
+                "Selects every backup that matches the filter, on every page")));
+        addRenderableWidget(selectButton);
     }
 
     private BackupBrowserPage page(int pageSize) {
         BackupBrowserQuery query = new BackupBrowserQuery(filter, sort, pageIndex, pageSize);
-        return BackupBrowserPage.create(records, query, Optional.ofNullable(selectedBackupId));
+        return BackupBrowserPage.create(records, query, selectedBackupIds);
     }
 
     private void addRows(
@@ -244,7 +283,7 @@ public final class BackupBrowserScreen extends Screen {
                     row,
                     font,
                     this::selectRow);
-            button.setSelected(row.backupId().equals(selectedBackupId));
+            button.setSelected(selectedBackupIds.contains(row.backupId()));
             button.active = !busy;
             addRenderableWidget(button);
             y += ROW_HEIGHT + ROW_GAP;
@@ -262,9 +301,36 @@ public final class BackupBrowserScreen extends Screen {
         }
     }
 
-    private void selectRow(BackupRow row) {
-        selectedBackupId = row.backupId().equals(selectedBackupId) ? null : row.backupId();
+    private void selectRow(BackupRow row, InputWithModifiers input) {
+        BackupId clicked = row.backupId();
+        if (input.hasShiftDown() && selectionAnchor != null) {
+            selectedBackupIds.addAll(rangeOnPage(selectionAnchor, clicked));
+        } else if (input.hasControlDownWithQuirk()) {
+            if (!selectedBackupIds.remove(clicked)) {
+                selectedBackupIds.add(clicked);
+            }
+            selectionAnchor = clicked;
+        } else {
+            boolean onlyThisRow = selectedBackupIds.size() == 1
+                    && selectedBackupIds.contains(clicked);
+            selectedBackupIds.clear();
+            if (!onlyThisRow) {
+                selectedBackupIds.add(clicked);
+            }
+            selectionAnchor = clicked;
+        }
         rebuildWidgets();
+    }
+
+    /** Rows between two ids in page order; just the clicked row when the anchor scrolled away. */
+    private List<BackupId> rangeOnPage(BackupId anchor, BackupId clicked) {
+        List<BackupId> order = visibleRows.stream().map(BackupRow::backupId).toList();
+        int from = order.indexOf(anchor);
+        int to = order.indexOf(clicked);
+        if (from < 0 || to < 0) {
+            return List.of(clicked);
+        }
+        return order.subList(Math.min(from, to), Math.max(from, to) + 1);
     }
 
     private void addPagination(
@@ -275,7 +341,6 @@ public final class BackupBrowserScreen extends Screen {
         int buttonWidth = Math.min(72, Math.max(48, contentWidth / 5));
         Button previous = Button.builder(Component.literal("Previous"), ignored -> {
                     pageIndex = Math.max(0, page.pageIndex() - 1);
-                    selectedBackupId = null;
                     rebuildWidgets();
                 })
                 .bounds(x, y, buttonWidth, 18)
@@ -284,13 +349,15 @@ public final class BackupBrowserScreen extends Screen {
         addRenderableWidget(previous);
         Button next = Button.builder(Component.literal("Next"), ignored -> {
                     pageIndex = Math.min(page.pageCount() - 1, page.pageIndex() + 1);
-                    selectedBackupId = null;
                     rebuildWidgets();
                 })
                 .bounds(x + contentWidth - buttonWidth, y, buttonWidth, 18)
                 .build();
         next.active = !busy && page.pageIndex() + 1 < page.pageCount();
         addRenderableWidget(next);
+        String selection = selectedBackupIds.isEmpty()
+                ? ""
+                : " · " + selectedBackupIds.size() + " selected";
         addRenderableOnly(new StringWidget(
                 x + buttonWidth + 4,
                 y,
@@ -298,7 +365,8 @@ public final class BackupBrowserScreen extends Screen {
                 18,
                 Component.literal("Page " + (page.pageIndex() + 1)
                         + " of " + page.pageCount()
-                        + " · " + page.totalRows() + " backups"),
+                        + " · " + page.totalRows() + " backups"
+                        + selection),
                 font));
     }
 
@@ -329,8 +397,8 @@ public final class BackupBrowserScreen extends Screen {
         });
     }
 
-    private void addActions(BackupBrowserPage page, int x, int contentWidth) {
-        Optional<BackupRow> selection = page.selectedRow();
+    private void addActions(int x, int contentWidth) {
+        List<BackupRow> selection = selectedRows();
         BackupBrowserCapabilities effectiveCapabilities = new BackupBrowserCapabilities(
                 busy || loading,
                 capabilities.sourceAvailable(),
@@ -350,6 +418,7 @@ public final class BackupBrowserScreen extends Screen {
                         BackupAction.SYNC,
                         BackupAction.VERIFY),
                 availability,
+                selection.size(),
                 x,
                 contentWidth,
                 ScreenGeometry.anchorBottom(128, height, 48));
@@ -361,7 +430,7 @@ public final class BackupBrowserScreen extends Screen {
         int buttonWidth = actionButtonWidth(contentWidth, secondaryActions.size() + 1);
         int currentX = x;
         for (BackupAction action : secondaryActions) {
-            addActionButton(action, availability.get(action), currentX, y, buttonWidth);
+            addActionButton(action, availability.get(action), 0, currentX, y, buttonWidth);
             currentX += buttonWidth + ACTION_GAP;
         }
         addRenderableWidget(Button.builder(Component.literal("Done"), ignored -> onClose())
@@ -372,13 +441,14 @@ public final class BackupBrowserScreen extends Screen {
     private void addActionRow(
             List<BackupAction> actions,
             Map<BackupAction, BackupActionAvailability> availability,
+            int selectionCount,
             int x,
             int contentWidth,
             int y) {
         int buttonWidth = actionButtonWidth(contentWidth, actions.size());
         int currentX = x;
         for (BackupAction action : actions) {
-            addActionButton(action, availability.get(action), currentX, y, buttonWidth);
+            addActionButton(action, availability.get(action), selectionCount, currentX, y, buttonWidth);
             currentX += buttonWidth + ACTION_GAP;
         }
     }
@@ -386,10 +456,14 @@ public final class BackupBrowserScreen extends Screen {
     private void addActionButton(
             BackupAction action,
             BackupActionAvailability availability,
+            int selectionCount,
             int x,
             int y,
             int width) {
-        Button button = Button.builder(Component.literal(actionLabel(action)), ignored -> runAction(action))
+        String label = action == BackupAction.DELETE && selectionCount > 1
+                ? "Delete (" + selectionCount + ")"
+                : actionLabel(action);
+        Button button = Button.builder(Component.literal(label), ignored -> runAction(action))
                 .bounds(x, y, width, 20)
                 .build();
         button.active = availability.enabled();
@@ -404,16 +478,26 @@ public final class BackupBrowserScreen extends Screen {
     }
 
     private void runAction(BackupAction action) {
+        List<BackupRow> selection = selectedRows();
+        Optional<BackupRow> single = selection.size() == 1
+                ? Optional.of(selection.getFirst())
+                : Optional.empty();
         switch (action) {
             case CREATE -> promptManualBackup();
-            case RESTORE -> selectedRow().ifPresent(row -> minecraft.setScreenAndShow(
+            case RESTORE -> single.ifPresent(row -> minecraft.setScreenAndShow(
                     new BackupRestoreScreen(this, parent, world, row, facade)));
-            case DELETE -> selectedRow().ifPresent(this::prepareDelete);
-            case SYNC -> selectedRow().ifPresent(row -> openResultOperation(
+            case DELETE -> {
+                if (selection.size() > 1) {
+                    prepareDeleteMany(selection);
+                } else {
+                    single.ifPresent(this::prepareDelete);
+                }
+            }
+            case SYNC -> single.ifPresent(row -> openResultOperation(
                     BackupOperation.SYNC,
                     "Syncing backup",
                     listener -> service.syncBackup(row.backupId(), listener)));
-            case VERIFY -> selectedRow().ifPresent(row -> openResultOperation(
+            case VERIFY -> single.ifPresent(row -> openResultOperation(
                     BackupOperation.VERIFY,
                     "Checking backup integrity",
                     listener -> service.verifyBackup(row.backupId(), listener)));
@@ -425,15 +509,15 @@ public final class BackupBrowserScreen extends Screen {
         }
     }
 
-    private Optional<BackupRow> selectedRow() {
-        BackupId selection = selectedBackupId;
-        if (selection == null) {
-            return Optional.empty();
+    /** Every selected row, including rows on other pages, in catalog order. */
+    private List<BackupRow> selectedRows() {
+        if (selectedBackupIds.isEmpty()) {
+            return List.of();
         }
         return records.stream()
+                .filter(record -> selectedBackupIds.contains(record.manifest().backupId()))
                 .map(BackupRow::from)
-                .filter(row -> row.backupId().equals(selection))
-                .findFirst();
+                .toList();
     }
 
     private void promptManualBackup() {
@@ -490,16 +574,87 @@ public final class BackupBrowserScreen extends Screen {
         }));
     }
 
+    /**
+     * Issues one confirmation per selected backup, then asks once. Every token must be
+     * issued before the prompt appears, so a backup that cannot be prepared cancels the
+     * whole batch with nothing deleted.
+     */
+    private void prepareDeleteMany(List<BackupRow> rows) {
+        if (busy) {
+            return;
+        }
+        busy = true;
+        status = Component.literal("Preparing deletion of " + rows.size() + " backups…")
+                .withStyle(ChatFormatting.GRAY);
+        rebuildWidgets();
+        long token = lifecycle;
+        long revision = ++requestRevision;
+        List<CompletableFuture<DeletePreparation>> preparations = new ArrayList<>();
+        try {
+            for (BackupRow row : rows) {
+                preparations.add(Objects.requireNonNull(
+                                service.prepareDelete(row.backupId()),
+                                "prepareDelete result")
+                        .toCompletableFuture());
+            }
+        } catch (RuntimeException exception) {
+            finishInlineFailure(token, revision, exception);
+            return;
+        }
+        CompletableFuture.allOf(preparations.toArray(CompletableFuture[]::new))
+                .whenComplete((ignored, throwable) -> minecraft.execute(() -> {
+                    if (!accepts(token, revision)) {
+                        return;
+                    }
+                    if (throwable != null) {
+                        finishInlineFailureOnClient(token, revision, throwable);
+                        return;
+                    }
+                    busy = false;
+                    List<DeleteBackupRequest> requests = preparations.stream()
+                            .map(CompletableFuture::join)
+                            .map(prepared -> new DeleteBackupRequest(
+                                    prepared.backupId(), prepared.confirmationToken()))
+                            .toList();
+                    ConfirmationState confirmation = new ConfirmationState(
+                            ConfirmationKind.DELETE,
+                            requests.getFirst().backupId(),
+                            "Delete " + rows.size() + " backups?",
+                            deletePrompt(rows),
+                            Optional.empty(),
+                            true);
+                    minecraft.setScreenAndShow(new BackupConfirmationScreen(
+                            this,
+                            confirmation,
+                            () -> minecraft.setScreenAndShow(BackupOperationScreen.deleteBatch(
+                                    this,
+                                    "Deleting backups",
+                                    listener -> service.deleteBackups(requests, listener)))));
+                }));
+    }
+
+    private static String deletePrompt(List<BackupRow> rows) {
+        StringBuilder prompt = new StringBuilder("Delete these backups from every available destination?");
+        int shown = Math.min(rows.size(), CONFIRMATION_PREVIEW_ROWS);
+        for (BackupRow row : rows.subList(0, shown)) {
+            prompt.append('\n').append(BackupRowButton.primaryLine(row));
+        }
+        if (rows.size() > shown) {
+            prompt.append("\n…and ").append(rows.size() - shown).append(" more");
+        }
+        return prompt.toString();
+    }
+
     private void openResultOperation(
             String operationTitle,
-            BackupOperationScreen.OperationStarter<dev.ishaanko.worldarchive.model.BackupResult> starter) {
+            BackupOperationScreen.OperationStarter<BackupResult> starter) {
         openResultOperation(BackupOperation.CREATE, operationTitle, starter);
     }
 
     private void openResultOperation(
             BackupOperation operation,
             String operationTitle,
-            BackupOperationScreen.OperationStarter<dev.ishaanko.worldarchive.model.BackupResult> starter) {
+            BackupOperationScreen.OperationStarter<BackupResult> starter) {
         minecraft.setScreenAndShow(BackupOperationScreen.backupResult(
                 this,
                 operationTitle,
@@ -509,7 +664,10 @@ public final class BackupBrowserScreen extends Screen {
 
     private void openFolder() {
         try {
-            facade.openManagedFolder(world, selectedRow());
+            List<BackupRow> selection = selectedRows();
+            facade.openManagedFolder(
+                    world,
+                    selection.size() == 1 ? Optional.of(selection.getFirst()) : Optional.empty());
             status = Component.literal("Opened the backup folder").withStyle(ChatFormatting.GRAY);
         } catch (RuntimeException exception) {
             status = failureStatus(exception);
@@ -563,11 +721,13 @@ public final class BackupBrowserScreen extends Screen {
                             .filter(record -> record.manifest().worldId().equals(world.worldId()))
                             .toList();
                     capabilities = result.capabilities();
-                    if (selectedBackupId != null
-                            && records.stream().noneMatch(record -> record.manifest()
-                                    .backupId()
-                                    .equals(selectedBackupId))) {
-                        selectedBackupId = null;
+                    Set<BackupId> known = new LinkedHashSet<>();
+                    for (BackupRecord record : records) {
+                        known.add(record.manifest().backupId());
+                    }
+                    selectedBackupIds.retainAll(known);
+                    if (selectionAnchor != null && !known.contains(selectionAnchor)) {
+                        selectionAnchor = null;
                     }
                     status = Component.literal(records.isEmpty()
                                     ? "No backups yet"
@@ -637,6 +797,7 @@ public final class BackupBrowserScreen extends Screen {
             case SOURCE_UNAVAILABLE -> "The original world is unavailable";
             case NO_DESTINATION_CONFIGURED -> "Configure at least one destination";
             case NO_SELECTION -> "Select a backup";
+            case MULTIPLE_SELECTED -> "Select one backup";
             case NO_DURABLE_COPY -> "This backup has no available copy";
             case REMOTE_NOT_CONFIGURED -> "Configure a Git remote first";
             case FOLDER_UNAVAILABLE -> "No managed backup folder is available";

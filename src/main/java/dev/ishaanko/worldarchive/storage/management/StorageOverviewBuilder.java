@@ -15,9 +15,12 @@ import dev.ishaanko.worldarchive.storage.zip.ZipBackupArtifact;
 import dev.ishaanko.worldarchive.storage.zip.ZipBackupStore;
 import dev.ishaanko.worldarchive.storage.zip.ZipBackupStoreResolver;
 import java.io.IOException;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.security.MessageDigest;
 import java.time.Clock;
 import java.time.Instant;
@@ -28,7 +31,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.Supplier;
-import java.util.stream.Stream;
 
 /** Computes per-world storage snapshots and the forecasted overview built on top of them. */
 final class StorageOverviewBuilder {
@@ -71,7 +73,7 @@ final class StorageOverviewBuilder {
         List<BackupRecord> records = catalog.list(worldId);
         Map<BackupId, ZipBackupArtifact> zipArtifacts = new HashMap<>();
         ZipBackupStore zipStore = zipStores.store(worldId);
-        for (ZipBackupArtifact artifact : zipStore.listCompleteArchives()) {
+        for (ZipBackupArtifact artifact : zipStore.listArchives()) {
             if (artifact.manifest().worldId().equals(worldId)) {
                 zipArtifacts.put(artifact.manifest().backupId(), artifact);
             }
@@ -156,22 +158,27 @@ final class StorageOverviewBuilder {
                 || !Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("Managed Git repository is not a safe directory");
         }
-        long total = 0;
-        try (Stream<Path> paths = Files.walk(root)) {
-            var iterator = paths.iterator();
-            while (iterator.hasNext()) {
-                Path path = iterator.next();
-                if (Files.isSymbolicLink(path)) {
-                    throw new IOException("Managed Git repository contains a symbolic link");
+        // walkFileTree hands over the attributes it already read, so each file costs one
+        // stat instead of the three that separate link, type, and size checks would need.
+        long[] total = {0};
+        try {
+            Files.walkFileTree(root, new SimpleFileVisitor<>() {
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attributes)
+                        throws IOException {
+                    if (attributes.isSymbolicLink()) {
+                        throw new IOException("Managed Git repository contains a symbolic link");
+                    }
+                    if (attributes.isRegularFile()) {
+                        total[0] = Math.addExact(total[0], attributes.size());
+                    }
+                    return FileVisitResult.CONTINUE;
                 }
-                if (Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
-                    total = Math.addExact(total, Files.size(path));
-                }
-            }
+            });
         } catch (ArithmeticException exception) {
             throw new IOException("Managed Git repository size overflowed", exception);
         }
-        return total;
+        return total[0];
     }
 
     private static String worldName(Snapshot snapshot) {

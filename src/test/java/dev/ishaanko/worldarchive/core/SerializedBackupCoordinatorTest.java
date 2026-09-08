@@ -969,6 +969,13 @@ final class SerializedBackupCoordinatorTest {
         }
 
         @Override
+        public CompletionStage<List<BackupResult>> deleteBackups(
+                List<DeleteBackupRequest> requests,
+                ProgressListener progressListener) {
+            return CompletableFuture.failedFuture(new UnsupportedOperationException());
+        }
+
+        @Override
         public CompletionStage<BackupResult> verifyBackup(
                 BackupId backupId,
                 ProgressListener progressListener) {
