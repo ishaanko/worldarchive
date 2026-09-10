@@ -89,11 +89,13 @@ Guided cleanup keeps:
 Within a period, manual backups and backups with more changed files win.
 Cleanup always shows a preview first. Nothing is deleted until you confirm.
 
-Cleanup deletes the backups it lists the same way the Delete button does: the
-Git snapshot, its copy on the configured remote, the ZIP, and the catalog
-entry. A protected backup is never deleted. When space is still short after
-that, cleanup can drop the local Git copies of protected backups, but only when
-each of them keeps a ZIP or a verified remote copy.
+Cleanup frees space on this computer only. For a backup it lists, it removes
+the ZIP and the local Git copy. Copies on the configured remote are never
+touched: a backup that is synchronized stays listed as a remote-only entry, and
+the Delete button is the way to remove it from the remote. A backup with no copy
+left anywhere leaves the catalog. A protected backup is never deleted; when
+space is still short, cleanup can drop the local Git copies of protected
+backups, but only when each of them keeps a ZIP or a verified remote copy.
 
 ## Minecraft versions
 
