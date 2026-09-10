@@ -136,16 +136,20 @@ final class CleanupExecutor {
             }
             try {
                 if (item.removeGit()) {
+                    // Checked before the local ref goes, because the check compares the
+                    // remote commit with the local one. A remote that cannot be reached
+                    // fails the item with nothing deleted, so the catalog never loses
+                    // its pointer to a copy that may still exist.
+                    boolean remoteCopy = ManagedStorageSupport.synchronizedRemoteCopy(
+                            ManagedStorageSupport.record(current, item.backupId()))
+                            && ManagedStorageSupport.await(git.currentRemoteContainsSnapshot(
+                                    plan.worldId(), item.backupId()));
                     ManagedStorageSupport.await(git.deleteCurrentLocalSnapshot(
                             plan.worldId(),
                             item.backupId()));
-                    // The catalog keeps pointing at a synchronized remote copy, so the
-                    // backup stays visible, verifiable, and deletable with Delete.
-                    removeDestination(
-                            item.backupId(),
-                            DestinationType.GIT,
-                            ManagedStorageSupport.synchronizedRemoteCopy(
-                                    ManagedStorageSupport.record(current, item.backupId())));
+                    // A proven remote copy keeps the catalog record, so the backup stays
+                    // visible, verifiable, and deletable with Delete.
+                    removeDestination(item.backupId(), DestinationType.GIT, remoteCopy);
                     removedGit = true;
                 }
                 if (item.removeZip()) {

@@ -26,11 +26,22 @@ final class ManagedStorageSupport {
                 .isPresent();
     }
 
-    /** True when the catalog says this backup's Git snapshot is on the configured remote. */
+    /**
+     * True when the catalog says this backup's own Git snapshot is on the configured
+     * remote. Imported snapshots are excluded: their sync status refers to the import
+     * source, which restore and verification do not search.
+     */
     static boolean synchronizedRemoteCopy(BackupRecord record) {
         return destination(record, DestinationType.GIT)
-                .filter(result -> result.ownership() != ArtifactOwnership.EXTERNAL
+                .filter(result -> result.ownership() == ArtifactOwnership.MANAGED
                         && result.syncStatus() == SyncStatus.SYNCED)
+                .isPresent();
+    }
+
+    /** True when this backup's Git snapshot is WorldArchive's own, not imported or linked. */
+    static boolean ownGitSnapshot(BackupRecord record) {
+        return destination(record, DestinationType.GIT)
+                .filter(result -> result.ownership() == ArtifactOwnership.MANAGED)
                 .isPresent();
     }
 

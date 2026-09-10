@@ -114,7 +114,7 @@ final class CleanupPlanner {
             boolean removeZip = zip != null
                     && ManagedStorageSupport.managedDestination(record, DestinationType.ZIP);
             boolean removeGit = snapshot.localGitSnapshots().containsKey(backupId)
-                    && ManagedStorageSupport.managedDestination(record, DestinationType.GIT);
+                    && ManagedStorageSupport.ownGitSnapshot(record);
             if (!removeZip && !removeGit) {
                 continue;
             }
