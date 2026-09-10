@@ -62,7 +62,7 @@ final class CleanupPreviewScreen extends Screen {
         addRenderableOnly(Widgets.title(font, x, 9, contentWidth, 20, title));
         String summary = plan.items().isEmpty()
                 ? "Nothing to clean up right now. Your keep settings protect every backup."
-                : "Backups your keep settings do not protect are deleted everywhere, including GitHub. Protected backups only lose their local Git copy.";
+                : "Choose which backups to delete from this computer. Copies on GitHub are kept and stay listed; use Delete to remove one from GitHub.";
         addRenderableOnly(new MultiLineTextWidget(
                         x,
                         31,

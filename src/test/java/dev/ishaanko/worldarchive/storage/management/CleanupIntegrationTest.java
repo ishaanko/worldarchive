@@ -117,7 +117,7 @@ final class CleanupIntegrationTest {
     }
 
     @Test
-    void unprotectedBackupsAreDeletedEverywhereAndTheirLfsObjectsFreed() throws Exception {
+    void unprotectedBackupsLoseLocalCopiesAndStayListedOnTheRemote() throws Exception {
         BackupId oldest = backup(3, true);
         BackupId middle = backup(2, true);
         BackupId newest = backup(1, true);
@@ -128,9 +128,10 @@ final class CleanupIntegrationTest {
         assertEquals(Set.of(newest), plan.protectedBackups());
         Map<BackupId, CleanupItem> items = plan.items().stream()
                 .collect(Collectors.toMap(CleanupItem::backupId, item -> item));
-        for (BackupId deleted : List.of(oldest, middle)) {
-            assertTrue(items.get(deleted).removeGit() && items.get(deleted).removeZip());
-            assertTrue(items.get(deleted).removesRestorePoint());
+        for (BackupId removed : List.of(oldest, middle)) {
+            assertTrue(items.get(removed).removeGit() && items.get(removed).removeZip());
+            assertFalse(items.get(removed).removesRestorePoint(),
+                    "the synchronized remote copy remains a restore point");
         }
         assertFalse(items.get(newest).removesRestorePoint(),
                 "the protected backup is only offered as a local Git eviction");
@@ -139,26 +140,40 @@ final class CleanupIntegrationTest {
                 new CleanupRequest(plan.confirmationToken(), Set.of(oldest, middle))));
         assertEquals(Map.of(), result.failures());
 
-        assertEquals(List.of(newest), catalog.list(worldId).stream()
-                .map(record -> record.manifest().backupId()).toList());
+        assertEquals(Set.of(oldest, middle, newest), remoteBackupIds(), "cleanup never touches the remote");
+        for (BackupId removed : List.of(oldest, middle)) {
+            BackupRecord record = catalog.find(removed).orElseThrow();
+            assertEquals(List.of(DestinationType.GIT), record.result().destinations().stream()
+                    .map(DestinationResult::destination).toList());
+            assertFalse(deletions.contains(removed));
+        }
         assertEquals(Set.of(newest), await(git.listCurrentSnapshots(worldId)).stream()
                 .map(snapshot -> snapshot.backupId()).collect(Collectors.toSet()));
-        assertEquals(Set.of(newest), remoteBackupIds());
         assertEquals(1, zipStore.listArchives().size());
-        assertTrue(deletions.contains(oldest) && deletions.contains(middle));
         assertEquals(2, lfsObjectCount(), "only the newest snapshot's objects remain");
         assertTrue(await(git.verifyCurrentSnapshot(worldId, newest)).valid());
         assertTrue(result.reclaimedBytes() > 0);
 
         imports().rebuildLocal().toCompletableFuture().get(30, TimeUnit.SECONDS);
-        assertEquals(List.of(newest), catalog.list(worldId).stream()
-                .map(record -> record.manifest().backupId()).toList());
+        assertEquals(3, catalog.list(worldId).size());
+        assertEquals(1, await(git.listCurrentSnapshots(worldId)).size());
     }
 
     @Test
-    void protectedBackupKeepsItsRemoteCopyWhenLocalGitIsEvicted() throws Exception {
+    void backupWithNoCopyLeftAnywhereLeavesTheCatalog() throws Exception {
         BackupId older = backup(2, true);
         BackupId newest = backup(1, false);
+        nativeGit("--git-dir=" + remote, "update-ref", "-d",
+                remoteRef(newest));
+        catalog.update(newest, record -> new BackupRecord(
+                record.manifest(),
+                BackupResult.aggregate(
+                        newest,
+                        worldId,
+                        record.result().destinations().stream()
+                                .map(destination -> destination.withSync(SyncStatus.NOT_CONFIGURED))
+                                .toList(),
+                        record.result().completedAt())));
 
         ManagedStorageService service = service(KEEP_ONLY_SAFETY_FLOOR);
         CleanupPlan plan = await(service.prepareCleanup(worldId));
@@ -175,15 +190,17 @@ final class CleanupIntegrationTest {
                 new CleanupRequest(plan.confirmationToken(), items.keySet())));
         assertEquals(Map.of(), result.failures());
 
-        assertEquals(Set.of(older), remoteBackupIds(), "the unprotected backup left the remote");
-        assertTrue(await(git.listCurrentSnapshots(worldId)).isEmpty());
-        assertEquals(0, lfsObjectCount());
+        assertFalse(catalog.find(newest).isPresent());
+        assertTrue(deletions.contains(newest));
         BackupRecord kept = catalog.find(older).orElseThrow();
         assertEquals(
                 List.of(DestinationType.GIT, DestinationType.ZIP),
                 kept.result().destinations().stream()
-                        .map(DestinationResult::destination).toList());
-        assertFalse(catalog.find(newest).isPresent());
+                        .map(DestinationResult::destination).toList(),
+                "the synchronized remote copy stays in the catalog");
+        assertEquals(Set.of(older), remoteBackupIds());
+        assertTrue(await(git.listCurrentSnapshots(worldId)).isEmpty());
+        assertEquals(0, lfsObjectCount());
     }
 
     private BackupId backup(int daysAgo, boolean withZip) throws Exception {
@@ -274,6 +291,15 @@ final class CleanupIntegrationTest {
                 stores,
                 () -> Set.of(worldId),
                 executor);
+    }
+
+    private String remoteRef(BackupId backupId) throws Exception {
+        return nativeGit("--git-dir=" + remote, "for-each-ref", "--format=%(refname)",
+                        "refs/heads/backups/")
+                .lines()
+                .filter(line -> line.endsWith(backupId.toString()))
+                .findFirst()
+                .orElseThrow();
     }
 
     private Set<BackupId> remoteBackupIds() throws Exception {

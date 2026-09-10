@@ -26,9 +26,11 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * Applies a confirmed {@link CleanupPlan}. A backup the keep settings do not protect is
- * deleted the same way the Delete button deletes it: Git snapshot (local and remote),
- * ZIP, and catalog record. A protected backup only loses its local Git copy.
+ * Applies a confirmed {@link CleanupPlan}. Cleanup frees space on this computer only.
+ * It never changes the configured remote, but it does ask the remote whether a
+ * synchronized snapshot is still there before the local copy goes. Such a backup keeps
+ * its catalog record as a remote-only entry; a backup with no copy left anywhere
+ * leaves the catalog.
  */
 final class CleanupExecutor {
     private final BackupCatalog catalog;
@@ -123,10 +125,6 @@ final class CleanupExecutor {
         }
     }
 
-    /**
-     * Git goes first: a remote that refuses the deletion fails the item before its ZIP
-     * is touched, so the backup stays whole and restorable.
-     */
     private boolean applyItems(
             CleanupPlan plan,
             CleanupRequest request,
@@ -139,22 +137,14 @@ final class CleanupExecutor {
             }
             try {
                 if (item.removeGit()) {
-                    if (plan.protectedBackups().contains(item.backupId())) {
-                        ManagedStorageSupport.await(git.deleteCurrentLocalSnapshot(
-                                plan.worldId(),
-                                item.backupId()));
-                        // The catalog keeps pointing at a synchronized remote copy, so
-                        // the backup stays visible, verifiable, and deletable later.
-                        removeDestination(
-                                item.backupId(),
-                                DestinationType.GIT,
-                                synchronizedRemoteCopy(current, item.backupId()));
-                    } else {
-                        ManagedStorageSupport.await(git.deleteSnapshot(
-                                plan.worldId(),
-                                item.backupId()));
-                        removeDestination(item.backupId(), DestinationType.GIT, false);
-                    }
+                    boolean remoteCopy = requireRemoteCopyPromisedByPreview(
+                            plan, current, item.backupId());
+                    ManagedStorageSupport.await(git.deleteCurrentLocalSnapshot(
+                            plan.worldId(),
+                            item.backupId()));
+                    // A proven remote copy keeps the catalog record, so the backup stays
+                    // visible, verifiable, and deletable with Delete.
+                    removeDestination(item.backupId(), DestinationType.GIT, remoteCopy);
                     removedGit = true;
                 }
                 if (item.removeZip()) {
@@ -266,12 +256,27 @@ final class CleanupExecutor {
         }
     }
 
-    private static boolean synchronizedRemoteCopy(Snapshot snapshot, BackupId backupId) {
-        return ManagedStorageSupport.destination(
-                        ManagedStorageSupport.record(snapshot, backupId), DestinationType.GIT)
-                .filter(result -> result.ownership() == ArtifactOwnership.MANAGED
-                        && result.syncStatus() == SyncStatus.SYNCED)
-                .isPresent();
+    /**
+     * The preview promised "another copy still exists" for a synchronized backup. This
+     * proves it against the configured remote before the local ref goes, because the
+     * check compares the remote commit with the local one. A remote that has lost the
+     * snapshot, or cannot be reached, fails the item with nothing deleted: cleanup is
+     * never more destructive than what the user confirmed.
+     */
+    private boolean requireRemoteCopyPromisedByPreview(
+            CleanupPlan plan,
+            Snapshot snapshot,
+            BackupId backupId) throws Exception {
+        if (!ManagedStorageSupport.synchronizedRemoteCopy(
+                ManagedStorageSupport.record(snapshot, backupId))) {
+            return false;
+        }
+        if (!ManagedStorageSupport.await(git.currentRemoteContainsSnapshot(
+                plan.worldId(), backupId))) {
+            throw new IOException(
+                    "The configured remote no longer has this backup; review cleanup again");
+        }
+        return true;
     }
 
     /** A protected backup may lose its last local copy only if the remote provably has it. */

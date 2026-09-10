@@ -45,10 +45,11 @@ final class CleanupPlanner {
     }
 
     /**
-     * Picks the lightest backups the keep settings do not protect and deletes each one
-     * completely. Only when that still leaves the world over its target does the plan
-     * drop the local Git copies of protected backups, and only when every one of them
-     * keeps a ZIP or a verified remote copy.
+     * Picks the lightest backups the keep settings do not protect and removes every
+     * local copy of each one. Only when that still leaves the world over its target
+     * does the plan drop the local Git copies of protected backups, and only when every
+     * one of them keeps a ZIP or a verified remote copy. Copies on the remote are never
+     * touched.
      */
     CleanupPlan prepare(WorldId worldId, Snapshot snapshot) throws Exception {
         BackupId safetyFloor = verifiedSafetyFloor(snapshot)
@@ -96,7 +97,7 @@ final class CleanupPlanner {
                 snapshot.fingerprint());
     }
 
-    /** Adds whole-backup deletions, lightest first, until the target is met. */
+    /** Removes the local copies of unprotected backups, lightest first, until the target is met. */
     private static long deleteUnprotected(
             Snapshot snapshot,
             List<BackupRecord> cleanupOrder,
@@ -112,18 +113,21 @@ final class CleanupPlanner {
             ZipBackupArtifact zip = snapshot.zipArtifacts().get(backupId);
             boolean removeZip = zip != null
                     && ManagedStorageSupport.managedDestination(record, DestinationType.ZIP);
-            boolean removeGit = ManagedStorageSupport.managedDestination(
-                    record, DestinationType.GIT);
+            boolean removeGit = snapshot.localGitSnapshots().containsKey(backupId)
+                    && ManagedStorageSupport.ownGitSnapshot(record);
             if (!removeZip && !removeGit) {
                 continue;
             }
             long zipBytes = removeZip ? ManagedStorageSupport.artifactBytes(zip) : 0;
-            long gitBytes = removeGit && snapshot.localGitSnapshots().containsKey(backupId)
-                    ? gitShare
-                    : 0;
+            long gitBytes = removeGit ? gitShare : 0;
             selected.put(backupId, item(
                     record,
-                    new CleanupItemFlags(removeGit, removeZip, false, gitBytes, zipBytes)));
+                    new CleanupItemFlags(
+                            removeGit,
+                            removeZip,
+                            ManagedStorageSupport.synchronizedRemoteCopy(record),
+                            gitBytes,
+                            zipBytes)));
             projected = Math.max(0, projected - zipBytes - gitBytes);
         }
         return projected;

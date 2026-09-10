@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.7.2 (2026-09-10)
+
+### Changed
+
+- Storage cleanup no longer deletes anything from the configured remote.
+  0.3.7.1 removed the remote copy of an unprotected backup together with its
+  local copies. Cleanup now frees space on this computer only. A backup whose
+  snapshot is on the remote stays listed as a remote-only entry, and the
+  Delete button is the way to remove it from the remote. A backup with no copy
+  left anywhere still leaves the catalog.
+
 ## 0.3.7.1 (2026-09-10)
 
 ### Fixed
