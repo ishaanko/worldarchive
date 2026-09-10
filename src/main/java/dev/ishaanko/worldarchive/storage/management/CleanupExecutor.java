@@ -136,14 +136,8 @@ final class CleanupExecutor {
             }
             try {
                 if (item.removeGit()) {
-                    // Checked before the local ref goes, because the check compares the
-                    // remote commit with the local one. A remote that cannot be reached
-                    // fails the item with nothing deleted, so the catalog never loses
-                    // its pointer to a copy that may still exist.
-                    boolean remoteCopy = ManagedStorageSupport.synchronizedRemoteCopy(
-                            ManagedStorageSupport.record(current, item.backupId()))
-                            && ManagedStorageSupport.await(git.currentRemoteContainsSnapshot(
-                                    plan.worldId(), item.backupId()));
+                    boolean remoteCopy = requireRemoteCopyPromisedByPreview(
+                            plan, current, item.backupId());
                     ManagedStorageSupport.await(git.deleteCurrentLocalSnapshot(
                             plan.worldId(),
                             item.backupId()));
@@ -259,6 +253,29 @@ final class CleanupExecutor {
         } catch (Exception exception) {
             return false;
         }
+    }
+
+    /**
+     * The preview promised "another copy still exists" for a synchronized backup. This
+     * proves it against the configured remote before the local ref goes, because the
+     * check compares the remote commit with the local one. A remote that has lost the
+     * snapshot, or cannot be reached, fails the item with nothing deleted: cleanup is
+     * never more destructive than what the user confirmed.
+     */
+    private boolean requireRemoteCopyPromisedByPreview(
+            CleanupPlan plan,
+            Snapshot snapshot,
+            BackupId backupId) throws Exception {
+        if (!ManagedStorageSupport.synchronizedRemoteCopy(
+                ManagedStorageSupport.record(snapshot, backupId))) {
+            return false;
+        }
+        if (!ManagedStorageSupport.await(git.currentRemoteContainsSnapshot(
+                plan.worldId(), backupId))) {
+            throw new IOException(
+                    "The configured remote no longer has this backup; review cleanup again");
+        }
+        return true;
     }
 
     /** A protected backup may lose its last local copy only if the remote provably has it. */
