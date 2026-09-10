@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.7.1 (2026-09-10)
+
+### Fixed
+
+- Storage cleanup now deletes the backups it lists. Before, it only removed
+  the ZIP copy of a backup and left the Git snapshot and the catalog entry in
+  place, so the backup was still there after the cleanup and after a restart.
+  A backup the keep settings do not protect is now deleted the same way the
+  Delete button deletes it: Git snapshot, remote copy, ZIP, and catalog entry.
+- Cleanup frees the Git LFS space of deleted snapshots. Only the objects a
+  remaining snapshot still points at are kept.
+- A protected backup that loses its local Git copy keeps its synchronized
+  remote copy in the catalog, so it stays visible and can be deleted later.
+
 ## 0.3.7 (2026-09-10)
 
 ### Added

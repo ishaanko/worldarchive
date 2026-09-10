@@ -246,17 +246,18 @@ public final class GitBackupBackend implements GitSnapshotStore {
         Objects.requireNonNull(worldId, "worldId");
         Objects.requireNonNull(backupId, "backupId");
         return submit(() -> lock.withLock(() ->
-                new GitStorageCompactor(settings, repository, refs, commands)
+                new GitStorageCompactor(settings, repository, refs, commands, verifier)
                         .deleteLocalSnapshot(worldId, backupId)));
     }
 
+    /** Frees Git and LFS storage that no remaining snapshot in this repository uses. */
     public CompletionStage<Void> compactStorage(WorldId worldId) {
         Objects.requireNonNull(worldId, "worldId");
         return submit(() -> lock.withLock(() -> {
             repository.requireWorld(worldId);
             repository.requireBare();
-            boolean noSnapshots = operations.listSnapshotsBlocking(Optional.of(worldId)).isEmpty();
-            new GitStorageCompactor(settings, repository, refs, commands).compact(worldId, noSnapshots);
+            new GitStorageCompactor(settings, repository, refs, commands, verifier)
+                    .compact(worldId, operations.listSnapshotsBlocking(Optional.empty()));
             return null;
         }));
     }
