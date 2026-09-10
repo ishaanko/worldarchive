@@ -2,14 +2,17 @@ package dev.ishaanko.worldarchive.storage.git;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.ishaanko.worldarchive.core.AsyncTasks;
 import dev.ishaanko.worldarchive.core.BackupCapture;
 import dev.ishaanko.worldarchive.core.ProgressListener;
 import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.BackupManifest;
 import dev.ishaanko.worldarchive.model.BackupTrigger;
+import dev.ishaanko.worldarchive.model.DestinationResult;
 import dev.ishaanko.worldarchive.model.DestinationStatus;
 import dev.ishaanko.worldarchive.model.SyncStatus;
 import dev.ishaanko.worldarchive.model.WorldId;
@@ -50,6 +53,23 @@ class WorldGitSnapshotStoreIntegrationTest {
                 Optional.empty());
         GitToolHealth health = new GitToolProbe(probeSettings, new SystemGitCommandRunner()).probe();
         Assumptions.assumeTrue(health.available(), health.summary());
+    }
+
+    @Test
+    void createBackupReturnsAnInterruptibleWriteSoCancellationKeepsItsOutcome() throws Exception {
+        WorldId worldId = WorldId.create();
+        Path world = world("interruptible-world", "contents");
+        try (WorldGitSnapshotStore store = new WorldGitSnapshotStore(
+                settings(temporaryDirectory.resolve("repositories-interruptible"), Optional.empty()))) {
+            CompletionStage<DestinationResult> write = store.createBackup(
+                    capture(world, worldId, BackupId.create(), Instant.now()),
+                    ProgressListener.NO_OP);
+
+            // The coordinator stops a cancelled write through this future type; a composed
+            // stage would be cancelled outright and lose a snapshot published before the push.
+            assertInstanceOf(AsyncTasks.InterruptibleFuture.class, write);
+            assertEquals(DestinationStatus.SUCCESS, await(write).status());
+        }
     }
 
     @Test

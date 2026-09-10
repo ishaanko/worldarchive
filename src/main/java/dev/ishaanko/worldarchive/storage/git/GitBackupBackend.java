@@ -7,6 +7,7 @@ import dev.ishaanko.worldarchive.model.BackupManifest;
 import dev.ishaanko.worldarchive.model.DestinationResult;
 import dev.ishaanko.worldarchive.model.DestinationType;
 import dev.ishaanko.worldarchive.model.WorldId;
+import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.util.List;
@@ -123,12 +124,29 @@ public final class GitBackupBackend implements GitSnapshotStore {
             ProgressListener progressListener) {
         Objects.requireNonNull(capture, "capture");
         Objects.requireNonNull(progressListener, "progressListener");
-        return submit(() -> operations.createBackupBlocking(capture, progressListener));
+        return submit(() -> createBackupBlocking(capture, progressListener));
+    }
+
+    /**
+     * Writes the snapshot on the calling thread. An interrupt after the local snapshot is
+     * published still returns that snapshot as pending sync, so a caller that runs this on
+     * its own interruptible worker keeps the outcome.
+     */
+    DestinationResult createBackupBlocking(
+            BackupCapture capture,
+            ProgressListener progressListener) {
+        return operations.createBackupBlocking(capture, progressListener);
+    }
+
+    /** Lists this repository's snapshots on the calling thread. */
+    List<GitSnapshot> listSnapshotsBlocking(Optional<WorldId> worldId)
+            throws IOException, InterruptedException, GitStorageException {
+        return lock.withLock(() -> operations.listSnapshotsBlocking(worldId));
     }
 
     public CompletionStage<List<GitSnapshot>> listSnapshots(Optional<WorldId> worldId) {
         Objects.requireNonNull(worldId, "worldId");
-        return submit(() -> lock.withLock(() -> operations.listSnapshotsBlocking(worldId)));
+        return submit(() -> listSnapshotsBlocking(worldId));
     }
 
     public CompletionStage<GitVerification> verifySnapshot(WorldId worldId, BackupId backupId) {

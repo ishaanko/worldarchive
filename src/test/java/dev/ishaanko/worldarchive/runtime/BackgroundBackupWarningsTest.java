@@ -85,6 +85,24 @@ final class BackgroundBackupWarningsTest {
                         new IllegalStateException("save failed")));
     }
 
+    @Test
+    void cancelledBackupIsReportedWithoutAWarning() {
+        Throwable cancelled = new java.util.concurrent.CancellationException("Backup was cancelled");
+
+        assertTrue(BackgroundBackupWarnings.worldExit(null, cancelled).isEmpty());
+        assertTrue(BackgroundBackupWarnings.scheduled(null, cancelled).isEmpty());
+        assertNotice(
+                "Backup cancelled; world was saved",
+                BackgroundBackupWarnings.NoticeSeverity.WARNING,
+                BackgroundBackupWarnings.worldExitNotice(null, cancelled));
+        assertNotice(
+                "Backup cancelled; world was saved",
+                BackgroundBackupWarnings.NoticeSeverity.WARNING,
+                BackgroundBackupWarnings.worldExitNotice(
+                        null,
+                        new java.util.concurrent.CompletionException(cancelled)));
+    }
+
     private static void assertNotice(
             String message,
             BackgroundBackupWarnings.NoticeSeverity severity,
