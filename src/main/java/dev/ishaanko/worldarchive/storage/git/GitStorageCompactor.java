@@ -44,12 +44,15 @@ final class GitStorageCompactor {
     }
 
     /**
-     * Reclaims space after snapshot refs were deleted. Snapshot commits chain onto
-     * each other, so Git's own reachability keeps every older commit alive and
-     * {@code git lfs prune} cannot tell a deleted snapshot from a kept one. The LFS
-     * objects that stay are therefore computed exactly: every object that a
-     * remaining snapshot's tree points at. Anything else under {@code lfs/objects}
-     * is removed. When the world has no snapshots left its history ref goes too.
+     * Reclaims space after snapshot refs were deliberately deleted. Snapshot commits
+     * chain onto each other, so Git's own reachability keeps every older commit alive
+     * and {@code git lfs prune} cannot tell a deleted snapshot from a kept one. The LFS
+     * objects that stay are therefore computed exactly: every object that a remaining
+     * snapshot's tree points at. Anything else under {@code lfs/objects} is removed.
+     *
+     * <p>The world's history ref exists so an import can rebuild snapshot refs that
+     * went missing by accident. After a deletion it would rebuild the deleted snapshot
+     * with its content gone, so it is removed here as well.
      */
     void compact(WorldId worldId, List<GitSnapshot> remainingSnapshots)
             throws IOException, InterruptedException, GitStorageException {
@@ -59,11 +62,7 @@ final class GitStorageCompactor {
                 retained.add(pointer.sha256());
             }
         }
-        boolean worldEmpty = remainingSnapshots.stream()
-                .noneMatch(snapshot -> snapshot.worldId().equals(worldId));
-        if (worldEmpty) {
-            refs.deleteIfPresent(repository.historyRef(worldId));
-        }
+        refs.deleteIfPresent(repository.historyRef(worldId));
         commands.checked(
                 List.of(
                         "reflog",
