@@ -26,10 +26,11 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * Applies a confirmed {@link CleanupPlan}. Cleanup frees space on this computer only:
- * it never contacts the configured remote. A backup whose snapshot is synchronized to
- * the remote keeps its catalog record as a remote-only entry; a backup with no copy
- * left anywhere leaves the catalog.
+ * Applies a confirmed {@link CleanupPlan}. Cleanup frees space on this computer only.
+ * It never changes the configured remote, but it does ask the remote whether a
+ * synchronized snapshot is still there before the local copy goes. Such a backup keeps
+ * its catalog record as a remote-only entry; a backup with no copy left anywhere
+ * leaves the catalog.
  */
 final class CleanupExecutor {
     private final BackupCatalog catalog;
