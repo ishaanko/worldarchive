@@ -25,7 +25,11 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 
-/** Applies a confirmed {@link CleanupPlan}, including its remote-safety guardrails. */
+/**
+ * Applies a confirmed {@link CleanupPlan}. A backup the keep settings do not protect is
+ * deleted the same way the Delete button deletes it: Git snapshot (local and remote),
+ * ZIP, and catalog record. A protected backup only loses its local Git copy.
+ */
 final class CleanupExecutor {
     private final BackupCatalog catalog;
 
@@ -60,12 +64,10 @@ final class CleanupExecutor {
                 throw new IOException("Storage changed after the preview; review cleanup again");
             }
             requireVerifiedSafetyFloor(current, plan.verifiedSafetyFloor());
-            Set<BackupId> remoteCopies = requireCurrentRemoteCopies(
-                    plan, request, current);
+            requireCurrentRemoteCopies(plan, request, current);
             long before = current.totalBytes();
             Map<BackupId, String> failures = new LinkedHashMap<>();
-            boolean removedGit = applyItems(
-                    plan, request, current, remoteCopies, failures);
+            boolean removedGit = applyItems(plan, request, current, failures);
             if (removedGit) {
                 try {
                     ManagedStorageSupport.await(git.compactCurrentStorage(plan.worldId()));
@@ -75,7 +77,7 @@ final class CleanupExecutor {
                 } catch (Exception exception) {
                     failures.putIfAbsent(
                             plan.items().stream()
-                                    .filter(CleanupItem::removeLocalGit)
+                                    .filter(CleanupItem::removeGit)
                                     .map(CleanupItem::backupId)
                                     .findFirst()
                                     .orElseThrow(),
@@ -106,9 +108,12 @@ final class CleanupExecutor {
                 || removesSafetyFloor) {
             throw new IOException("Cleanup selection does not match its preview");
         }
+        // Protected backups lose their local Git copies as one group: the space only
+        // comes back once none of them keeps the shared history alive.
         Set<BackupId> gitGroup = plan.items().stream()
-                .filter(CleanupItem::removeLocalGit)
+                .filter(CleanupItem::removeGit)
                 .map(CleanupItem::backupId)
+                .filter(plan.protectedBackups()::contains)
                 .collect(java.util.stream.Collectors.toSet());
         boolean someGitSelected = request.selectedBackups().stream()
                 .anyMatch(gitGroup::contains);
@@ -118,11 +123,14 @@ final class CleanupExecutor {
         }
     }
 
+    /**
+     * Git goes first: a remote that refuses the deletion fails the item before its ZIP
+     * is touched, so the backup stays whole and restorable.
+     */
     private boolean applyItems(
             CleanupPlan plan,
             CleanupRequest request,
             Snapshot current,
-            Set<BackupId> remoteCopies,
             Map<BackupId, String> failures) throws InterruptedException {
         boolean removedGit = false;
         for (CleanupItem item : plan.items()) {
@@ -130,17 +138,27 @@ final class CleanupExecutor {
                 continue;
             }
             try {
+                if (item.removeGit()) {
+                    if (plan.protectedBackups().contains(item.backupId())) {
+                        ManagedStorageSupport.await(git.deleteCurrentLocalSnapshot(
+                                plan.worldId(),
+                                item.backupId()));
+                        // The catalog keeps pointing at a synchronized remote copy, so
+                        // the backup stays visible, verifiable, and deletable later.
+                        removeDestination(
+                                item.backupId(),
+                                DestinationType.GIT,
+                                synchronizedRemoteCopy(current, item.backupId()));
+                    } else {
+                        ManagedStorageSupport.await(git.deleteSnapshot(
+                                plan.worldId(),
+                                item.backupId()));
+                        removeDestination(item.backupId(), DestinationType.GIT, false);
+                    }
+                    removedGit = true;
+                }
                 if (item.removeZip()) {
                     removeZip(current, item.backupId());
-                }
-                if (item.removeLocalGit()) {
-                    ManagedStorageSupport.await(git.deleteCurrentLocalSnapshot(
-                            plan.worldId(),
-                            item.backupId()));
-                    removeGitCatalogCopy(
-                            item.backupId(),
-                            remoteCopies.contains(item.backupId()));
-                    removedGit = true;
                 }
             } catch (InterruptedException exception) {
                 Thread.currentThread().interrupt();
@@ -248,14 +266,22 @@ final class CleanupExecutor {
         }
     }
 
-    private Set<BackupId> requireCurrentRemoteCopies(
+    private static boolean synchronizedRemoteCopy(Snapshot snapshot, BackupId backupId) {
+        return ManagedStorageSupport.destination(
+                        ManagedStorageSupport.record(snapshot, backupId), DestinationType.GIT)
+                .filter(result -> result.ownership() == ArtifactOwnership.MANAGED
+                        && result.syncStatus() == SyncStatus.SYNCED)
+                .isPresent();
+    }
+
+    /** A protected backup may lose its last local copy only if the remote provably has it. */
+    private void requireCurrentRemoteCopies(
             CleanupPlan plan,
             CleanupRequest request,
             Snapshot snapshot) throws Exception {
-        Set<BackupId> remoteCopies = new HashSet<>();
         for (CleanupItem item : plan.items()) {
             if (!request.selectedBackups().contains(item.backupId())
-                    || !item.removeLocalGit()
+                    || !item.removeGit()
                     || !plan.protectedBackups().contains(item.backupId())) {
                 continue;
             }
@@ -280,9 +306,7 @@ final class CleanupExecutor {
                 throw new IOException(
                         "The configured remote changed after the cleanup preview");
             }
-            remoteCopies.add(item.backupId());
         }
-        return Set.copyOf(remoteCopies);
     }
 
     private void removeZip(Snapshot snapshot, BackupId backupId) throws Exception {
@@ -317,13 +341,6 @@ final class CleanupExecutor {
         } catch (IOException | RuntimeException rollbackFailure) {
             deletionFailure.addSuppressed(rollbackFailure);
         }
-    }
-
-    private void removeGitCatalogCopy(
-            BackupId backupId,
-            boolean verifiedRemoteRemains) throws IOException {
-        removeDestination(
-                backupId, DestinationType.GIT, verifiedRemoteRemains);
     }
 
     private void removeDestination(

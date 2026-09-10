@@ -5,13 +5,18 @@ import java.time.Instant;
 import java.util.Objects;
 import java.util.Optional;
 
-/** One exact local cleanup action shown before confirmation. */
+/**
+ * One cleanup action shown before confirmation. For a backup the keep settings do not
+ * protect, {@code removeGit} deletes the Git snapshot everywhere, including the
+ * configured remote, and the backup leaves the catalog. For a protected backup it drops
+ * only the local Git copy; the ZIP or the verified remote copy stays.
+ */
 public record CleanupItem(
         BackupId backupId,
         Instant createdAt,
         Optional<String> label,
         long changedFileCount,
-        boolean removeLocalGit,
+        boolean removeGit,
         boolean removeZip,
         Optional<String> gitRef,
         Optional<String> zipArtifactId,
@@ -27,10 +32,10 @@ public record CleanupItem(
         if (changedFileCount < 0 || estimatedGitBytes < 0 || exactZipBytes < 0) {
             throw new IllegalArgumentException("Cleanup counts must not be negative");
         }
-        if (!removeLocalGit && !removeZip) {
+        if (!removeGit && !removeZip) {
             throw new IllegalArgumentException("Cleanup item must remove at least one local artifact");
         }
-        if (removeLocalGit != gitRef.isPresent() || removeZip != zipArtifactId.isPresent()) {
+        if (removeGit != gitRef.isPresent() || removeZip != zipArtifactId.isPresent()) {
             throw new IllegalArgumentException("Cleanup artifact identities do not match their actions");
         }
     }

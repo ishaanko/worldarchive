@@ -19,7 +19,7 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
 import java.util.function.Supplier;
 
-/** Measures, forecasts, previews, and explicitly applies managed-local cleanup. */
+/** Measures, forecasts, previews, and explicitly applies storage cleanup. */
 public final class ManagedStorageService {
     private final FileStorageReviewStore reviews;
 

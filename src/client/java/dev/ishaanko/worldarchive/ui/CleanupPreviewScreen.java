@@ -62,7 +62,7 @@ final class CleanupPreviewScreen extends Screen {
         addRenderableOnly(Widgets.title(font, x, 9, contentWidth, 20, title));
         String summary = plan.items().isEmpty()
                 ? "Nothing to clean up right now. Your keep settings protect every backup."
-                : "Choose which backups to delete from this computer. Copies on GitHub or in linked folders are not touched.";
+                : "Backups your keep settings do not protect are deleted everywhere, including GitHub. Protected backups only lose their local Git copy.";
         addRenderableOnly(new MultiLineTextWidget(
                         x,
                         31,
@@ -89,7 +89,7 @@ final class CleanupPreviewScreen extends Screen {
                     + " · "
                     + identity(item)
                     + " · "
-                    + actions(item)
+                    + actions(plan, item)
                     + " · "
                     + item.changedFileCount()
                     + " changed";
@@ -105,9 +105,10 @@ final class CleanupPreviewScreen extends Screen {
         }
     }
 
+    /** Protected backups give up their local Git copies together or not at all. */
     private void toggle(CleanupItem item) {
         boolean removing = selected.contains(item.backupId());
-        if (!item.removeLocalGit()) {
+        if (!item.removeGit() || !plan.protectedBackups().contains(item.backupId())) {
             if (removing) {
                 selected.remove(item.backupId());
             } else {
@@ -116,8 +117,9 @@ final class CleanupPreviewScreen extends Screen {
             return;
         }
         plan.items().stream()
-                .filter(CleanupItem::removeLocalGit)
+                .filter(CleanupItem::removeGit)
                 .map(CleanupItem::backupId)
+                .filter(plan.protectedBackups()::contains)
                 .forEach(backupId -> {
                     if (removing) {
                         selected.remove(backupId);
@@ -192,11 +194,14 @@ final class CleanupPreviewScreen extends Screen {
         return item.label().orElse(item.backupId().toString().substring(0, 8));
     }
 
-    private static String actions(CleanupItem item) {
-        if (item.removeLocalGit() && item.removeZip()) {
-            return "Git + ZIP";
+    private static String actions(CleanupPlan plan, CleanupItem item) {
+        if (plan.protectedBackups().contains(item.backupId())) {
+            return "local Git copy only";
         }
-        return item.removeLocalGit() ? "local Git" : "ZIP";
+        if (item.removeGit() && item.removeZip()) {
+            return "delete Git + ZIP";
+        }
+        return item.removeGit() ? "delete Git" : "delete ZIP";
     }
 
     static String details(CleanupItem item) {
