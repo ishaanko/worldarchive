@@ -5,6 +5,7 @@ import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.BackupRecord;
 import dev.ishaanko.worldarchive.model.DestinationResult;
 import dev.ishaanko.worldarchive.model.DestinationType;
+import dev.ishaanko.worldarchive.model.SyncStatus;
 import dev.ishaanko.worldarchive.storage.zip.ZipBackupArtifact;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -22,6 +23,14 @@ final class ManagedStorageSupport {
             DestinationType type) {
         return destination(record, type)
                 .filter(result -> result.ownership() != ArtifactOwnership.EXTERNAL)
+                .isPresent();
+    }
+
+    /** True when the catalog says this backup's Git snapshot is on the configured remote. */
+    static boolean synchronizedRemoteCopy(BackupRecord record) {
+        return destination(record, DestinationType.GIT)
+                .filter(result -> result.ownership() != ArtifactOwnership.EXTERNAL
+                        && result.syncStatus() == SyncStatus.SYNCED)
                 .isPresent();
     }
 

@@ -76,7 +76,7 @@ final class CleanupConfirmationScreen extends Screen {
                 contentWidth,
                 18,
                 Component.literal(
-                                "These backups will be deleted. This cannot be undone.")
+                                "These backups will be deleted from this computer. This cannot be undone.")
                         .withStyle(ChatFormatting.RED),
                 font));
         int pageSize = Math.max(1, Math.min(6, (height - 142) / 24));

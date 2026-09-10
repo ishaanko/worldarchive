@@ -26,9 +26,10 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * Applies a confirmed {@link CleanupPlan}. A backup the keep settings do not protect is
- * deleted the same way the Delete button deletes it: Git snapshot (local and remote),
- * ZIP, and catalog record. A protected backup only loses its local Git copy.
+ * Applies a confirmed {@link CleanupPlan}. Cleanup frees space on this computer only:
+ * it never contacts the configured remote. A backup whose snapshot is synchronized to
+ * the remote keeps its catalog record as a remote-only entry; a backup with no copy
+ * left anywhere leaves the catalog.
  */
 final class CleanupExecutor {
     private final BackupCatalog catalog;
@@ -123,10 +124,6 @@ final class CleanupExecutor {
         }
     }
 
-    /**
-     * Git goes first: a remote that refuses the deletion fails the item before its ZIP
-     * is touched, so the backup stays whole and restorable.
-     */
     private boolean applyItems(
             CleanupPlan plan,
             CleanupRequest request,
@@ -139,22 +136,16 @@ final class CleanupExecutor {
             }
             try {
                 if (item.removeGit()) {
-                    if (plan.protectedBackups().contains(item.backupId())) {
-                        ManagedStorageSupport.await(git.deleteCurrentLocalSnapshot(
-                                plan.worldId(),
-                                item.backupId()));
-                        // The catalog keeps pointing at a synchronized remote copy, so
-                        // the backup stays visible, verifiable, and deletable later.
-                        removeDestination(
-                                item.backupId(),
-                                DestinationType.GIT,
-                                synchronizedRemoteCopy(current, item.backupId()));
-                    } else {
-                        ManagedStorageSupport.await(git.deleteSnapshot(
-                                plan.worldId(),
-                                item.backupId()));
-                        removeDestination(item.backupId(), DestinationType.GIT, false);
-                    }
+                    ManagedStorageSupport.await(git.deleteCurrentLocalSnapshot(
+                            plan.worldId(),
+                            item.backupId()));
+                    // The catalog keeps pointing at a synchronized remote copy, so the
+                    // backup stays visible, verifiable, and deletable with Delete.
+                    removeDestination(
+                            item.backupId(),
+                            DestinationType.GIT,
+                            ManagedStorageSupport.synchronizedRemoteCopy(
+                                    ManagedStorageSupport.record(current, item.backupId())));
                     removedGit = true;
                 }
                 if (item.removeZip()) {
@@ -264,14 +255,6 @@ final class CleanupExecutor {
         } catch (Exception exception) {
             return false;
         }
-    }
-
-    private static boolean synchronizedRemoteCopy(Snapshot snapshot, BackupId backupId) {
-        return ManagedStorageSupport.destination(
-                        ManagedStorageSupport.record(snapshot, backupId), DestinationType.GIT)
-                .filter(result -> result.ownership() == ArtifactOwnership.MANAGED
-                        && result.syncStatus() == SyncStatus.SYNCED)
-                .isPresent();
     }
 
     /** A protected backup may lose its last local copy only if the remote provably has it. */

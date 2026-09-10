@@ -6,10 +6,9 @@ import java.util.Objects;
 import java.util.Optional;
 
 /**
- * One cleanup action shown before confirmation. For a backup the keep settings do not
- * protect, {@code removeGit} deletes the Git snapshot everywhere, including the
- * configured remote, and the backup leaves the catalog. For a protected backup it drops
- * only the local Git copy; the ZIP or the verified remote copy stays.
+ * One local cleanup action shown before confirmation. {@code removeGit} drops the Git
+ * copy on this computer only; a copy on the configured remote is never touched and
+ * keeps the backup listed. A backup with no copy left anywhere leaves the catalog.
  */
 public record CleanupItem(
         BackupId backupId,
