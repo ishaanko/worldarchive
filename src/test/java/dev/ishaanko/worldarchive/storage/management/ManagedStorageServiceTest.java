@@ -350,7 +350,7 @@ final class ManagedStorageServiceTest {
             CleanupPlan plan = await(fixture.service().prepareCleanup(worldId));
 
             assertTrue(plan.items().stream()
-                    .noneMatch(CleanupItem::removeLocalGit));
+                    .noneMatch(CleanupItem::removeGit));
             assertTrue(Files.exists(repository.resolve("objects.bin")));
         }
     }

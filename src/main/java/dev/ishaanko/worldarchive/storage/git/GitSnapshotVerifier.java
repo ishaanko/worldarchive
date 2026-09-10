@@ -207,6 +207,22 @@ final class GitSnapshotVerifier {
         }
     }
 
+    /**
+     * Lists the LFS objects a snapshot tree points at without checking that the
+     * objects exist. Compaction uses this to decide which objects must stay.
+     */
+    List<GitLfsPointer> readLfsPointers(String commit)
+            throws IOException, InterruptedException, GitStorageException {
+        List<GitLfsPointer> pointers = new ArrayList<>();
+        for (GitTreeEntry entry : readTreeEntries(commit)) {
+            if (entry.path().equals(GitBackupBackend.MANIFEST_PATH)) {
+                continue;
+            }
+            readBlob(entry).pointer().ifPresent(pointers::add);
+        }
+        return List.copyOf(pointers);
+    }
+
     private List<GitLfsPointer> findAndVerifySnapshotFiles(
             List<GitTreeEntry> treeEntries,
             BackupManifest manifest)
@@ -217,26 +233,9 @@ final class GitSnapshotVerifier {
             if (entry.path().equals(GitBackupBackend.MANIFEST_PATH)) {
                 continue;
             }
-            GitCommandResult contents = commands.run(
-                    List.of(
-                            "cat-file",
-                            "blob",
-                            entry.objectId()),
-                    settings.repository(),
-                    Map.of(),
-                    new byte[0],
-                    LFS_POINTER_OUTPUT_BYTES);
-            if (!contents.successful()) {
-                throw new GitStorageException(GitCommands.failureMessage(contents));
-            }
-            if (contents.standardErrorTruncated()) {
-                throw new GitStorageException(
-                        "Git LFS pointer inspection exceeded its safety limit");
-            }
-            Optional<GitLfsPointer> pointer = GitLfsPointer.parse(
-                    entry,
-                    contents.standardOutput(),
-                    contents.standardOutputTruncated());
+            SnapshotBlob blob = readBlob(entry);
+            GitCommandResult contents = blob.contents();
+            Optional<GitLfsPointer> pointer = blob.pointer();
             if (pointer.isPresent()) {
                 verifyLfsObject(pointer.get());
                 pointers.add(pointer.get());
@@ -253,6 +252,31 @@ final class GitSnapshotVerifier {
         }
         GitInventory.create(inventoryEntries).requireMatches(manifest);
         return List.copyOf(pointers);
+    }
+
+    /** Reads one tree blob up to the pointer size limit and parses it as an LFS pointer. */
+    private SnapshotBlob readBlob(GitTreeEntry entry)
+            throws IOException, InterruptedException, GitStorageException {
+        GitCommandResult contents = commands.run(
+                List.of(
+                        "cat-file",
+                        "blob",
+                        entry.objectId()),
+                settings.repository(),
+                Map.of(),
+                new byte[0],
+                LFS_POINTER_OUTPUT_BYTES);
+        if (!contents.successful()) {
+            throw new GitStorageException(GitCommands.failureMessage(contents));
+        }
+        if (contents.standardErrorTruncated()) {
+            throw new GitStorageException(
+                    "Git LFS pointer inspection exceeded its safety limit");
+        }
+        return new SnapshotBlob(contents, GitLfsPointer.parse(
+                entry,
+                contents.standardOutput(),
+                contents.standardOutputTruncated()));
     }
 
     private void verifyLfsObject(GitLfsPointer pointer) throws IOException, GitStorageException {
@@ -277,6 +301,9 @@ final class GitSnapshotVerifier {
 
     private static String sha256(Path path) throws IOException {
         return Digests.sha256(path);
+    }
+
+    private record SnapshotBlob(GitCommandResult contents, Optional<GitLfsPointer> pointer) {
     }
 
     record VerifiedSnapshot(

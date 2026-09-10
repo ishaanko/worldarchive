@@ -52,7 +52,7 @@ final class CleanupConfirmationScreen extends Screen {
             BackupClientFacade facade,
             CleanupPlan plan,
             Set<BackupId> selected) {
-        super(Component.literal("Confirm Local Cleanup"));
+        super(Component.literal("Confirm Cleanup"));
         this.preview = Objects.requireNonNull(preview, "preview");
         this.returnTo = Objects.requireNonNull(returnTo, "returnTo");
         this.world = Objects.requireNonNull(world, "world");
@@ -76,7 +76,7 @@ final class CleanupConfirmationScreen extends Screen {
                 contentWidth,
                 18,
                 Component.literal(
-                                "These backups will be deleted from this computer. This cannot be undone.")
+                                "These backups will be deleted. This cannot be undone.")
                         .withStyle(ChatFormatting.RED),
                 font));
         int pageSize = Math.max(1, Math.min(6, (height - 142) / 24));
@@ -91,8 +91,9 @@ final class CleanupConfirmationScreen extends Screen {
                     + " · "
                     + item.label().orElse("unlabeled")
                     + " · "
-                    + (item.removeLocalGit() ? "Git " : "")
-                    + (item.removeZip() ? "ZIP" : "");
+                    + (plan.protectedBackups().contains(item.backupId())
+                            ? "local Git copy only"
+                            : (item.removeGit() ? "Git " : "") + (item.removeZip() ? "ZIP" : ""));
             StringWidget row = new StringWidget(
                     x,
                     y,
