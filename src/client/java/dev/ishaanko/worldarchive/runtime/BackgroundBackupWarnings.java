@@ -4,6 +4,7 @@ import dev.ishaanko.worldarchive.model.BackupResult;
 import dev.ishaanko.worldarchive.model.BackupStatus;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.CancellationException;
 
 /** Credential-safe notices for unattended backup outcomes. */
 final class BackgroundBackupWarnings {
@@ -19,6 +20,11 @@ final class BackgroundBackupWarnings {
     }
 
     static ExitNotice worldExitNotice(BackupResult result, Throwable failure) {
+        if (isCancellation(failure)) {
+            return new ExitNotice(
+                    "Backup cancelled; world was saved",
+                    NoticeSeverity.WARNING);
+        }
         if (failure != null || result == null) {
             return new ExitNotice(
                     "World save or backup did not complete",
@@ -44,10 +50,19 @@ final class BackgroundBackupWarnings {
         return "Creating backup... Keep Minecraft open until it finishes.";
     }
 
+    /** A cancellation is the user's own choice, so it never becomes a warning. */
+    static boolean isCancellation(Throwable failure) {
+        return failure instanceof CancellationException
+                || failure != null && failure.getCause() instanceof CancellationException;
+    }
+
     private static Optional<String> warning(
             String trigger,
             BackupResult result,
             Throwable failure) {
+        if (isCancellation(failure)) {
+            return Optional.empty();
+        }
         if (failure != null || result == null) {
             return Optional.of(trigger + " backup did not complete");
         }

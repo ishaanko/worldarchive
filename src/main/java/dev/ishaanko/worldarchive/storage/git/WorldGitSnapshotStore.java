@@ -161,13 +161,15 @@ public final class WorldGitSnapshotStore implements GitSnapshotStore {
         Objects.requireNonNull(progressListener, "progressListener");
         WorldId worldId = capture.manifest().worldId();
         BackupId backupId = capture.manifest().backupId();
-        return locateLocal(worldId, backupId).thenCompose(location -> {
-            if (location != SnapshotLocation.NONE) {
-                return CompletableFuture.completedFuture(DestinationResult.failed(
+        // One interruptible worker runs the whole write, so a cancellation reaches the
+        // Git thread directly and the coordinator still receives the snapshot it produced.
+        return AsyncTasks.supplyInterruptible(executor, () -> {
+            if (locateLocalBlocking(worldId, backupId) != SnapshotLocation.NONE) {
+                return DestinationResult.failed(
                         DestinationType.GIT,
-                        "The exact Git snapshot already exists in managed storage"));
+                        "The exact Git snapshot already exists in managed storage");
             }
-            return child(worldId).createBackup(capture, progressListener);
+            return child(worldId).createBackupBlocking(capture, progressListener);
         });
     }
 
@@ -507,17 +509,37 @@ public final class WorldGitSnapshotStore implements GitSnapshotStore {
         return child(worldId).listSnapshots(Optional.of(worldId)).thenCombine(
                 legacySnapshots(Optional.of(worldId)),
                 (childSnapshots, legacySnapshots) -> {
-                    boolean childContains = contains(childSnapshots, backupId);
-                    boolean legacyContains = contains(legacySnapshots, backupId);
-                    if (childContains && legacyContains) {
-                        throw new CompletionException(new GitStorageException(
-                                "Git snapshot exists in both isolated and legacy repositories"));
+                    try {
+                        return locate(childSnapshots, legacySnapshots, backupId);
+                    } catch (GitStorageException exception) {
+                        throw new CompletionException(exception);
                     }
-                    if (childContains) {
-                        return SnapshotLocation.CHILD;
-                    }
-                    return legacyContains ? SnapshotLocation.LEGACY : SnapshotLocation.NONE;
                 });
+    }
+
+    private SnapshotLocation locateLocalBlocking(WorldId worldId, BackupId backupId)
+            throws IOException, InterruptedException, GitStorageException {
+        List<GitSnapshot> childSnapshots = child(worldId).listSnapshotsBlocking(Optional.of(worldId));
+        List<GitSnapshot> legacySnapshots = legacyBackend.isPresent()
+                ? legacyBackend.orElseThrow().listSnapshotsBlocking(Optional.of(worldId))
+                : List.of();
+        return locate(childSnapshots, legacySnapshots, backupId);
+    }
+
+    private static SnapshotLocation locate(
+            List<GitSnapshot> childSnapshots,
+            List<GitSnapshot> legacySnapshots,
+            BackupId backupId) throws GitStorageException {
+        boolean childContains = contains(childSnapshots, backupId);
+        boolean legacyContains = contains(legacySnapshots, backupId);
+        if (childContains && legacyContains) {
+            throw new GitStorageException(
+                    "Git snapshot exists in both isolated and legacy repositories");
+        }
+        if (childContains) {
+            return SnapshotLocation.CHILD;
+        }
+        return legacyContains ? SnapshotLocation.LEGACY : SnapshotLocation.NONE;
     }
 
     /** Shared CHILD/LEGACY dispatch; the NONE case is delegated to the caller's strategy. */

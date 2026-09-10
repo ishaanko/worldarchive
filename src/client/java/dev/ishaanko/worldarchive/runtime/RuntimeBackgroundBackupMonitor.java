@@ -21,8 +21,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
+import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
+import net.fabricmc.fabric.api.client.screen.v1.ScreenMouseEvents;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.network.chat.Component;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -31,6 +35,8 @@ import org.slf4j.LoggerFactory;
 final class RuntimeBackgroundBackupMonitor {
     private static final Logger LOGGER =
             LoggerFactory.getLogger(WorldArchiveMetadata.MOD_NAME);
+
+    private static final int LEFT_MOUSE_BUTTON = 0;
 
     private final Minecraft minecraft;
 
@@ -71,6 +77,26 @@ final class RuntimeBackgroundBackupMonitor {
         } catch (IOException exception) {
             LOGGER.warn("Stored background backup notice could not be loaded");
         }
+        ScreenEvents.AFTER_INIT.register(this::routeScreenClicks);
+    }
+
+    // Toasts get no input of their own, so every screen forwards its clicks to the
+    // active progress toasts. A click on a Cancel button is consumed here.
+    private void routeScreenClicks(Minecraft ignored, Screen screen, int width, int height) {
+        ScreenMouseEvents.allowMouseClick(screen)
+                .register((ignoredScreen, event) -> !clickToast(event));
+    }
+
+    private boolean clickToast(MouseButtonEvent event) {
+        if (event.button() != LEFT_MOUSE_BUTTON || closed.getAsBoolean()) {
+            return false;
+        }
+        for (BackupProgressToast toast : activeToasts.values()) {
+            if (toast.mouseClicked(event.x(), event.y())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     Optional<String> warning() {
@@ -147,7 +173,9 @@ final class RuntimeBackgroundBackupMonitor {
             Object progressKey,
             BackupResult result,
             Throwable throwable) {
-        if (throwable != null) {
+        if (BackgroundBackupWarnings.isCancellation(throwable)) {
+            LOGGER.info("World-exit backup was cancelled");
+        } else if (throwable != null) {
             failureLogger.accept(
                     "World-exit backup did not complete",
                     throwable);
@@ -193,9 +221,13 @@ final class RuntimeBackgroundBackupMonitor {
         }
     }
 
-    /** Shows the persistent progress toast for an unattended backup that just started. */
-    void beginBackupProgress(String message, Object progressKey) {
+    /**
+     * Shows the persistent progress toast for an unattended backup that just started.
+     * {@code cancel} is run when the user presses the toast's Cancel button.
+     */
+    void beginBackupProgress(String message, Object progressKey, Runnable cancel) {
         Objects.requireNonNull(progressKey, "progressKey");
+        Objects.requireNonNull(cancel, "cancel");
         if (closed.getAsBoolean()) {
             return;
         }
@@ -203,7 +235,7 @@ final class RuntimeBackgroundBackupMonitor {
             if (closed.getAsBoolean()) {
                 return;
             }
-            BackupProgressToast toast = new BackupProgressToast(minecraft.font, message);
+            BackupProgressToast toast = new BackupProgressToast(minecraft, message, cancel);
             activeToasts.put(progressKey, toast);
             minecraft.gui.toastManager().addToast(toast);
         });
@@ -249,7 +281,7 @@ final class RuntimeBackgroundBackupMonitor {
                 ? null
                 : activeToasts.remove(progressKey);
         if (toast == null) {
-            toast = new BackupProgressToast(minecraft.font, notice.message());
+            toast = new BackupProgressToast(minecraft, notice.message());
             minecraft.gui.toastManager().addToast(toast);
         }
         toast.finish(notice.message(), notice.severity());
