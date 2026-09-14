@@ -73,10 +73,30 @@ public final class IconRowBackupIntegration {
         }
         int size = Math.max(WorldArchiveIconButton.SIZE, iconRow.getFirst().getHeight());
         Button backups = WorldArchiveIconButton.create(0, iconRow.getFirst().getY(), size, action);
-        List<Button> row = new ArrayList<>(iconRow);
-        row.add(backups);
-        recenter(row, rowCenter(iconRow), iconRow.getFirst().getY(), width);
         Screens.getWidgets(screen).add(backups);
+        int centerX = rowCenter(iconRow);
+        layoutRow(screen, backups, centerX, width);
+        // Other mods may add or move icons after this hook ran. Laying the row out again
+        // before every frame keeps the shortcut at the end of the row no matter who ran last.
+        ScreenEvents.beforeExtract(screen).register(
+                (current, graphics, mouseX, mouseY, delta) ->
+                        layoutRow(current, backups, centerX, width));
+    }
+
+    /**
+     * Puts the shortcut after every other square icon on its own row, then recenters the
+     * row. Only that row is touched, so icons elsewhere on the screen are never moved.
+     */
+    private static void layoutRow(Screen screen, Button backups, int centerX, int screenWidth) {
+        int y = backups.getY();
+        List<Button> row = Screens.getWidgets(screen).stream()
+                .filter(Button.class::isInstance)
+                .map(Button.class::cast)
+                .filter(button -> button != backups && button.getY() == y && isSquareIcon(button))
+                .sorted(Comparator.comparingInt(Button::getX))
+                .collect(Collectors.toCollection(ArrayList::new));
+        row.add(backups);
+        recenter(row, centerX, y, screenWidth);
     }
 
     /**
