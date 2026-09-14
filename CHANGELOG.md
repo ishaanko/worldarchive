@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- The Create Backup screen has a Cancel button while a manual backup runs. Cancel
+  stops the world copy or the destination writes, removes the partial files, and
+  reports "Backup cancelled". A destination that had already finished is kept.
+
 ## 0.3.7.3 (2026-09-14)
 
 ### Fixed

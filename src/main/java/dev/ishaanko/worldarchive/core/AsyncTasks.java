@@ -44,6 +44,12 @@ public final class AsyncTasks {
         return result;
     }
 
+    /** True when a failure is a cancellation, directly or wrapped by a completion stage. */
+    public static boolean isCancellation(Throwable failure) {
+        return failure instanceof CancellationException
+                || failure != null && failure.getCause() instanceof CancellationException;
+    }
+
     public static CompletionStage<Void> run(
             Executor executor,
             Runnable operation) {

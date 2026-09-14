@@ -212,7 +212,29 @@ final class RuntimeLifecycle {
                     pending,
                     "The integrated server rejected the backup save");
         }
-        return pending.result().minimalCompletionStage();
+        return cancellableResult(pending);
+    }
+
+    /**
+     * A view of a pending backup's result whose cancel stops the backup the same way the
+     * world-exit toast's Cancel button does. Callers cannot complete the backup through it.
+     */
+    private CompletableFuture<BackupResult> cancellableResult(PendingLiveBackup pending) {
+        CompletableFuture<BackupResult> view = new CompletableFuture<>() {
+            @Override
+            public boolean cancel(boolean mayInterruptIfRunning) {
+                cancelLiveBackup(pending);
+                return super.cancel(mayInterruptIfRunning);
+            }
+        };
+        pending.result().whenComplete((result, throwable) -> {
+            if (throwable == null) {
+                view.complete(result);
+            } else {
+                view.completeExceptionally(throwable);
+            }
+        });
+        return view;
     }
 
     private void serverStarted(MinecraftServer server) {
@@ -421,7 +443,7 @@ final class RuntimeLifecycle {
                 runtime.beginBackupProgress(
                         BackgroundBackupWarnings.worldExitStartedMessage(),
                         exit.result(),
-                        () -> cancelExitBackup(exit));
+                        () -> cancelLiveBackup(exit));
                 boolean quitting;
                 synchronized (lock) {
                     quitting = clientStopping;
@@ -663,10 +685,11 @@ final class RuntimeLifecycle {
     }
 
     /**
-     * Cancel button handler. Safe to call from the render thread: the coordinator
-     * cancel runs on a worker because it may release captured files.
+     * Cancel handler for the world-exit toast and the manual backup screen. Safe to call
+     * from the render thread: the coordinator cancel runs on a worker because it may
+     * release captured files.
      */
-    private void cancelExitBackup(PendingLiveBackup pending) {
+    private void cancelLiveBackup(PendingLiveBackup pending) {
         CompletableFuture<BackupResult> running = pending.requestCancel();
         if (running != null) {
             runtime.submit(() -> running.cancel(true));
