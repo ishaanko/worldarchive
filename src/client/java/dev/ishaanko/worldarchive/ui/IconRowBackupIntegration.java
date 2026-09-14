@@ -66,28 +66,41 @@ public final class IconRowBackupIntegration {
         } else {
             return;
         }
-        List<Button> iconRow = iconRow(Screens.getWidgets(screen));
+        List<Button> iconRow = iconRow(Screens.getWidgets(screen), null);
         if (iconRow.isEmpty()) {
             // No icon row to join; stay out rather than guess a spot.
             return;
         }
         int size = Math.max(WorldArchiveIconButton.SIZE, iconRow.getFirst().getHeight());
         Button backups = WorldArchiveIconButton.create(0, iconRow.getFirst().getY(), size, action);
-        List<Button> row = new ArrayList<>(iconRow);
-        row.add(backups);
-        recenter(row, rowCenter(iconRow), iconRow.getFirst().getY(), width);
         Screens.getWidgets(screen).add(backups);
+        int centerX = rowCenter(iconRow);
+        layoutRow(screen, backups, centerX, width);
+        // Other mods may add or move icons after this hook ran. Laying the row out again
+        // before every frame keeps the shortcut at the end of the row no matter who ran last.
+        ScreenEvents.beforeExtract(screen).register(
+                (current, graphics, mouseX, mouseY, delta) ->
+                        layoutRow(current, backups, centerX, width));
+    }
+
+    /** Puts the shortcut after every other icon in the row, then recenters the row. */
+    private static void layoutRow(Screen screen, Button backups, int centerX, int screenWidth) {
+        List<Button> row = new ArrayList<>(iconRow(Screens.getWidgets(screen), backups));
+        row.add(backups);
+        recenter(row, centerX, backups.getY(), screenWidth);
     }
 
     /**
      * Picks the square-icon row holding the Friends button, or the widest square-icon row
      * without it. Any square button counts, so icons from other mods stay part of the row
-     * and the recentered layout cannot overlap them.
+     * and the recentered layout cannot overlap them. The excluded button, if any, is left
+     * out so the shortcut itself never counts as part of the row it joins.
      */
-    private static List<Button> iconRow(List<AbstractWidget> widgets) {
+    private static List<Button> iconRow(List<AbstractWidget> widgets, Button excluded) {
         Map<Integer, List<Button>> rows = widgets.stream()
                 .filter(Button.class::isInstance)
                 .map(Button.class::cast)
+                .filter(button -> button != excluded)
                 .filter(IconRowBackupIntegration::isSquareIcon)
                 .collect(Collectors.groupingBy(Button::getY));
         return rows.values().stream()

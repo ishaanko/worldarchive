@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- The World Backups icon on the pause and title screens stays at the end of
+  the icon row when other mods add or move icons after WorldArchive placed
+  it. Before, a mod that changed the row later could leave the icon off to
+  the right of the others.
+
 ## 0.3.7.2 (2026-09-10)
 
 ### Changed
