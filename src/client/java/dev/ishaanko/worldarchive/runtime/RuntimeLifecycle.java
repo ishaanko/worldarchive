@@ -216,15 +216,21 @@ final class RuntimeLifecycle {
     }
 
     /**
-     * A view of a pending backup's result whose cancel stops the backup the same way the
-     * world-exit toast's Cancel button does. Callers cannot complete the backup through it.
+     * A view of a pending backup's result whose cancel asks the backup to stop the same way
+     * the world-exit toast's Cancel button does. The view does not mark itself cancelled: it
+     * completes with the backup's real outcome, which is a cancellation unless the
+     * coordinator had already begun recording the result and refused the request. Callers
+     * cannot complete the backup through it.
      */
     private CompletableFuture<BackupResult> cancellableResult(PendingLiveBackup pending) {
         CompletableFuture<BackupResult> view = new CompletableFuture<>() {
             @Override
             public boolean cancel(boolean mayInterruptIfRunning) {
+                if (isDone()) {
+                    return false;
+                }
                 cancelLiveBackup(pending);
-                return super.cancel(mayInterruptIfRunning);
+                return true;
             }
         };
         pending.result().whenComplete((result, throwable) -> {
