@@ -66,7 +66,7 @@ public final class IconRowBackupIntegration {
         } else {
             return;
         }
-        List<Button> iconRow = iconRow(Screens.getWidgets(screen), null);
+        List<Button> iconRow = iconRow(Screens.getWidgets(screen));
         if (iconRow.isEmpty()) {
             // No icon row to join; stay out rather than guess a spot.
             return;
@@ -83,24 +83,31 @@ public final class IconRowBackupIntegration {
                         layoutRow(current, backups, centerX, width));
     }
 
-    /** Puts the shortcut after every other icon in the row, then recenters the row. */
+    /**
+     * Puts the shortcut after every other square icon on its own row, then recenters the
+     * row. Only that row is touched, so icons elsewhere on the screen are never moved.
+     */
     private static void layoutRow(Screen screen, Button backups, int centerX, int screenWidth) {
-        List<Button> row = new ArrayList<>(iconRow(Screens.getWidgets(screen), backups));
+        int y = backups.getY();
+        List<Button> row = Screens.getWidgets(screen).stream()
+                .filter(Button.class::isInstance)
+                .map(Button.class::cast)
+                .filter(button -> button != backups && button.getY() == y && isSquareIcon(button))
+                .sorted(Comparator.comparingInt(Button::getX))
+                .collect(Collectors.toCollection(ArrayList::new));
         row.add(backups);
-        recenter(row, centerX, backups.getY(), screenWidth);
+        recenter(row, centerX, y, screenWidth);
     }
 
     /**
      * Picks the square-icon row holding the Friends button, or the widest square-icon row
      * without it. Any square button counts, so icons from other mods stay part of the row
-     * and the recentered layout cannot overlap them. The excluded button, if any, is left
-     * out so the shortcut itself never counts as part of the row it joins.
+     * and the recentered layout cannot overlap them.
      */
-    private static List<Button> iconRow(List<AbstractWidget> widgets, Button excluded) {
+    private static List<Button> iconRow(List<AbstractWidget> widgets) {
         Map<Integer, List<Button>> rows = widgets.stream()
                 .filter(Button.class::isInstance)
                 .map(Button.class::cast)
-                .filter(button -> button != excluded)
                 .filter(IconRowBackupIntegration::isSquareIcon)
                 .collect(Collectors.groupingBy(Button::getY));
         return rows.values().stream()
