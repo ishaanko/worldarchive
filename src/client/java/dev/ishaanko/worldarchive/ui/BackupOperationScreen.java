@@ -1,5 +1,6 @@
 package dev.ishaanko.worldarchive.ui;
 
+import dev.ishaanko.worldarchive.core.AsyncTasks;
 import dev.ishaanko.worldarchive.core.BackupOperation;
 import dev.ishaanko.worldarchive.core.ProgressListener;
 import dev.ishaanko.worldarchive.core.RestoreBackupResult;
@@ -13,6 +14,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
@@ -24,7 +26,10 @@ import net.minecraft.client.gui.components.StringWidget;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 
-/** Native asynchronous operation screen with credential-safe progress and partial outcomes. */
+/**
+ * Native asynchronous operation screen with credential-safe progress and partial outcomes.
+ * A backup creation can be cancelled while it runs; other operations show a wait notice.
+ */
 final class BackupOperationScreen<T> extends Screen {
     private static final int BAR_BACKGROUND = 0xFF303030;
 
@@ -44,7 +49,14 @@ final class BackupOperationScreen<T> extends Screen {
 
     private final SuccessHandler<T> successHandler;
 
+    private final boolean cancellable;
+
     private final AtomicReference<ProgressState> queuedProgress = new AtomicReference<>();
+
+    // The running operation's future, kept so the Cancel button can stop it.
+    private CompletableFuture<T> runningOperation;
+
+    private boolean cancelling;
 
     private ProgressState progress;
 
@@ -64,11 +76,13 @@ final class BackupOperationScreen<T> extends Screen {
             Screen parent,
             String title,
             OperationStarter<T> starter,
-            SuccessHandler<T> successHandler) {
+            SuccessHandler<T> successHandler,
+            boolean cancellable) {
         super(Component.literal(title));
         this.parent = Objects.requireNonNull(parent, "parent");
         this.starter = Objects.requireNonNull(starter, "starter");
         this.successHandler = Objects.requireNonNull(successHandler, "successHandler");
+        this.cancellable = cancellable;
     }
 
     static BackupOperationScreen<BackupResult> backupResult(
@@ -88,7 +102,8 @@ final class BackupOperationScreen<T> extends Screen {
                 parent,
                 title,
                 starter,
-                result -> backupPresentation(operation, result));
+                result -> backupPresentation(operation, result),
+                operation == BackupOperation.CREATE);
     }
 
     /** Shows one combined outcome for a multi-backup delete instead of one screen per backup. */
@@ -104,7 +119,7 @@ final class BackupOperationScreen<T> extends Screen {
                 case FAILED -> ChatFormatting.RED;
             };
             return new Presentation(summary.headline(), summary.details(), color);
-        });
+        }, false);
     }
 
     static BackupOperationScreen<RestoreBackupResult> restore(
@@ -119,7 +134,7 @@ final class BackupOperationScreen<T> extends Screen {
                     "Restore completed",
                     List.of("Created " + result.restoredWorldDirectory().getFileName()),
                     ChatFormatting.GREEN);
-        });
+        }, false);
     }
 
     @Override
@@ -178,11 +193,11 @@ final class BackupOperationScreen<T> extends Screen {
         int buttonY = Math.min(height - 28, height / 2 + 72);
         int buttonWidth = retryAvailable ? 120 : 150;
         int closeX = retryAvailable ? width / 2 + 3 : width / 2 - buttonWidth / 2;
-        Component closeLabel = running ? Component.literal("Please wait…") : Component.literal("Done");
-        Button closeButton = Button.builder(closeLabel, ignored -> onClose())
-                .bounds(closeX, buttonY, buttonWidth, 20)
-                .build();
-        closeButton.active = !running;
+        Button closeButton = running
+                ? runningButton(closeX, buttonY, buttonWidth)
+                : Button.builder(Component.literal("Done"), ignored -> onClose())
+                        .bounds(closeX, buttonY, buttonWidth, 20)
+                        .build();
         addRenderableWidget(closeButton);
         if (retryAvailable) {
             addRenderableWidget(Button.builder(Component.literal("Retry"), ignored -> retry())
@@ -213,6 +228,41 @@ final class BackupOperationScreen<T> extends Screen {
         graphics.fill(x + 1, y + 1, x + 1 + filled, y + 9, BAR_PROGRESS);
     }
 
+    /** While the operation runs: Cancel when it can be stopped, otherwise a wait notice. */
+    private Button runningButton(int x, int y, int width) {
+        if (!cancellable) {
+            Button wait = Button.builder(Component.literal("Please wait…"), ignored -> { })
+                    .bounds(x, y, width, 20)
+                    .build();
+            wait.active = false;
+            return wait;
+        }
+        String key = cancelling
+                ? "screen.worldarchive.operation.cancelling"
+                : "screen.worldarchive.operation.cancel";
+        Button cancel = Button.builder(Component.translatable(key), ignored -> cancelOperation())
+                .bounds(x, y, width, 20)
+                .build();
+        cancel.active = !cancelling;
+        return cancel;
+    }
+
+    /**
+     * Stops the running backup. The coordinator interrupts the capture or the destination
+     * writes and removes their partial files; the outcome arrives as a cancellation.
+     */
+    private void cancelOperation() {
+        CompletableFuture<T> current = runningOperation;
+        if (!running || cancelling || current == null) {
+            return;
+        }
+        cancelling = true;
+        presentation = Presentation.running(
+                Component.translatable("screen.worldarchive.operation.cancelling").getString());
+        rebuildIfInitialized();
+        current.cancel(true);
+    }
+
     private void startOperation(long token) {
         CompletionStage<T> operation;
         try {
@@ -223,6 +273,7 @@ final class BackupOperationScreen<T> extends Screen {
             finishFailure(token, exception);
             return;
         }
+        runningOperation = operation.toCompletableFuture();
         operation.whenComplete((result, throwable) -> minecraft.execute(() -> {
             if (!accepts(token)) {
                 return;
@@ -286,6 +337,17 @@ final class BackupOperationScreen<T> extends Screen {
             return;
         }
         running = false;
+        cancelling = false;
+        if (AsyncTasks.isCancellation(throwable)) {
+            retryAvailable = false;
+            presentation = new Presentation(
+                    Component.translatable("screen.worldarchive.operation.cancelled").getString(),
+                    List.of(Component.translatable(
+                            "screen.worldarchive.operation.cancelled_detail").getString()),
+                    ChatFormatting.YELLOW);
+            rebuildIfInitialized();
+            return;
+        }
         String failure = safeFailure(throwable);
         retryAvailable = captureChanged(failure);
         List<String> details = retryAvailable

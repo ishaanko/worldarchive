@@ -29,7 +29,10 @@ public interface BackupClientFacade {
 
     CompletionStage<Optional<BackupWorldContext>> resolveWorld(BackupWorldSelection selection);
 
-    /** Requests a save-gated manual capture; screens must not capture a live world directly. */
+    /**
+     * Requests a save-gated manual capture; screens must not capture a live world directly.
+     * Cancelling the returned stage stops the backup and removes its partial files.
+     */
     CompletionStage<BackupResult> createManualBackup(
             BackupWorldContext world,
             Optional<String> label,

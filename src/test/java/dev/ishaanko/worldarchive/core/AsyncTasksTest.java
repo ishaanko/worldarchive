@@ -20,6 +20,16 @@ import org.junit.jupiter.api.Test;
 
 final class AsyncTasksTest {
     @Test
+    void cancellationIsRecognizedDirectlyAndWhenWrapped() {
+        CancellationException cancelled = new CancellationException("cancelled");
+
+        assertTrue(AsyncTasks.isCancellation(cancelled));
+        assertTrue(AsyncTasks.isCancellation(new CompletionException(cancelled)));
+        assertFalse(AsyncTasks.isCancellation(new IllegalStateException("failed")));
+        assertFalse(AsyncTasks.isCancellation(null));
+    }
+
+    @Test
     void supplyExecutorRejectionCompletesTheReturnedStage() {
         CompletionException failure = assertThrows(
                 CompletionException.class,
