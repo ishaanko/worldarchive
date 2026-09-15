@@ -1,10 +1,10 @@
 package dev.ishaanko.worldarchive.runtime;
 
+import dev.ishaanko.worldarchive.core.AsyncTasks;
 import dev.ishaanko.worldarchive.model.BackupResult;
 import dev.ishaanko.worldarchive.model.BackupStatus;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.concurrent.CancellationException;
 
 /** Credential-safe notices for unattended backup outcomes. */
 final class BackgroundBackupWarnings {
@@ -52,8 +52,7 @@ final class BackgroundBackupWarnings {
 
     /** A cancellation is the user's own choice, so it never becomes a warning. */
     static boolean isCancellation(Throwable failure) {
-        return failure instanceof CancellationException
-                || failure != null && failure.getCause() instanceof CancellationException;
+        return AsyncTasks.isCancellation(failure);
     }
 
     private static Optional<String> warning(
