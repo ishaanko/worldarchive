@@ -13,32 +13,32 @@ class GitTreeValidatorTest {
         String tree = "100644 blob " + OBJECT + "\tlevel.dat\0"
                 + "100755 blob " + OBJECT + "\tdatapacks/tool.sh\0";
 
-        assertDoesNotThrow(() -> GitTreeValidator.validate(tree));
+        assertDoesNotThrow(() -> GitTreeValidator.parse(tree));
     }
 
     @Test
     void rejectsSymbolicLinksAndGitlinks() {
-        assertThrows(GitStorageException.class, () -> GitTreeValidator.validate(
+        assertThrows(GitStorageException.class, () -> GitTreeValidator.parse(
                 "120000 blob " + OBJECT + "\tlinked-world\0"));
-        assertThrows(GitStorageException.class, () -> GitTreeValidator.validate(
+        assertThrows(GitStorageException.class, () -> GitTreeValidator.parse(
                 "160000 commit " + OBJECT + "\tnested-repository\0"));
     }
 
     @Test
     void rejectsEmbeddedGitMetadata() {
-        assertThrows(GitStorageException.class, () -> GitTreeValidator.validate(
+        assertThrows(GitStorageException.class, () -> GitTreeValidator.parse(
                 "100644 blob " + OBJECT + "\tdata/.GIT/config\0"));
     }
 
     @Test
     void rejectsNonPortableAndInternalRestorePaths() {
-        assertThrows(GitStorageException.class, () -> GitTreeValidator.validate(
+        assertThrows(GitStorageException.class, () -> GitTreeValidator.parse(
                 "100644 blob " + OBJECT + "\tCON/world.dat\0"));
-        assertThrows(GitStorageException.class, () -> GitTreeValidator.validate(
+        assertThrows(GitStorageException.class, () -> GitTreeValidator.parse(
                 "100644 blob " + OBJECT + "\t.worldarchive.restore.lock\0"));
-        assertThrows(GitStorageException.class, () -> GitTreeValidator.validate(
+        assertThrows(GitStorageException.class, () -> GitTreeValidator.parse(
                 "100644 blob " + OBJECT + "\t.WORLDARCHIVE-MANIFEST.JSON\0"));
-        assertThrows(GitStorageException.class, () -> GitTreeValidator.validate(
+        assertThrows(GitStorageException.class, () -> GitTreeValidator.parse(
                 "100644 blob " + OBJECT + "\t.WORLDARCHIVE/world.json\0"));
     }
 
@@ -47,6 +47,6 @@ class GitTreeValidatorTest {
         String tree = "100644 blob " + OBJECT + "\tData/first.dat\0"
                 + "100644 blob " + OBJECT + "\tdata/FIRST.dat\0";
 
-        assertThrows(GitStorageException.class, () -> GitTreeValidator.validate(tree));
+        assertThrows(GitStorageException.class, () -> GitTreeValidator.parse(tree));
     }
 }

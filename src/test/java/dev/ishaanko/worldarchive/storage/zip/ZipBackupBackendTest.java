@@ -1,5 +1,6 @@
 package dev.ishaanko.worldarchive.storage.zip;
 
+import dev.ishaanko.worldarchive.core.Digests;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -154,8 +155,8 @@ class ZipBackupBackendTest {
     }
 
     private static String sha256(byte[] contents) {
-        var digest = ZipDigests.sha256();
+        var digest = Digests.sha256();
         digest.update(contents);
-        return ZipDigests.hex(digest.digest());
+        return Digests.hex(digest.digest());
     }
 }

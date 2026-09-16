@@ -27,6 +27,26 @@ import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
 class BackupFeedbackModelTest {
+    @Test
+    void batchDeleteCountsAPendingRemoteDeletionAsAProblem() {
+        BackupId backupId = BackupId.create();
+        WorldId worldId = WorldId.create();
+        BackupResult pending = BackupResult.aggregate(
+                backupId,
+                worldId,
+                List.of(
+                        DestinationResult.success(DestinationType.ZIP, worldId + "/archive.zip"),
+                        DestinationResult.pendingSync(
+                                DestinationType.GIT, "refs/heads/x", "deletion pending on the remote")),
+                Instant.parse("2026-09-15T10:00:00Z"));
+
+        DeleteBatchSummary summary = DeleteBatchSummary.from(List.of(pending));
+
+        assertEquals(BackupStatus.PARTIAL_SUCCESS, summary.status());
+        assertEquals(1, summary.details().size());
+        assertTrue(summary.details().getFirst().contains("GIT"));
+    }
+
     private static final BackupId BACKUP_ID = new BackupId(
             UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"));
 

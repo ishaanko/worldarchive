@@ -1,6 +1,7 @@
 package dev.ishaanko.worldarchive.storage.zip;
 
 import dev.ishaanko.worldarchive.core.BackupCapture;
+import dev.ishaanko.worldarchive.core.Digests;
 import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.BackupManifest;
 import dev.ishaanko.worldarchive.model.WorldId;
@@ -419,8 +420,7 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
                 verifyPrivateCopy(directory, managed, checksum, verification);
             }
         } catch (IOException | RuntimeException exception) {
-            verification.problems.add(
-                    "The selected ZIP archive is outside the managed destination.");
+            verification.problems.add("The selected ZIP archive could not be read.");
         }
     }
 
@@ -586,7 +586,7 @@ public final class ZipBackupStore implements ZipBackupStoreResolver {
                 try {
                     ZipArchiveExtractor.extract(privateCopy.path(), staging, inventory, hooks);
                     staging.requireIdentity();
-                    if (!privateCopy.sha256().equals(ZipDigests.sha256(privateCopy.path()))) {
+                    if (!privateCopy.sha256().equals(Digests.sha256(privateCopy.path()))) {
                         throw new ZipBackupException(
                                 "Private ZIP restore copy changed during extraction");
                     }

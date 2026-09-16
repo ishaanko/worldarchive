@@ -297,13 +297,14 @@ public final class SettingsDraft {
 
     private int parseScheduleInterval(Map<SettingsField, String> issues) {
         try {
-            int interval = Integer.parseInt(scheduleInterval);
+            int interval = Integer.parseInt(scheduleInterval.strip());
             if (interval < 1 || interval > TriggerConfig.MAXIMUM_SCHEDULE_INTERVAL_MINUTES) {
                 throw new NumberFormatException("out of range");
             }
             return interval;
         } catch (NumberFormatException exception) {
-            issues.put(SettingsField.SCHEDULE_INTERVAL, "Use a whole number from 1 to 10080 minutes");
+            issues.put(SettingsField.SCHEDULE_INTERVAL, "Use a whole number from 1 to "
+                    + TriggerConfig.MAXIMUM_SCHEDULE_INTERVAL_MINUTES + " minutes");
             return TriggerConfig.DEFAULT_SCHEDULE_INTERVAL_MINUTES;
         }
     }
@@ -331,7 +332,7 @@ public final class SettingsDraft {
             return Optional.empty();
         }
         try {
-            Path path = Path.of(value);
+            Path path = Path.of(SettingsPaths.expandHome(value));
             if (!path.isAbsolute()) {
                 issues.put(field, label + " must be an absolute path");
                 return Optional.empty();

@@ -40,10 +40,6 @@ final class LockedFileStore {
         this.exceptionFactory = exceptionFactory;
     }
 
-    Path file() {
-        return file;
-    }
-
     <T> T withLock(IoSupplier<T> operation) throws IOException {
         rejectSymlink(file);
         rejectSymlink(lockFile);

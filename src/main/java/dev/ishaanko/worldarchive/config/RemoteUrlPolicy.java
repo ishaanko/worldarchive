@@ -27,8 +27,9 @@ public final class RemoteUrlPolicy {
                     + "(?<host>[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?):"
                     + "(?<path>[\\p{L}\\p{N}._~@%+\\-/]{1,1024})");
 
+    /** A drive, UNC, or root prefix followed by anything but the characters no filesystem accepts. */
     private static final Pattern LOCAL_REMOTE = Pattern.compile(
-            "(?:[A-Za-z]:[\\\\/]|\\\\\\\\|/)[\\p{L}\\p{N} ._()@+~\\-\\\\/:]{1,2046}");
+            "(?:[A-Za-z]:[\\\\/]|\\\\\\\\|/)[^<>\"|?*\\p{Cntrl}]{1,2046}");
 
     private RemoteUrlPolicy() {
     }

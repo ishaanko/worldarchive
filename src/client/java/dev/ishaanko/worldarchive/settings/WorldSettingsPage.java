@@ -3,8 +3,12 @@ package dev.ishaanko.worldarchive.settings;
 import dev.ishaanko.worldarchive.config.WorldConfig;
 import dev.ishaanko.worldarchive.model.WorldId;
 import dev.ishaanko.worldarchive.ui.Widgets;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.Checkbox;
@@ -22,6 +26,12 @@ final class WorldSettingsPage {
     private int page;
 
     private WorldId selectedWorldId;
+
+    /** Worlds whose override box is ticked while the folder field is still empty. */
+    private final Set<WorldId> overrideEnabled = new HashSet<>();
+
+    /** The last override typed for a world, restored when its box is ticked again. */
+    private final Map<WorldId, String> rememberedOverrides = new HashMap<>();
 
     WorldSettingsPage(WorldArchiveSettingsScreen screen) {
         this.screen = Objects.requireNonNull(screen, "screen");
@@ -115,6 +125,7 @@ final class WorldSettingsPage {
     private void changePage(List<WorldConfig> worlds, int pageSize, int nextPage) {
         page = nextPage;
         selectedWorldId = worlds.get(page * pageSize).worldId();
+        screen.clearWorldStatus();
         screen.rebuildWorldWidgets();
     }
 
@@ -158,7 +169,9 @@ final class WorldSettingsPage {
     }
 
     private void addZipFields(WorldConfig world, int x, int y, int width) {
-        boolean usesOverride = !screen.draft().worldZipDestination(world.worldId()).isBlank();
+        WorldId worldId = world.worldId();
+        boolean usesOverride = overrideEnabled.contains(worldId)
+                || !screen.draft().worldZipDestination(worldId).isBlank();
         screen.addCheckbox(
                 "screen.worldarchive.settings.world_zip_default",
                 usesOverride,
@@ -166,8 +179,15 @@ final class WorldSettingsPage {
                 y,
                 width,
                 useOverride -> {
-                    screen.draft().setWorldZipDestination(
-                            world.worldId(), useOverride ? screen.draft().zipDestination() : "");
+                    if (useOverride) {
+                        overrideEnabled.add(worldId);
+                        screen.draft().setWorldZipDestination(worldId, rememberedOverrides
+                                .getOrDefault(worldId, screen.draft().zipDestination()));
+                    } else {
+                        overrideEnabled.remove(worldId);
+                        rememberedOverrides.put(worldId, screen.draft().worldZipDestination(worldId));
+                        screen.draft().setWorldZipDestination(worldId, "");
+                    }
                     screen.rebuildWorldWidgets();
                 });
         int fieldY = y + ROW_HEIGHT;
@@ -188,8 +208,7 @@ final class WorldSettingsPage {
                         ignored -> screen.chooseWorldZipFolder(world.worldId()))
                 .bounds(x + width - browseWidth, fieldY, browseWidth, 20)
                 .build();
-        browse.active = usesOverride && !screen.controlsLocked();
-        screen.setWorldZipBrowseButton(browse);
+        screen.setWorldZipBrowseButton(browse, usesOverride);
     }
 
     private static String folderName(WorldConfig world) {

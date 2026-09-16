@@ -2,6 +2,7 @@ package dev.ishaanko.worldarchive.storage.zip;
 
 import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.BackupManifest;
+import dev.ishaanko.worldarchive.model.SensitiveDataRedactor;
 import dev.ishaanko.worldarchive.model.WorldId;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -94,7 +95,7 @@ record ManagedZipArchive(
                 .replaceAll("\\s+", " ")
                 .strip()
                 .replaceAll("[. ]+$", "");
-        if (sanitized.isBlank()) {
+        if (sanitized.isBlank() || SensitiveDataRedactor.containsSensitiveData(sanitized)) {
             return fallback;
         }
         if (sanitized.getBytes(StandardCharsets.UTF_8).length

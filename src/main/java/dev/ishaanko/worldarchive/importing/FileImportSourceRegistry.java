@@ -29,7 +29,7 @@ import java.util.concurrent.locks.ReentrantLock;
 
 /** Process-safe JSON registry for read-only import sources. */
 public final class FileImportSourceRegistry implements ImportSourceRegistry {
-    public static final int CURRENT_SCHEMA_VERSION = 1;
+    private static final int CURRENT_SCHEMA_VERSION = 1;
 
     private static final Gson GSON = new GsonBuilder()
             .setPrettyPrinting()
@@ -62,8 +62,10 @@ public final class FileImportSourceRegistry implements ImportSourceRegistry {
             }
             ImportSource merged = current == null ? source : current;
             try {
-                for (ImportArtifactBinding binding : source.artifacts().values()) {
-                    merged = merged.withArtifact(binding);
+                if (current != null) {
+                    for (ImportArtifactBinding binding : source.artifacts().values()) {
+                        merged = merged.withArtifact(binding);
+                    }
                 }
             } catch (IllegalArgumentException exception) {
                 throw new IOException("Import source contains a conflicting artifact binding", exception);
@@ -144,7 +146,7 @@ public final class FileImportSourceRegistry implements ImportSourceRegistry {
                 .sorted(Comparator.comparing(ImportSource::id))
                 .forEach(source -> encoded.add(encodeSource(source)));
         root.add("sources", encoded);
-        AtomicFiles.writeUtf8(file, GSON.toJson(root) + System.lineSeparator());
+        AtomicFiles.writeUtf8(file, GSON.toJson(root) + "\n");
     }
 
     private static JsonObject encodeSource(ImportSource source) {

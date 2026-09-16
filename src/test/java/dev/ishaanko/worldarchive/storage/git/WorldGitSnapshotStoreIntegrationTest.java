@@ -73,6 +73,34 @@ class WorldGitSnapshotStoreIntegrationTest {
     }
 
     @Test
+    void snapshotsFilesThatAGitignoreInsideTheWorldWouldExclude() throws Exception {
+        Path repositoryRoot = temporaryDirectory.resolve("repositories");
+        WorldId worldId = WorldId.create();
+        BackupId backupId = BackupId.create();
+        Path world = world("ignored-world", "level");
+        Path datapack = Files.createDirectories(world.resolve("datapacks/pack"));
+        Files.writeString(world.resolve(".gitignore"), "level.dat\n", StandardCharsets.UTF_8);
+        Files.writeString(datapack.resolve(".gitignore"), "*.txt\n", StandardCharsets.UTF_8);
+        Files.writeString(datapack.resolve("notes.txt"), "kept", StandardCharsets.UTF_8);
+
+        try (WorldGitSnapshotStore store = new WorldGitSnapshotStore(
+                settings(repositoryRoot, Optional.empty()))) {
+            assertEquals(DestinationStatus.SUCCESS, await(store.createBackup(
+                    capture(world, worldId, backupId, Instant.now()),
+                    ProgressListener.NO_OP)).status());
+            List<String> tree = nativeGit(
+                    "--git-dir=" + store.repositoryFor(worldId),
+                    "ls-tree",
+                    "-r",
+                    "--name-only",
+                    GitSnapshot.refName(worldId, backupId)).lines().toList();
+            assertTrue(tree.contains("level.dat"));
+            assertTrue(tree.contains("datapacks/pack/notes.txt"));
+            assertTrue(tree.contains(".gitignore"));
+        }
+    }
+
+    @Test
     void isolatesWorldRepositoriesAndCreatesParentlessSnapshots() throws Exception {
         Path repositoryRoot = temporaryDirectory.resolve("repositories");
         WorldId firstWorldId = WorldId.create();

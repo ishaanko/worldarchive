@@ -105,6 +105,8 @@ final class GitRepositoryManager {
         configure("core.autocrlf", "false");
         configure("core.filemode", "false");
         configure("core.logAllRefUpdates", "false");
+        // Windows fails "git add" past 260 characters without this; other platforms ignore it.
+        configure("core.longpaths", "true");
         updateManagedFile(settings.repository().resolve("info").resolve("exclude"), List.of(
                 "/.worldarchive/",
                 "/session.lock"));

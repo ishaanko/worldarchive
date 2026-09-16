@@ -33,7 +33,9 @@ public final class DirectoryIdentityMarker {
         String marker = UUID.randomUUID().toString();
         try {
             view.write(ATTRIBUTE, StandardCharsets.UTF_8.encode(marker));
-        } catch (UnsupportedOperationException exception) {
+        } catch (IOException | UnsupportedOperationException exception) {
+            // The store reports xattr support per filesystem type; exFAT, SMB, and synced
+            // folders can still refuse the write, and the marker is only a supplement.
             return Optional.empty();
         }
         if (!Optional.of(marker).equals(read(view))) {

@@ -30,9 +30,14 @@ public final class SensitiveDataRedactor {
     private static final Pattern JSON_WEB_TOKEN = Pattern.compile(
             "eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}");
 
+    /**
+     * A credential prefix followed by a valid percent escape hints at an encoded secret. The
+     * escape must be well formed, so plain text such as "Task100% Done" is left alone.
+     */
     private static final Pattern ENCODED_CREDENTIAL_HINT = Pattern.compile(
             "(?i)(?:gh[pousr]|github|glpat|xox[baprs]|ya29|password|passwd|token|secret|"
-                    + "credential|api[_-]?key|bearer|basic|sk|rk|AKIA)[A-Za-z0-9._-]{0,16}%");
+                    + "credential|api[_-]?key|bearer|basic|sk|rk|AKIA)[A-Za-z0-9._-]{0,16}"
+                    + "%[0-9A-Fa-f]{2}");
 
     private SensitiveDataRedactor() {
     }

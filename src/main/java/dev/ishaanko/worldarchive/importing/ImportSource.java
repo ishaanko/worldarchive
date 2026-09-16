@@ -3,7 +3,6 @@ package dev.ishaanko.worldarchive.importing;
 import dev.ishaanko.worldarchive.config.RemoteUrlPolicy;
 import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.ImportSourceId;
-import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -57,15 +56,11 @@ public record ImportSource(
     private static String validateLocation(ImportSourceMode mode, String location) {
         Objects.requireNonNull(location, "location");
         if (mode == ImportSourceMode.ZIP_LINK) {
-            // Zip link-in-place import was removed, but a catalog upgraded from an
-            // older release may still reference a ZIP_LINK source on disk. Keep this
-            // branch so that legacy entry can still be decoded instead of corrupting
-            // the whole registry file for every other (still-supported) source.
-            Path path = Path.of(location);
-            if (!path.isAbsolute()) {
-                throw new IllegalArgumentException("Linked ZIP source must be absolute");
-            }
-            return path.normalize().toString();
+            // Zip link-in-place import was removed, but a registry written by an older
+            // release may still hold a ZIP_LINK entry. Nothing reads its location any more,
+            // and a path written on another platform must not make the whole registry
+            // unreadable, so the text is kept as it is.
+            return location;
         }
         return RemoteUrlPolicy.validatePlain(location);
     }

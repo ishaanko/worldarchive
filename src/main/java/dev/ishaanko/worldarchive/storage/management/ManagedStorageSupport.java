@@ -23,6 +23,7 @@ final class ManagedStorageSupport {
             DestinationType type) {
         return destination(record, type)
                 .filter(result -> result.ownership() != ArtifactOwnership.EXTERNAL)
+                .filter(result -> result.artifactId().isPresent())
                 .isPresent();
     }
 
@@ -42,6 +43,7 @@ final class ManagedStorageSupport {
     static boolean ownGitSnapshot(BackupRecord record) {
         return destination(record, DestinationType.GIT)
                 .filter(result -> result.ownership() == ArtifactOwnership.MANAGED)
+                .filter(result -> result.artifactId().isPresent())
                 .isPresent();
     }
 

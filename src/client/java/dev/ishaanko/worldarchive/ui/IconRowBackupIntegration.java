@@ -6,7 +6,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.BooleanSupplier;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
@@ -31,7 +31,7 @@ public final class IconRowBackupIntegration {
 
     private static volatile Supplier<? extends BackupClientFacade> facadeSupplier;
 
-    private static volatile BooleanSupplier openLiveWorldBackups;
+    private static volatile Predicate<Screen> openLiveWorldBackups;
 
     private IconRowBackupIntegration() {
     }
@@ -40,11 +40,12 @@ public final class IconRowBackupIntegration {
      * Registers the global Fabric screen hook. Repeated calls update the actions.
      *
      * @param facade supplies the facade the world list needs
-     * @param openLiveWorld opens the browser for the loaded world and reports whether it did
+     * @param openLiveWorld opens the browser for the loaded world over the given screen and
+     *     reports whether it did
      */
     public static void register(
             Supplier<? extends BackupClientFacade> facade,
-            BooleanSupplier openLiveWorld) {
+            Predicate<Screen> openLiveWorld) {
         facadeSupplier = Objects.requireNonNull(facade, "facade");
         openLiveWorldBackups = Objects.requireNonNull(openLiveWorld, "openLiveWorld");
         if (REGISTERED.compareAndSet(false, true)) {
@@ -59,7 +60,7 @@ public final class IconRowBackupIntegration {
                     new BackupWorldsScreen(screen, currentFacade()));
         } else if (screen instanceof PauseScreen && minecraft.hasSingleplayerServer()) {
             action = ignored -> {
-                if (!currentLiveWorldAction().getAsBoolean()) {
+                if (!currentLiveWorldAction().test(screen)) {
                     minecraft.setScreenAndShow(new BackupWorldsScreen(screen, currentFacade()));
                 }
             };
@@ -77,10 +78,9 @@ public final class IconRowBackupIntegration {
         int centerX = rowCenter(iconRow);
         layoutRow(screen, backups, centerX, width);
         // Other mods may add or move icons after this hook ran. Laying the row out again
-        // before every frame keeps the shortcut at the end of the row no matter who ran last.
-        ScreenEvents.beforeExtract(screen).register(
-                (current, graphics, mouseX, mouseY, delta) ->
-                        layoutRow(current, backups, centerX, width));
+        // every tick keeps the shortcut at the end of the row no matter who ran last, without
+        // touching the row on every rendered frame.
+        ScreenEvents.afterTick(screen).register(current -> layoutRow(current, backups, centerX, width));
     }
 
     /**
@@ -155,8 +155,8 @@ public final class IconRowBackupIntegration {
         return Objects.requireNonNull(supplier.get(), "facadeSupplier result");
     }
 
-    private static BooleanSupplier currentLiveWorldAction() {
-        BooleanSupplier action = openLiveWorldBackups;
+    private static Predicate<Screen> currentLiveWorldAction() {
+        Predicate<Screen> action = openLiveWorldBackups;
         if (action == null) {
             throw new IllegalStateException("WorldArchive backup action has not been registered");
         }

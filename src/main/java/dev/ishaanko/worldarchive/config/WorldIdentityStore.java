@@ -140,7 +140,7 @@ public final class WorldIdentityStore {
         identity.sourceBackupId().ifPresent(id -> object.addProperty("sourceBackupId", id.toString()));
         AtomicFiles.writeUtf8(
                 identityFile,
-                GSON.toJson(object) + System.lineSeparator(),
+                GSON.toJson(object) + "\n",
                 MAXIMUM_IDENTITY_BYTES);
     }
 

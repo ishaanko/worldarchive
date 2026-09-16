@@ -6,6 +6,8 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /** Probes Git and Git LFS independently so partial installations are never reported healthy. */
 public final class GitToolProbe {
@@ -18,8 +20,13 @@ public final class GitToolProbe {
         this.runner = Objects.requireNonNull(runner, "runner");
     }
 
+    /** The oldest Git whose flags every command here uses ({@code --no-write-fetch-head}, {@code --object-format}). */
+    static final int[] MINIMUM_GIT_VERSION = {2, 29};
+
+    private static final Pattern GIT_VERSION = Pattern.compile("git version (\\d+)\\.(\\d+)(?:\\.(\\d+))?");
+
     public GitToolHealth probe() throws InterruptedException {
-        ProbeResult git = run(List.of(settings.executable(), "--version"));
+        ProbeResult git = requireSupportedVersion(run(List.of(settings.executable(), "--version")));
         ProbeResult lfs = run(List.of(settings.executable(), "lfs", "version"));
         return new GitToolHealth(
                 git.available(),
@@ -52,6 +59,25 @@ public final class GitToolProbe {
         }
     }
 
+    /** An old Git fails mid-backup on an unknown flag; report it up front instead. */
+    private static ProbeResult requireSupportedVersion(ProbeResult git) {
+        if (!git.available()) {
+            return git;
+        }
+        Matcher matcher = GIT_VERSION.matcher(git.version().orElseThrow());
+        if (!matcher.find()) {
+            return git;
+        }
+        int major = Integer.parseInt(matcher.group(1));
+        int minor = Integer.parseInt(matcher.group(2));
+        if (major > MINIMUM_GIT_VERSION[0]
+                || major == MINIMUM_GIT_VERSION[0] && minor >= MINIMUM_GIT_VERSION[1]) {
+            return git;
+        }
+        return ProbeResult.failure("Git " + MINIMUM_GIT_VERSION[0] + "." + MINIMUM_GIT_VERSION[1]
+                + " or newer is required (found " + major + "." + minor + ")");
+    }
+
     private static String firstNonBlank(String first, String second) {
         String value = first.isBlank() ? second : first;
         value = value.replaceAll("\\p{Cntrl}+", " ").trim();
@@ -59,7 +85,8 @@ public final class GitToolProbe {
     }
 
     private static String safeMessage(GitCommandResult result) {
-        String value = firstNonBlank(result.standardError(), result.standardOutput());
+        String value = SystemGitCommandRunner.redactPatterns(
+                firstNonBlank(result.standardError(), result.standardOutput()));
         return value.length() > 512 ? value.substring(0, 512) : value;
     }
 

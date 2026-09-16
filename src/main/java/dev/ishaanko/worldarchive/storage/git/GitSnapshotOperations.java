@@ -1,11 +1,8 @@
 package dev.ishaanko.worldarchive.storage.git;
 
 import dev.ishaanko.worldarchive.core.BackupCapture;
-import dev.ishaanko.worldarchive.core.BackupOperation;
 import dev.ishaanko.worldarchive.core.OperationId;
 import dev.ishaanko.worldarchive.core.OperationPhase;
-import dev.ishaanko.worldarchive.core.Observers;
-import dev.ishaanko.worldarchive.core.OperationProgress;
 import dev.ishaanko.worldarchive.core.ProgressListener;
 import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.BackupManifest;
@@ -91,7 +88,7 @@ final class GitSnapshotOperations {
             return DestinationResult.skipped(DestinationType.GIT, "Git backup destination is disabled");
         }
         OperationId operationId = OperationId.create();
-        report(progressListener, operationId, capture.manifest(), OperationPhase.PREPARING, "Checking Git tools");
+        GitProgress.report(progressListener, operationId, capture.manifest(), OperationPhase.PREPARING, "Checking Git tools");
         try {
             repository.requireWorld(capture.manifest().worldId());
             GitToolHealth health = new GitToolProbe(settings, runner).probe();
@@ -107,7 +104,7 @@ final class GitSnapshotOperations {
             Thread.currentThread().interrupt();
             return DestinationResult.failed(DestinationType.GIT, "Git backup was cancelled");
         } catch (IOException | GitStorageException exception) {
-            report(progressListener, operationId, capture.manifest(), OperationPhase.FAILED, "Git snapshot failed");
+            GitProgress.report(progressListener, operationId, capture.manifest(), OperationPhase.FAILED, "Git snapshot failed");
             return DestinationResult.failed(DestinationType.GIT, safeMessage(exception));
         }
     }
@@ -118,13 +115,13 @@ final class GitSnapshotOperations {
             OperationId operationId) throws IOException, InterruptedException, GitStorageException {
         GitSnapshot snapshot = snapshotCreator.create(capture, progressListener, operationId);
         if (settings.remoteUrl().isEmpty()) {
-            report(progressListener, operationId, capture.manifest(), OperationPhase.COMPLETE, "Git snapshot complete");
+            GitProgress.report(progressListener, operationId, capture.manifest(), OperationPhase.COMPLETE, "Git snapshot complete");
             return DestinationResult.success(DestinationType.GIT, snapshot.refName());
         }
-        report(progressListener, operationId, capture.manifest(), OperationPhase.PUBLISHING, "Synchronizing Git snapshot");
+        GitProgress.report(progressListener, operationId, capture.manifest(), OperationPhase.PUBLISHING, "Synchronizing Git snapshot");
         try {
             push(snapshot);
-            report(progressListener, operationId, capture.manifest(), OperationPhase.COMPLETE, "Git snapshot synchronized");
+            GitProgress.report(progressListener, operationId, capture.manifest(), OperationPhase.COMPLETE, "Git snapshot synchronized");
             return synchronizedResult(snapshot);
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
@@ -315,7 +312,7 @@ final class GitSnapshotOperations {
                 // Re-hash the fully materialized restore before returning it to its publisher.
             }
         } finally {
-            GitTemporaryFiles.deleteUnlessLocked(temporary);
+            GitTemporaryFiles.deleteTree(temporary);
         }
     }
 
@@ -722,23 +719,6 @@ final class GitSnapshotOperations {
         message = message.replaceAll("\\p{Cntrl}+", " ").trim();
         message = message.length() > 1_024 ? message.substring(0, 1_024) : message;
         return SensitiveDataRedactor.redact(message);
-    }
-
-    private static void report(
-            ProgressListener listener,
-            OperationId operationId,
-            BackupManifest manifest,
-            OperationPhase phase,
-            String message) {
-        Observers.safely(() -> listener.onProgress(new OperationProgress(
-                operationId,
-                manifest.worldId(),
-                Optional.of(manifest.backupId()),
-                BackupOperation.CREATE,
-                phase,
-                0,
-                0,
-                message)));
     }
 
     private record ResolvedSnapshot(

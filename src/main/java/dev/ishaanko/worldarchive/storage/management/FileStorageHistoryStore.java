@@ -106,7 +106,7 @@ public final class FileStorageHistoryStore {
         root.add("samples", encoded);
         AtomicFiles.writeUtf8(
                 file,
-                GSON.toJson(root) + System.lineSeparator(),
+                GSON.toJson(root) + "\n",
                 MAXIMUM_FILE_BYTES);
     }
 

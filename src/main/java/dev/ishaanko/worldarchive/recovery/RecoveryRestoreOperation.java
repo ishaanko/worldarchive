@@ -164,17 +164,12 @@ final class RecoveryRestoreOperation {
                 0, 0, "Publishing restored world copy"));
         Path published = publishRestoredWorld(
                 request, workspace, staging, cancellation);
-        try {
-            RestoreBackupResult result = new RestoreBackupResult(
-                    record.manifest().backupId(), identity.worldId(), published);
-            RecoverySupport.report(progressListener, RecoverySupport.progress(
-                    operationId, record, BackupOperation.RESTORE, OperationPhase.COMPLETE,
-                    1, 1, "Restored world copy is ready"));
-            return Optional.of(result);
-        } catch (RuntimeException exception) {
-            workspace.deletePublished(published);
-            throw exception;
-        }
+        RestoreBackupResult result = new RestoreBackupResult(
+                record.manifest().backupId(), identity.worldId(), published);
+        RecoverySupport.report(progressListener, RecoverySupport.progress(
+                operationId, record, BackupOperation.RESTORE, OperationPhase.COMPLETE,
+                1, 1, "Restored world copy is ready"));
+        return Optional.of(result);
     }
 
     private static Optional<RestoreWorkspace.Staging> materializeCandidate(

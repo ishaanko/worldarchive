@@ -78,6 +78,15 @@ class SystemGitCommandRunnerTest {
     }
 
     @Test
+    void standardOutputKeepsParsedDataThatOnlyLooksLikeASecret() {
+        String manifest = "{ \"worldName\": \"Secret: Base\", \"contentSha256\": \"ab\" }";
+
+        assertEquals(manifest, SystemGitCommandRunner.redactSecrets(manifest, Set.of()));
+        assertEquals("[REDACTED] data", SystemGitCommandRunner.redactSecrets("hunter2 data", Set.of("hunter2")));
+        assertFalse(SystemGitCommandRunner.redact(manifest, Set.of()).contains("Base"));
+    }
+
+    @Test
     void redactsAuthorizationHeadersKnownTokensJwtAndNamedCredentials() {
         String github = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
         String jwt = "eyJabcdefghijk.abcdefghijklmnop.abcdefghijklmnop";

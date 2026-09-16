@@ -1,5 +1,6 @@
 package dev.ishaanko.worldarchive.storage.zip;
 
+import dev.ishaanko.worldarchive.core.Digests;
 import dev.ishaanko.worldarchive.storage.zip.ZipArchiveInspector.Inspection;
 import java.io.IOException;
 import java.io.InterruptedIOException;
@@ -90,10 +91,6 @@ final class ExactArchiveCopy implements AutoCloseable {
         return sha256;
     }
 
-    long size() {
-        return size;
-    }
-
     boolean matches(ExactArchiveCopy other) {
         return sourceFingerprint.equals(other.sourceFingerprint)
                 && sameContents(other);
@@ -181,8 +178,8 @@ final class ExactArchiveCopy implements AutoCloseable {
 
     private static CopyResult copy(SeekableByteChannel source, SeekableByteChannel target)
             throws IOException {
-        MessageDigest digest = ZipDigests.sha256();
-        ByteBuffer buffer = ByteBuffer.allocate(ZipDigests.COPY_BUFFER_BYTES);
+        MessageDigest digest = Digests.sha256();
+        ByteBuffer buffer = ByteBuffer.allocate(Digests.COPY_BUFFER_BYTES);
         long total = 0;
         try {
             while (true) {
@@ -210,7 +207,7 @@ final class ExactArchiveCopy implements AutoCloseable {
         } catch (ArithmeticException exception) {
             throw new ZipBackupException("ZIP archive size overflow", exception);
         }
-        return new CopyResult(total, ZipDigests.hex(digest.digest()));
+        return new CopyResult(total, Digests.hex(digest.digest()));
     }
 
     private static void cleanupWithSuppression(

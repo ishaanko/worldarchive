@@ -24,10 +24,10 @@ WorldArchive never deletes backups on its own. Guided cleanup shows a preview an
 
 ## Requirements
 
-- Minecraft 26.2
+- Minecraft 26.3
 - Fabric Loader 0.19.3 or newer
-- Fabric API 0.157.0 or newer
-- Mod Menu 20.0.1 or newer
+- Fabric API 0.160.5 or newer
+- Mod Menu 21.0.0-beta.1 or newer (optional)
 - Java 25
 
 Git backups also require Git and Git LFS on your system path. They are not needed for ZIP-only backups; if either tool is unavailable, the Git destination is disabled and ZIP backups remain usable.
@@ -36,7 +36,7 @@ WorldArchive is client-side and backs up local single-player saves only. It does
 
 ## Getting started
 
-Open **Mods**, choose **WorldArchive**, and use its configuration button. The **World Backups** screen lets you create, restore, delete, sync, verify, and import backups.
+Click the **World Backups** icon on the title screen, or open **Mods**, choose **WorldArchive**, and use its configuration button if Mod Menu is installed. The **World Backups** screen lets you create, restore, delete, sync, verify, and import backups.
 
 You can also select a world in **Singleplayer** and choose **Backups** to open that world's history directly.
 

@@ -10,10 +10,6 @@ final class GitTreeValidator {
     private GitTreeValidator() {
     }
 
-    static void validate(String treeOutput) throws GitStorageException {
-        parse(treeOutput);
-    }
-
     static List<GitTreeEntry> parse(String treeOutput) throws GitStorageException {
         List<GitTreeEntry> entries = new ArrayList<>();
         Map<String, PathKind> collisionKinds = new HashMap<>();

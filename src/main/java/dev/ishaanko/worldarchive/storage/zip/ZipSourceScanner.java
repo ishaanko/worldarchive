@@ -263,10 +263,10 @@ final class ZipSourceScanner {
         }
     }
 
+    /** macOS may move birth time backwards when an older modification time is applied. */
+    private static final boolean IGNORE_CREATION_TIME = System.getProperty("os.name").startsWith("Mac");
+
     private static FileTime identityCreationTime(BasicFileAttributes attributes) {
-        // macOS may move birth time backwards when an older modification time is applied.
-        return System.getProperty("os.name").startsWith("Mac")
-                ? FileTime.fromMillis(0)
-                : attributes.creationTime();
+        return IGNORE_CREATION_TIME ? FileTime.fromMillis(0) : attributes.creationTime();
     }
 }

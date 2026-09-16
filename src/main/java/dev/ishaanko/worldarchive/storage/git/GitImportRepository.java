@@ -212,10 +212,16 @@ final class GitImportRepository {
                         manifest.worldId(), manifest.backupId(), importedCommit));
             }
             refs.updateWithRollback(snapshotRef, importedCommit, Optional.empty());
-            return GitImportInstallStatus.ADDED;
-        } finally {
-            refs.deleteIfPresent(incoming);
+        } catch (IOException | InterruptedException | GitStorageException | RuntimeException exception) {
+            try {
+                refs.deleteIfPresent(incoming);
+            } catch (IOException | InterruptedException | GitStorageException | RuntimeException cleanupFailure) {
+                exception.addSuppressed(cleanupFailure);
+            }
+            throw exception;
         }
+        refs.deleteIfPresent(incoming);
+        return GitImportInstallStatus.ADDED;
     }
 
     private void fetchCandidate(

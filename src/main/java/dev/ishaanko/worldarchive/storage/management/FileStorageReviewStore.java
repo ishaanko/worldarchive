@@ -54,7 +54,7 @@ public final class FileStorageReviewStore {
         }
         AtomicFiles.writeUtf8(
                 file,
-                now + System.lineSeparator(),
+                now + "\n",
                 MAXIMUM_FILE_BYTES);
         return true;
     }

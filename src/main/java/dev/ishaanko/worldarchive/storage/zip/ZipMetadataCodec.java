@@ -155,7 +155,7 @@ final class ZipMetadataCodec {
     }
 
     private static byte[] encode(JsonObject object) {
-        return (GSON.toJson(object) + System.lineSeparator()).getBytes(StandardCharsets.UTF_8);
+        return (GSON.toJson(object) + "\n").getBytes(StandardCharsets.UTF_8);
     }
 
     private static JsonObject parseObject(byte[] encoded, String description) throws IOException {

@@ -62,9 +62,9 @@ public final class AtomicFiles {
     }
 
     /**
-     * Publishes complete UTF-8 content with a same-directory atomic move.
-     * The temporary file is flushed before the move. Java cannot portably
-     * flush a directory, so the move itself may not survive a system crash.
+     * Publishes complete UTF-8 content with a same-directory atomic move. The temporary file
+     * is flushed before the move and the directory entry is flushed after it where the
+     * platform allows, so the new name survives a system crash.
      *
      * @throws AtomicMoveNotSupportedException when the filesystem cannot provide atomic publication
      */
@@ -108,8 +108,27 @@ public final class AtomicFiles {
                     absoluteTarget,
                     StandardCopyOption.ATOMIC_MOVE,
                     StandardCopyOption.REPLACE_EXISTING);
-        } finally {
-            Files.deleteIfExists(temporary);
+        } catch (IOException | RuntimeException exception) {
+            try {
+                Files.deleteIfExists(temporary);
+            } catch (IOException | RuntimeException cleanupFailure) {
+                exception.addSuppressed(cleanupFailure);
+            }
+            throw exception;
+        }
+        flushDirectory(parent);
+    }
+
+    /**
+     * Flushes a directory so a rename inside it reaches the disk. Windows cannot open a
+     * directory as a channel and some filesystems refuse the sync; both are ignored because
+     * the rename itself already succeeded.
+     */
+    public static void flushDirectory(Path directory) {
+        try (FileChannel channel = FileChannel.open(directory, StandardOpenOption.READ)) {
+            channel.force(true);
+        } catch (IOException | UnsupportedOperationException ignored) {
+            // Best effort only; see the method comment.
         }
     }
 
