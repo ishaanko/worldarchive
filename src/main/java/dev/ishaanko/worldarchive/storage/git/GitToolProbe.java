@@ -59,14 +59,18 @@ public final class GitToolProbe {
         }
     }
 
-    /** An old Git fails mid-backup on an unknown flag; report it up front instead. */
+    /**
+     * An old Git fails mid-backup on an unknown flag; report it up front instead. Real Git
+     * always prints "git version X.Y", so output that does not is not a Git this mod can trust.
+     */
     private static ProbeResult requireSupportedVersion(ProbeResult git) {
         if (!git.available()) {
             return git;
         }
-        Matcher matcher = GIT_VERSION.matcher(git.version().orElseThrow());
+        String reported = git.version().orElseThrow();
+        Matcher matcher = GIT_VERSION.matcher(reported);
         if (!matcher.find()) {
-            return git;
+            return ProbeResult.failure("Git version could not be read from: " + reported);
         }
         int major = Integer.parseInt(matcher.group(1));
         int minor = Integer.parseInt(matcher.group(2));

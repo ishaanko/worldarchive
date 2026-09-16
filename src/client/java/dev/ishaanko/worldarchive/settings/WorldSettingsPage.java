@@ -33,11 +33,19 @@ final class WorldSettingsPage {
     /** The last override typed for a world, restored when its box is ticked again. */
     private final Map<WorldId, String> rememberedOverrides = new HashMap<>();
 
+    /** The draft the transient state above belongs to; a new draft (reload, reset) drops it. */
+    private SettingsDraft observedDraft;
+
     WorldSettingsPage(WorldArchiveSettingsScreen screen) {
         this.screen = Objects.requireNonNull(screen, "screen");
     }
 
     void add(int x, int contentWidth, int pageSize) {
+        if (screen.draft() != observedDraft) {
+            observedDraft = screen.draft();
+            overrideEnabled.clear();
+            rememberedOverrides.clear();
+        }
         List<WorldConfig> worlds = screen.draft().base().worlds();
         if (worlds.isEmpty()) {
             screen.addSettingsText(SettingsWidgets.wrappedText(

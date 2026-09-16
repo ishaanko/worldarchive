@@ -346,7 +346,7 @@ class SystemGitCommandRunnerTest {
         GitCommandRunner fakeRunner = command -> {
             invocations.add(command.arguments());
             if (call.getAndIncrement() == 0) {
-                return new GitCommandResult(0, "git version test", "", false, false);
+                return new GitCommandResult(0, "git version 2.50.1", "", false, false);
             }
             return new GitCommandResult(1, "", "git: lfs unavailable", false, false);
         };

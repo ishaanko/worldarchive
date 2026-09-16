@@ -14,7 +14,7 @@ final class GitToolProbeTest {
     Path temporaryDirectory;
 
     @Test
-    void reportsAnOldGitAsUnavailableWithTheVersionFound() throws Exception {
+    void reportsAnOldOrUnreadableGitAsUnavailable() throws Exception {
         GitToolHealth old = probe("git version 2.20.1.windows.1");
         GitToolHealth current = probe("git version 2.53.0");
         GitToolHealth unparsed = probe("git version test");
@@ -23,7 +23,8 @@ final class GitToolProbeTest {
         assertTrue(old.gitFailure().orElseThrow().contains("found 2.20"));
         assertTrue(old.lfsAvailable());
         assertTrue(current.gitAvailable());
-        assertTrue(unparsed.gitAvailable());
+        assertFalse(unparsed.gitAvailable());
+        assertTrue(unparsed.gitFailure().orElseThrow().contains("git version test"));
     }
 
     private GitToolHealth probe(String gitVersion) throws InterruptedException {
