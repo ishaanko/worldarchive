@@ -23,7 +23,7 @@ public final class GitToolProbe {
     /** The oldest Git whose flags every command here uses ({@code --no-write-fetch-head}, {@code --object-format}). */
     static final int[] MINIMUM_GIT_VERSION = {2, 29};
 
-    private static final Pattern GIT_VERSION = Pattern.compile("git version (\\d+)\\.(\\d+)(?:\\.(\\d+))?");
+    private static final Pattern GIT_VERSION = Pattern.compile("git version (\\d{1,6})\\.(\\d{1,6})\\b");
 
     public GitToolHealth probe() throws InterruptedException {
         ProbeResult git = requireSupportedVersion(run(List.of(settings.executable(), "--version")));

@@ -30,6 +30,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Queue;
+import java.util.Set;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -129,6 +130,7 @@ final class RecoveryDeleteOperation {
         int total = claimed.size();
         AtomicInteger completed = new AtomicInteger();
         Map<BackupId, BackupResult> results = new ConcurrentHashMap<>();
+        Set<BackupId> started = ConcurrentHashMap.newKeySet();
         try {
             for (Map.Entry<WorldId, List<DeleteConfirmation>> world : byWorld.entrySet()) {
                 RecoverySupport.report(progressListener, batchProgress(
@@ -139,6 +141,7 @@ final class RecoveryDeleteOperation {
                     List<Runnable> tasks = new ArrayList<>();
                     for (DeleteConfirmation confirmation : world.getValue()) {
                         tasks.add(() -> {
+                            started.add(confirmation.backupId());
                             results.put(confirmation.backupId(), deleteOrReport(
                                     confirmation, cancellation));
                             int done = completed.incrementAndGet();
@@ -151,10 +154,11 @@ final class RecoveryDeleteOperation {
                 }
             }
         } catch (Exception exception) {
-            // A world that never started keeps its confirmations, so the same tokens
-            // work again once the user retries.
+            // A backup whose task never ran keeps its confirmation, so the same token works
+            // again once the user retries. A task that threw may already have removed the
+            // record, so its token stays consumed.
             for (DeleteBackupRequest request : requests) {
-                if (!results.containsKey(request.backupId())) {
+                if (!started.contains(request.backupId())) {
                     confirmations.put(request.confirmationToken(), claimed.get(request.backupId()));
                 }
             }
