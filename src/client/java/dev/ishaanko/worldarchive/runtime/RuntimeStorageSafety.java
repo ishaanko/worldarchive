@@ -10,7 +10,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 /** Fail-closed runtime state when a destination overlaps any known world. */
 final class RuntimeStorageSafety {
-    static final String WARNING =
+    private static final String WARNING =
             "A backup destination overlaps a known world; storage actions are disabled until settings are fixed";
 
     private final AtomicReference<Optional<String>> warning =

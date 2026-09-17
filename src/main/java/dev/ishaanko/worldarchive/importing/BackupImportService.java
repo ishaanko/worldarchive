@@ -1,5 +1,6 @@
 package dev.ishaanko.worldarchive.importing;
 
+import dev.ishaanko.worldarchive.model.BackupId;
 import java.nio.file.Path;
 import java.util.Set;
 import java.util.UUID;
@@ -17,7 +18,7 @@ public interface BackupImportService {
     CompletionStage<ImportSummary> execute(UUID token);
 
     /** Imports only the chosen backups from a previously validated preview. */
-    CompletionStage<ImportSummary> execute(UUID token, Set<dev.ishaanko.worldarchive.model.BackupId> selected);
+    CompletionStage<ImportSummary> execute(UUID token, Set<BackupId> selected);
 
     /** Releases an unused preview and any temporary storage retained for it. */
     CompletionStage<Void> discard(UUID token);

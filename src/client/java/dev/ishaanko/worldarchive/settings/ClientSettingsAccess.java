@@ -54,14 +54,9 @@ public final class ClientSettingsAccess {
                 return thread;
             });
 
-    private static final ExecutorService PICKER_EXECUTOR = Executors.newSingleThreadExecutor(task -> {
-        Thread thread = new Thread(task, "WorldArchive folder picker");
-        thread.setDaemon(true);
-        return thread;
-    });
-
-    private static final NativeFolderChooser FOLDER_CHOOSER =
-            new TinyFileDialogsFolderChooser(PICKER_EXECUTOR);
+    private static final NativeFolderChooser FOLDER_CHOOSER = new SdlFolderChooser(
+            task -> Minecraft.getInstance().execute(task),
+            () -> Minecraft.getInstance().getWindow().handle());
 
     private static final AtomicReference<List<Path>> KNOWN_WORLD_PATHS =
             new AtomicReference<>(List.of());
@@ -113,6 +108,7 @@ public final class ClientSettingsAccess {
         } catch (IOException exception) {
             STATUS.set(safeMessage(exception, "Settings storage is unavailable"));
             LOGGER.error("WorldArchive settings storage is unavailable", exception);
+            initialization = CompletableFuture.failedFuture(exception);
             return;
         }
 
@@ -324,13 +320,12 @@ public final class ClientSettingsAccess {
         CONFIGURATION_GUARDS.add(Objects.requireNonNull(guard, "guard"));
     }
 
-    /** Stops client-owned settings, health, and folder-picker workers. */
+    /** Stops client-owned settings and health workers. */
     public static void shutdown() {
         if (!SHUT_DOWN.compareAndSet(false, true)) {
             return;
         }
         HEALTH_EXECUTOR.shutdownNow();
-        PICKER_EXECUTOR.shutdownNow();
         SETTINGS_EXECUTOR.shutdown();
         boolean interrupted = false;
         try {

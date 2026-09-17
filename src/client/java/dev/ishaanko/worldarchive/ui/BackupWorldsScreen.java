@@ -173,12 +173,12 @@ public final class BackupWorldsScreen extends Screen {
                 .bounds(buttonX + buttonWidth + 4, y, buttonWidth, 20)
                 .build();
         next.active = page + 1 < pageCount && !loading;
+        addRenderableWidget(next);
         addRenderableWidget(Button.builder(
                         Component.literal("Import"),
                         ignored -> openImport())
                 .bounds(buttonX + (buttonWidth + 4) * 2, y, buttonWidth, 20)
                 .build());
-        addRenderableWidget(next);
         addRenderableWidget(Button.builder(
                         Component.translatable("screen.worldarchive.worlds.settings"),
                         ignored -> minecraft.setScreenAndShow(ClientSettingsAccess.createScreen(this)))

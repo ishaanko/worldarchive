@@ -176,9 +176,19 @@ public final class SystemGitCommandRunner implements GitCommandRunner {
             closeProcessStreams(process);
         }
 
+        return result(process, command, output, error);
+    }
+
+    private static GitCommandResult result(
+            Process process,
+            GitCommand command,
+            BoundedOutput output,
+            BoundedOutput error) throws IOException {
         return new GitCommandResult(
                 process.exitValue(),
-                redact(output.text(), command.secrets()),
+                output.truncated()
+                        ? redact(output.text(), command.secrets())
+                        : redactSecrets(output.text(), command.secrets()),
                 redact(error.text(), command.secrets()),
                 output.truncated(),
                 error.truncated(),
@@ -396,7 +406,18 @@ public final class SystemGitCommandRunner implements GitCommandRunner {
         }
     }
 
+    /** Full redaction for text that reaches a user: known secrets plus credential patterns. */
     static String redact(String value, Iterable<String> secrets) {
+        return redactPatterns(redactSecrets(value, secrets));
+    }
+
+    /**
+     * Standard output is data the caller parses (manifests, trees, object IDs), so only the
+     * exact secrets the command was given are removed. Pattern redaction would corrupt a
+     * manifest whose world name reads "Secret: Base"; it is applied when output is displayed
+     * and to truncated output, which is never parsed.
+     */
+    static String redactSecrets(String value, Iterable<String> secrets) {
         String redacted = value;
         List<String> orderedSecrets = new ArrayList<>();
         secrets.forEach(secret -> {
@@ -408,7 +429,11 @@ public final class SystemGitCommandRunner implements GitCommandRunner {
         for (String secret : orderedSecrets) {
             redacted = redacted.replace(secret, "[REDACTED]");
         }
-        redacted = URI_CREDENTIALS.matcher(redacted).replaceAll("$1[REDACTED]@");
+        return redacted;
+    }
+
+    static String redactPatterns(String value) {
+        String redacted = URI_CREDENTIALS.matcher(value).replaceAll("$1[REDACTED]@");
         Matcher matcher = NAMED_SECRET.matcher(redacted);
         redacted = matcher.replaceAll("$1$2[REDACTED]");
         redacted = AUTHORIZATION.matcher(redacted).replaceAll("$1[REDACTED]");

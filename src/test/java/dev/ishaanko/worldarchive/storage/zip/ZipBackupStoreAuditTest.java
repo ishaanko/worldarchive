@@ -1,5 +1,6 @@
 package dev.ishaanko.worldarchive.storage.zip;
 
+import dev.ishaanko.worldarchive.core.Digests;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -615,7 +616,7 @@ class ZipBackupStoreAuditTest {
     }
 
     private static void rewriteChecksum(Path archive) throws IOException {
-        String checksum = ZipDigests.sha256(archive);
+        String checksum = Digests.sha256(archive);
         Files.writeString(
                 Path.of(archive + ".sha256"),
                 checksum + "  " + archive.getFileName() + "\n",
@@ -646,7 +647,7 @@ class ZipBackupStoreAuditTest {
         Path directory = Files.createDirectories(root.resolve(manifest.worldId().toString()));
         Path archive = directory.resolve(managedFilename(manifest));
         rewriteArchive(archive, contents);
-        String checksum = ZipDigests.sha256(archive);
+        String checksum = Digests.sha256(archive);
         Files.writeString(
                 Path.of(archive + ".sha256"),
                 checksum + "  " + archive.getFileName() + "\n",
@@ -675,9 +676,9 @@ class ZipBackupStoreAuditTest {
     }
 
     private static String sha256(byte[] bytes) {
-        var digest = ZipDigests.sha256();
+        var digest = Digests.sha256();
         digest.update(bytes);
-        return ZipDigests.hex(digest.digest());
+        return Digests.hex(digest.digest());
     }
 
     private record Fixture(Path world, Path root, BackupManifest manifest) {

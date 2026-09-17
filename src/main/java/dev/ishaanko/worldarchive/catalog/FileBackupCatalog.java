@@ -60,6 +60,9 @@ public final class FileBackupCatalog implements BackupCatalog {
             .reversed()
             .thenComparing(record -> record.manifest().backupId(), Comparator.reverseOrder());
 
+    /** The catalog grows with every backup, so it gets a ceiling well above generic metadata. */
+    private static final int MAXIMUM_CATALOG_BYTES = 256 * 1_024 * 1_024;
+
     private static final ConcurrentMap<Path, ReentrantLock> JVM_LOCKS = new ConcurrentHashMap<>();
 
     private final Path file;
@@ -144,7 +147,7 @@ public final class FileBackupCatalog implements BackupCatalog {
             for (int index = 0; index < records.size(); index++) {
                 BackupRecord existing = records.get(index);
                 if (existing.manifest().backupId().equals(backupId)) {
-                    BackupRecord replacement = java.util.Objects.requireNonNull(
+                    BackupRecord replacement = Objects.requireNonNull(
                             update.apply(existing),
                             "Catalog update returned null");
                     if (!replacement.manifest().backupId().equals(backupId)
@@ -207,7 +210,7 @@ public final class FileBackupCatalog implements BackupCatalog {
         if (Files.isSymbolicLink(file) || !Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("Catalog is not a regular file: " + file);
         }
-        String json = AtomicFiles.readUtf8(file);
+        String json = AtomicFiles.readUtf8(file, MAXIMUM_CATALOG_BYTES);
         try {
             JsonElement parsed = JsonParser.parseString(json);
             if (!parsed.isJsonObject()) {
@@ -246,7 +249,7 @@ public final class FileBackupCatalog implements BackupCatalog {
         JsonArray encodedRecords = new JsonArray();
         sorted(records).forEach(record -> encodedRecords.add(encodeRecord(record)));
         root.add("records", encodedRecords);
-        AtomicFiles.writeUtf8(file, GSON.toJson(root) + System.lineSeparator());
+        AtomicFiles.writeUtf8(file, GSON.toJson(root) + "\n", MAXIMUM_CATALOG_BYTES);
     }
 
     private static List<BackupRecord> sorted(List<BackupRecord> records) {

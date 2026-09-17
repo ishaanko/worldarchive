@@ -11,7 +11,7 @@ import java.util.HexFormat;
 
 /** Shared SHA-256 helpers: digest factory, buffered file hashing, and hex encoding. */
 public final class Digests {
-    static final int COPY_BUFFER_BYTES = 64 * 1024;
+    public static final int COPY_BUFFER_BYTES = 64 * 1024;
 
     private Digests() {
     }

@@ -77,6 +77,13 @@ final class SensitiveDataRedactorTest {
     void boundedDecodingPreservesBenignAndMalformedPercentText() {
         assertEquals("Progress is 100% complete", SensitiveDataRedactor.redact("Progress is 100% complete"));
         assertEquals("Malformed %ZZ text", SensitiveDataRedactor.redact("Malformed %ZZ text"));
+        // A credential prefix followed by a bare percent sign is ordinary text, not an escape.
+        assertEquals("Task100% Done", SensitiveDataRedactor.redact("Task100% Done"));
+        assertEquals("Disk-90%/backups", SensitiveDataRedactor.redact("Disk-90%/backups"));
+        assertEquals(SensitiveDataRedactor.REDACTED, SensitiveDataRedactor.redact("token%2Fabc"));
+        DestinationResult zip = DestinationResult.success(
+                DestinationType.ZIP, "world/Task100% Done - Backup - id.zip");
+        assertEquals("world/Task100% Done - Backup - id.zip", zip.artifactId().orElseThrow());
 
         String benign = nestedPercentEncoding("benign", 32);
         assertEquals(benign, SensitiveDataRedactor.redact(benign));

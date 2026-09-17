@@ -4,6 +4,7 @@ import dev.ishaanko.worldarchive.model.GameVersionStamp;
 import java.util.Objects;
 import java.util.Optional;
 
+/** What the restore screen says about the Minecraft version a backup was made with. */
 public record GameVersionNotice(GameVersionNoticeLevel level, String message) {
     public GameVersionNotice {
         Objects.requireNonNull(level, "level");

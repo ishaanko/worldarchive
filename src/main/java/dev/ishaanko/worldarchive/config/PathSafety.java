@@ -40,7 +40,12 @@ public final class PathSafety {
         return canonical.normalize();
     }
 
-    /** Returns a canonical destination after proving that it is not nested in a source world. */
+    /**
+     * Returns a canonical destination after proving that it is not nested in a source world.
+     * Path text is compared first; then every existing ancestor of the destination is compared
+     * to the world by file identity, which catches case-insensitive volumes and links that
+     * the text comparison cannot see.
+     */
     public static Path requireOutsideWorlds(Path destination, Collection<Path> sourceWorlds) throws IOException {
         Objects.requireNonNull(sourceWorlds, "sourceWorlds");
         Path absoluteDestination = destination.toAbsolutePath().normalize();
@@ -50,11 +55,24 @@ public final class PathSafety {
             Path absoluteWorld = world.toAbsolutePath().normalize();
             Path canonicalWorld = canonicalize(world);
             if (absoluteDestination.startsWith(absoluteWorld)
-                    || canonicalDestination.startsWith(canonicalWorld)) {
+                    || canonicalDestination.startsWith(canonicalWorld)
+                    || sharesIdentityWithAncestor(canonicalDestination, canonicalWorld)) {
                 throw new IOException("Backup destination must not be inside a source world: "
                         + canonicalDestination);
             }
         }
         return canonicalDestination;
+    }
+
+    private static boolean sharesIdentityWithAncestor(Path destination, Path world) throws IOException {
+        if (!Files.exists(world, LinkOption.NOFOLLOW_LINKS)) {
+            return false;
+        }
+        for (Path ancestor = destination; ancestor != null; ancestor = ancestor.getParent()) {
+            if (Files.exists(ancestor, LinkOption.NOFOLLOW_LINKS) && Files.isSameFile(ancestor, world)) {
+                return true;
+            }
+        }
+        return false;
     }
 }

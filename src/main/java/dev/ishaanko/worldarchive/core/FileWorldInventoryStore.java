@@ -34,6 +34,9 @@ public final class FileWorldInventoryStore implements WorldInventoryStore {
             .disableHtmlEscaping()
             .create();
 
+    /** A 500,000-file inventory encodes to well over the generic metadata ceiling. */
+    private static final int MAXIMUM_INVENTORY_BYTES = 256 * 1_024 * 1_024;
+
     private static final ConcurrentMap<Path, ReentrantLock> JVM_LOCKS = new ConcurrentHashMap<>();
 
     private final Path directory;
@@ -58,7 +61,7 @@ public final class FileWorldInventoryStore implements WorldInventoryStore {
             }
             requireRegularFile(file, "World inventory is not a regular file");
             try {
-                JsonElement parsed = JsonParser.parseString(AtomicFiles.readUtf8(file));
+                JsonElement parsed = JsonParser.parseString(AtomicFiles.readUtf8(file, MAXIMUM_INVENTORY_BYTES));
                 if (!parsed.isJsonObject()) {
                     throw new IOException("World inventory root must be a JSON object");
                 }
@@ -74,8 +77,10 @@ public final class FileWorldInventoryStore implements WorldInventoryStore {
         Objects.requireNonNull(worldId, "worldId");
         Objects.requireNonNull(inventory, "inventory");
         withLock(worldId, () -> {
-            AtomicFiles.writeUtf8(file(worldId), GSON.toJson(encode(worldId, inventory))
-                    + System.lineSeparator());
+            AtomicFiles.writeUtf8(
+                    file(worldId),
+                    GSON.toJson(encode(worldId, inventory)) + "\n",
+                    MAXIMUM_INVENTORY_BYTES);
             return null;
         });
     }

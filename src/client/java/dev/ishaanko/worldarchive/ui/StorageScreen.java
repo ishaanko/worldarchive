@@ -236,18 +236,19 @@ final class StorageScreen extends Screen {
                     "Set and save a storage limit first")));
         }
         addRenderableWidget(review);
-        addRenderableWidget(Button.builder(Component.literal("Back"), ignored -> onClose())
+        Button back = Button.builder(Component.literal("Back"), ignored -> onClose())
                 .bounds(x + (buttonWidth + gap) * 2, y, buttonWidth, 20)
-                .build());
-        StringWidget statusWidget = new StringWidget(
-                x,
-                ScreenGeometry.anchorBottom(204, y, 20),
-                contentWidth,
-                16,
-                status,
-                font);
+                .build();
+        back.active = !busy;
+        addRenderableWidget(back);
+        StringWidget statusWidget = new StringWidget(x, y - 20, contentWidth, 16, status, font);
         statusWidget.setTooltip(Tooltip.create(status));
         addRenderableOnly(statusWidget);
+    }
+
+    @Override
+    public boolean shouldCloseOnEsc() {
+        return !busy;
     }
 
     private void addBackButton(int x, int contentWidth) {

@@ -113,7 +113,7 @@ final class GitSnapshotCreator {
             refs.updateWithRollback(snapshotRef, commit, Optional.empty());
             return snapshot;
         } finally {
-            GitTemporaryFiles.deleteUnlessLocked(temporary);
+            GitTemporaryFiles.deleteTree(temporary);
         }
     }
 
@@ -141,11 +141,15 @@ final class GitSnapshotCreator {
                 snapshotManifest.manifest(),
                 OperationPhase.WRITING,
                 "Staging Git snapshot");
+        // --force: a .gitignore inside the world or the user's global excludes file must
+        // never drop world files from the snapshot. The capture already left out
+        // .worldarchive and session.lock, so nothing unwanted is in the work tree.
         commands.checked(
                 List.of(
                         "--work-tree=" + workTree,
                         "add",
                         "--all",
+                        "--force",
                         "--",
                         "."),
                 workTree,

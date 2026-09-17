@@ -130,9 +130,9 @@ final class GitCommands {
     }
 
     static String failureMessage(GitCommandResult result) {
-        String detail = result.standardError().isBlank()
+        String detail = SystemGitCommandRunner.redactPatterns(result.standardError().isBlank()
                 ? result.standardOutput()
-                : result.standardError();
+                : result.standardError());
         detail = detail.replaceAll("\\p{Cntrl}+", " ").trim();
         if (detail.isEmpty()) {
             return "Git command failed with exit code " + result.exitCode();

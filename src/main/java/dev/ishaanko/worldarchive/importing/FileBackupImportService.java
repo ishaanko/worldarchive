@@ -34,7 +34,9 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
+import java.util.EnumMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -51,6 +53,7 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
 
 /** Durable preview-first implementation for ZIP/Git import and managed local rebuilds. */
 public final class FileBackupImportService implements BackupImportService, AutoCloseable {
@@ -181,7 +184,7 @@ public final class FileBackupImportService implements BackupImportService, AutoC
                         ImportKind.LOCAL_REBUILD,
                         "WorldArchive storage",
                         items,
-                        java.util.Collections.nCopies(
+                        Collections.nCopies(
                                 scan.issues(), "A stored backup could not be read safely"));
                 retain(plan);
                 return preview;
@@ -376,7 +379,7 @@ public final class FileBackupImportService implements BackupImportService, AutoC
         MutableSummary summary = new MutableSummary(ImportKind.ZIP, plan.scan().issues().size());
         List<ZipImportCandidate> candidates = selectedZipCandidates(plan, selected);
         for (ZipImportCandidate candidate : candidates) {
-            dev.ishaanko.worldarchive.storage.zip.ZipBackupStore
+            ZipBackupStore
                     .requireUnchangedImportCandidate(candidate);
         }
         for (ZipImportCandidate candidate : candidates) {
@@ -438,7 +441,7 @@ public final class FileBackupImportService implements BackupImportService, AutoC
                 ? candidates.stream()
                         .filter(candidate -> installs.get(candidate.manifest().backupId())
                                 != GitImportInstallStatus.CONFLICT)
-                        .collect(java.util.stream.Collectors.toMap(
+                        .collect(Collectors.toMap(
                         candidate -> candidate.manifest().worldId(),
                         ignored -> plan.fetched().remote(),
                         (first, ignored) -> first))
@@ -474,7 +477,7 @@ public final class FileBackupImportService implements BackupImportService, AutoC
                 new LocalPlan(UUID.randomUUID(), scan.records(), scan.issues()),
                 scan.records().stream()
                         .map(record -> record.manifest().backupId())
-                        .collect(java.util.stream.Collectors.toUnmodifiableSet()));
+                        .collect(Collectors.toUnmodifiableSet()));
     }
 
     private ImportSummary executeLocal(LocalPlan plan, Set<BackupId> selected) throws IOException {
@@ -504,6 +507,9 @@ public final class FileBackupImportService implements BackupImportService, AutoC
                         snapshot.worldId(), snapshot.backupId()).toCompletableFuture().get();
                 DestinationResult destination = gitRebuildDestination(snapshot, importSources);
                 scan.add(record(manifest, destination));
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw exception;
             } catch (Exception exception) {
                 scan.issue();
             }
@@ -513,7 +519,7 @@ public final class FileBackupImportService implements BackupImportService, AutoC
         scannedZipRoots.add(zipStores.defaultStore().root());
         scanDefaultZip(scan, worlds);
         for (WorldId worldId : worlds) {
-            dev.ishaanko.worldarchive.storage.zip.ZipBackupStore store = zipStores.store(worldId);
+            ZipBackupStore store = zipStores.store(worldId);
             if (scannedZipRoots.add(store.root())) {
                 scanZipStore(scan, store);
             }
@@ -568,7 +574,7 @@ public final class FileBackupImportService implements BackupImportService, AutoC
 
     private void scanZipStore(
             LocalScan scan,
-            dev.ishaanko.worldarchive.storage.zip.ZipBackupStore store) {
+            ZipBackupStore store) {
         try {
             for (ZipBackupArtifact artifact : store.listCompleteArchives()) {
                 if (deletions.contains(artifact.manifest().backupId())) {
@@ -659,7 +665,7 @@ public final class FileBackupImportService implements BackupImportService, AutoC
         public Set<BackupId> backupIds() {
             return scan.candidates().stream()
                     .map(candidate -> candidate.manifest().backupId())
-                    .collect(java.util.stream.Collectors.toUnmodifiableSet());
+                    .collect(Collectors.toUnmodifiableSet());
         }
     }
 
@@ -670,7 +676,7 @@ public final class FileBackupImportService implements BackupImportService, AutoC
         public Set<BackupId> backupIds() {
             return fetched.candidates().stream()
                     .map(candidate -> candidate.manifest().backupId())
-                    .collect(java.util.stream.Collectors.toUnmodifiableSet());
+                    .collect(Collectors.toUnmodifiableSet());
         }
 
         @Override
@@ -691,7 +697,7 @@ public final class FileBackupImportService implements BackupImportService, AutoC
         public Set<BackupId> backupIds() {
             return records.stream()
                     .map(record -> record.manifest().backupId())
-                    .collect(java.util.stream.Collectors.toUnmodifiableSet());
+                    .collect(Collectors.toUnmodifiableSet());
         }
     }
 
@@ -711,7 +717,7 @@ public final class FileBackupImportService implements BackupImportService, AutoC
                 issues++;
                 return;
             }
-            Map<DestinationType, DestinationResult> destinations = new java.util.EnumMap<>(
+            Map<DestinationType, DestinationResult> destinations = new EnumMap<>(
                     DestinationType.class);
             existing.result().destinations().forEach(value ->
                     destinations.put(value.destination(), value));

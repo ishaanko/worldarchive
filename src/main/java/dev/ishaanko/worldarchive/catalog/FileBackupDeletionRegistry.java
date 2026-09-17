@@ -10,6 +10,7 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -69,7 +70,7 @@ public final class FileBackupDeletionRegistry implements BackupDeletionRegistry 
         if (Files.isSymbolicLink(file) || !Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("Backup deletion registry is not a safe regular file");
         }
-        java.util.List<String> lines = AtomicFiles.readUtf8(file).lines().toList();
+        List<String> lines = AtomicFiles.readUtf8(file).lines().toList();
         if (lines.isEmpty() || !HEADER.equals(lines.getFirst())) {
             throw new IOException("Backup deletion registry has an unsupported format");
         }
@@ -87,10 +88,10 @@ public final class FileBackupDeletionRegistry implements BackupDeletionRegistry 
     }
 
     private void write(Set<BackupId> values) throws IOException {
-        StringBuilder content = new StringBuilder(HEADER).append(System.lineSeparator());
+        StringBuilder content = new StringBuilder(HEADER).append("\n");
         values.stream().sorted().forEach(value -> content
                 .append(value)
-                .append(System.lineSeparator()));
+                .append("\n"));
         AtomicFiles.writeUtf8(file, content.toString());
     }
 

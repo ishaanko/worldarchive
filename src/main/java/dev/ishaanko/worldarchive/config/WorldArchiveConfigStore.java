@@ -85,34 +85,8 @@ public final class WorldArchiveConfigStore {
             throw new ConfigurationException("Configuration schema version must not be negative");
         }
         try {
-            WorldArchiveConfig parsed;
-            boolean migrated;
-            if (schemaVersion == 0) {
-                if (!looksLikeLegacyConfiguration(root)) {
-                    throw new ConfigurationException(
-                            "Configuration has no schema version and does not match the legacy layout");
-                }
-                parsed = migrateLegacy(root);
-                migrated = true;
-            } else if (schemaVersion == 1) {
-                parsed = migrateVersionOne(root);
-                migrated = true;
-            } else if (schemaVersion == 2) {
-                parsed = migrateVersionTwo(root);
-                migrated = true;
-            } else if (schemaVersion == 3) {
-                parsed = migrateVersionThree(root);
-                migrated = true;
-            } else if (schemaVersion == 4) {
-                parsed = migrateVersionFour(root);
-                migrated = true;
-            } else if (java.util.Set.of(5, 6).contains(schemaVersion)) {
-                parsed = parseCurrent(root, false);
-                migrated = true;
-            } else {
-                parsed = parseCurrent(root, true);
-                migrated = false;
-            }
+            boolean migrated = schemaVersion != WorldArchiveConfig.CURRENT_SCHEMA_VERSION;
+            WorldArchiveConfig parsed = parseSchema(root, schemaVersion);
             WorldArchiveConfig validated = parsed.validateDestinations(knownWorldPaths);
             if (migrated) {
                 writeUnlocked(validated);
@@ -228,7 +202,9 @@ public final class WorldArchiveConfigStore {
                         world.path(),
                         template.map(value -> RemoteUrlPolicy.resolveWorldId(
                                 value,
-                                world.worldId().value()))))
+                                world.worldId().value())),
+                        world.zipDestination(),
+                        world.storagePolicy()))
                 .toList();
         return new WorldArchiveConfig(
                 WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
@@ -324,12 +300,31 @@ public final class WorldArchiveConfigStore {
                 requiredInstant(object, "checkedAt"));
     }
 
+    /** Applies the same credential check as load, so a save never produces a file load rejects. */
+    private WorldArchiveConfig parseSchema(JsonObject root, int schemaVersion) throws IOException {
+        return switch (schemaVersion) {
+            case 0 -> {
+                if (!looksLikeLegacyConfiguration(root)) {
+                    throw new ConfigurationException(
+                            "Configuration has no schema version and does not match the legacy layout");
+                }
+                yield migrateLegacy(root);
+            }
+            case 1 -> migrateVersionOne(root);
+            case 2 -> migrateVersionTwo(root);
+            case 3 -> migrateVersionThree(root);
+            case 4 -> migrateVersionFour(root);
+            case 5, 6 -> parseCurrent(root, false);
+            case WorldArchiveConfig.CURRENT_SCHEMA_VERSION -> parseCurrent(root, true);
+            default -> throw new UnsupportedSchemaVersionException(schemaVersion);
+        };
+    }
+
     private void writeUnlocked(WorldArchiveConfig config) throws IOException {
         rejectSymlink(file, "Configuration file");
-        AtomicFiles.writeUtf8(
-                file,
-                GSON.toJson(encode(config)) + System.lineSeparator(),
-                MAXIMUM_CONFIG_BYTES);
+        JsonObject encoded = encode(config);
+        rejectCredentialData(encoded);
+        AtomicFiles.writeUtf8(file, GSON.toJson(encoded) + "\n", MAXIMUM_CONFIG_BYTES);
     }
 
     private static JsonObject encode(WorldArchiveConfig config) {

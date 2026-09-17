@@ -277,9 +277,7 @@ final class RuntimeLifecycle {
                 return;
             }
             stoppingServer = integrated;
-        }
-        // A capture may still hold saving paused; the shutdown save must always write.
-        synchronized (lock) {
+            // A capture may still hold saving paused; the shutdown save must always write.
             if (savingPausedServer == integrated) {
                 savingPausedServer = null;
                 savingPauses = 0;
@@ -478,7 +476,16 @@ final class RuntimeLifecycle {
         }
     }
 
+    /** Runs every client tick; a backup bug must never take the game down with it. */
     private void clientTick(Minecraft ignored) {
+        try {
+            tick();
+        } catch (RuntimeException exception) {
+            runtime.logFailure("Scheduled backup tick failed", exception);
+        }
+    }
+
+    private void tick() {
         ensureLiveWorldResolution();
         runtime.showRetainedBackgroundWarning();
         RuntimeState state = runtime.states().currentOrNull();
@@ -497,14 +504,15 @@ final class RuntimeLifecycle {
 
     private ScheduledBackup pollScheduledBackup(RuntimeState state) {
         synchronized (lock) {
+            // poll() consumes the due tick, so every other guard runs first.
             if (scheduleState == null
                     || scheduleState.state() != state
                     || liveWorld == null
                     || activeServer == null
                     || capturing(activeServer)
                     || !scheduleState.worldId().equals(liveWorld.worldId())
-                    || scheduleState.schedule().poll(clock.instant()).isEmpty()
-                    || saveGate.hasPending()) {
+                    || saveGate.hasPending()
+                    || scheduleState.schedule().poll(clock.instant()).isEmpty()) {
                 return null;
             }
             return new ScheduledBackup(liveWorld, activeServer);
@@ -556,11 +564,14 @@ final class RuntimeLifecycle {
                     "The integrated world could not be saved");
             runtime.logFailure("Requested world save failed", exception);
         } finally {
+            boolean unmatched;
             synchronized (lock) {
-                if (saveGate.clear(pending.server(), pending).isPresent()) {
-                    pending.fail(new IllegalStateException(
-                            "The requested save produced no matching capture event"));
-                }
+                unmatched = saveGate.clear(pending.server(), pending).isPresent();
+            }
+            // Completing the future runs continuations; keep them off the lifecycle lock.
+            if (unmatched) {
+                pending.fail(new IllegalStateException(
+                        "The requested save produced no matching capture event"));
             }
         }
     }

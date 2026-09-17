@@ -29,6 +29,15 @@ final class RemoteUrlPolicyTest {
     }
 
     @Test
+    void acceptsLocalPathsWithPunctuationAndRejectsUnsafeCharacters() {
+        String punctuated = temporaryDirectory.resolve("Bob's Laptop & Co (2)/remote.git").toString();
+
+        assertEquals(punctuated, RemoteUrlPolicy.validate(punctuated));
+        assertThrows(IllegalArgumentException.class, () -> RemoteUrlPolicy.validate(
+                temporaryDirectory.resolve("bad<name>.git").toString()));
+    }
+
+    @Test
     void acceptsAndResolvesExactlyOneWorldIdPlaceholder() {
         String template = "https://example.invalid/team/world-{worldId}.git";
         UUID worldId = UUID.fromString("12345678-1234-1234-1234-123456789abc");

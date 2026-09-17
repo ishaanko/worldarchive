@@ -1,5 +1,6 @@
 package dev.ishaanko.worldarchive.storage.zip;
 
+import dev.ishaanko.worldarchive.core.Digests;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -306,7 +307,7 @@ final class FileBackupImportServiceIntegrationTest {
         for (ZipSourceScanner.SourceEntry entry : ZipSourceScanner.snapshot(world).entries()) {
             if (!entry.directory()) {
                 files.add(new ZipInventoryEntry(
-                        entry.relativePath(), entry.size(), ZipDigests.sha256(entry.path())));
+                        entry.relativePath(), entry.size(), Digests.sha256(entry.path())));
             }
         }
         ZipInventory inventory = ZipInventory.create(files);

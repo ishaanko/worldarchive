@@ -1,5 +1,72 @@
 # Changelog
 
+## 0.4.0 (2026-09-15)
+
+### Changed
+
+- WorldArchive now runs on Minecraft 26.3 with Fabric Loader 0.19.5 and Fabric API
+  0.160.5. Mod Menu is optional; the World Backups icon on the title screen opens
+  the mod without it. The folder picker uses the dialog that ships with Minecraft
+  26.3.
+- Git backups need Git 2.29 or newer. An older Git is reported on the settings
+  screen instead of failing in the middle of a backup.
+
+### Fixed
+
+- A world that contains a `.gitignore` file, or a computer with a global Git
+  excludes file, no longer loses files from its Git snapshots. Before, the
+  ignored files were left out and every Git backup of that world failed.
+- A world name or label such as "Secret: Base" no longer corrupts the Git
+  snapshot manifest. Before, the credential filter rewrote the stored text and
+  the backup could not be verified or restored.
+- A world name such as "Task100% Done" can be backed up to ZIP again. Before,
+  the credential filter treated the name as an encoded secret.
+- Settings that save cleanly can always be loaded again; the same credential
+  check now runs at save time.
+- A configuration upgraded from schema 4 keeps each world's separate ZIP folder.
+- Batch delete: a world whose deletion never started keeps its confirmation, so
+  the same tokens work when you retry.
+- Batch delete reports a backup whose remote copy is still pending as partly
+  deleted instead of fully deleted.
+- Storage cleanup no longer fails for a world that has a backup with a failed
+  ZIP or Git destination.
+- Storage cleanup treats a ZIP archive that is already gone as deleted instead
+  of reporting a failure.
+- A local Git remote path may contain characters such as an apostrophe or an
+  ampersand, for example "OneDrive - Bob's Laptop".
+- A Git repository that another program holds open now fails with a clear
+  message instead of waiting forever.
+- Temporary Git work trees left behind by a killed Git process are removed.
+- A ZIP or Git backup destination can no longer be placed inside a source
+  world through a different spelling of the same path on a case-insensitive
+  disk.
+- Restore works on volumes that refuse extended attributes, such as exFAT and
+  some network shares.
+- Restore no longer refuses a network share that cannot report its free space.
+- Catalog and change-inventory files may grow past 64 MiB.
+- Metadata files use the same line endings on every platform, so a synced
+  data folder is byte-identical everywhere.
+- Ownership markers left behind by an interrupted capture are cleaned up.
+- The ZIP folder override checkbox on the Worlds settings tab keeps the typed
+  folder when unticked and can be ticked while the global ZIP folder is empty.
+  Its Browse button is disabled while the override is off.
+- The settings screen reports a settings file that cannot be opened instead of
+  offering defaults that cannot be saved.
+- The schedule interval accepts surrounding spaces, and folder fields accept a
+  path that starts with "~".
+- The import screen no longer crashes the game when a button is pressed before
+  WorldArchive has finished loading.
+- A scheduled backup that comes due while a save is pending runs on the next
+  tick instead of skipping a full interval.
+- An error inside the scheduled backup tick is logged instead of crashing the
+  game.
+- A plain click in the backup browser always selects the clicked row, and
+  "Select all" replaces the selection instead of adding to it.
+- The storage screen's Back button and Escape key wait while a save or review
+  runs.
+- The World Backups icon returns to the pause screen you came from.
+- Dates on the import and cleanup preview screens follow the game's locale.
+
 ## 0.3.8 (2026-09-15)
 
 ### Added

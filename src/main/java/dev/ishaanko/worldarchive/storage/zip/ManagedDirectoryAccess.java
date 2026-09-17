@@ -189,10 +189,6 @@ final class ManagedDirectoryAccess implements AutoCloseable {
         }
     }
 
-    Path directory() {
-        return directory;
-    }
-
     Path resolve(String name) {
         return directory.resolve(requireFileName(name));
     }

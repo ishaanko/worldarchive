@@ -1,6 +1,7 @@
 package dev.ishaanko.worldarchive.storage.git;
 
 import com.sun.nio.file.ExtendedOpenOption;
+import dev.ishaanko.worldarchive.core.Digests;
 import dev.ishaanko.worldarchive.model.BackupManifest;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -27,8 +28,6 @@ import java.util.Set;
 
 /** Immutable private capture that native Git may traverse without touching the live world. */
 final class GitSourceCapture implements AutoCloseable {
-    private static final int COPY_BUFFER_BYTES = 64 * 1_024;
-
     private final Path root;
 
     private final GitInventory inventory;
@@ -237,7 +236,7 @@ final class GitSourceCapture implements AutoCloseable {
     private static CopyResult copyFile(Path source, Path target) throws IOException {
         MessageDigest digest = GitInventory.sha256();
         long size = 0;
-        ByteBuffer buffer = ByteBuffer.allocate(COPY_BUFFER_BYTES);
+        ByteBuffer buffer = ByteBuffer.allocate(Digests.COPY_BUFFER_BYTES);
         try (SeekableByteChannel input = Files.newByteChannel(source, readOptions());
                 FileChannel output = FileChannel.open(
                         target,

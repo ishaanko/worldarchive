@@ -78,6 +78,15 @@ class SystemGitCommandRunnerTest {
     }
 
     @Test
+    void standardOutputKeepsParsedDataThatOnlyLooksLikeASecret() {
+        String manifest = "{ \"worldName\": \"Secret: Base\", \"contentSha256\": \"ab\" }";
+
+        assertEquals(manifest, SystemGitCommandRunner.redactSecrets(manifest, Set.of()));
+        assertEquals("[REDACTED] data", SystemGitCommandRunner.redactSecrets("hunter2 data", Set.of("hunter2")));
+        assertFalse(SystemGitCommandRunner.redact(manifest, Set.of()).contains("Base"));
+    }
+
+    @Test
     void redactsAuthorizationHeadersKnownTokensJwtAndNamedCredentials() {
         String github = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
         String jwt = "eyJabcdefghijk.abcdefghijklmnop.abcdefghijklmnop";
@@ -337,7 +346,7 @@ class SystemGitCommandRunnerTest {
         GitCommandRunner fakeRunner = command -> {
             invocations.add(command.arguments());
             if (call.getAndIncrement() == 0) {
-                return new GitCommandResult(0, "git version test", "", false, false);
+                return new GitCommandResult(0, "git version 2.50.1", "", false, false);
             }
             return new GitCommandResult(1, "", "git: lfs unavailable", false, false);
         };

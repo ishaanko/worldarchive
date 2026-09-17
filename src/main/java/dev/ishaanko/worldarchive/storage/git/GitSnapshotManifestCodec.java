@@ -58,7 +58,7 @@ final class GitSnapshotManifestCodec {
         JsonArray patterns = new JsonArray();
         snapshotManifest.lfsPatterns().forEach(patterns::add);
         root.add("lfsPatterns", patterns);
-        return (GSON.toJson(root) + System.lineSeparator()).getBytes(StandardCharsets.UTF_8);
+        return (GSON.toJson(root) + "\n").getBytes(StandardCharsets.UTF_8);
     }
 
     static GitSnapshotManifest decode(byte[] encoded) throws IOException {

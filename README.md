@@ -23,10 +23,10 @@ cleanup.
 
 ## Requirements
 
-- Minecraft 26.2
+- Minecraft 26.3
 - Fabric Loader 0.19.3 or newer
-- Fabric API 0.155.2+26.2
-- Mod Menu 20.0.1 or newer
+- Fabric API 0.160.5 or newer
+- Mod Menu 21.0.0-beta.1 or newer (optional)
 - Java 25
 - Git and Git LFS on `PATH` (only needed for Git backups)
 
@@ -35,9 +35,11 @@ backups still work.
 
 ## Quick start
 
-1. Install Fabric Loader, Fabric API, and Mod Menu.
+1. Install Fabric Loader and Fabric API.
 2. Copy the WorldArchive JAR into your `mods` folder.
-3. Open **Mods**, select **WorldArchive**, and open its configuration.
+3. Click the **World Backups** icon on the title screen. If Mod Menu is
+   installed, you can also open **Mods**, select **WorldArchive**, and open
+   its configuration.
 4. Use the **World Backups** screen to create, restore, verify, sync, and
    delete backups.
 

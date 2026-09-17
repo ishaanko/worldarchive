@@ -202,7 +202,7 @@ final class BackupRestoreScreen extends Screen {
                 ConfirmationKind.RESTORE,
                 row.backupId(),
                 "Restore backup?",
-                "Create a new world named \"" + chosenName + "\"?",
+                "Create a new world named \"" + chosenName + "\"? If that name is taken, the next free name is used.",
                 Optional.of(choice),
                 false);
         minecraft.setScreenAndShow(new BackupConfirmationScreen(this, confirmation, () -> {

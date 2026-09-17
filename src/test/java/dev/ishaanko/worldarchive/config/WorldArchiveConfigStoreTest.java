@@ -126,6 +126,35 @@ final class WorldArchiveConfigStoreTest {
     }
 
     @Test
+    void migratesSchemaFourKeepingEachWorldZipFolder() throws IOException {
+        Path file = temporaryDirectory.resolve("schema-four-zip.json");
+        Path world = Files.createDirectory(temporaryDirectory.resolve("zip-override-world"));
+        Path override = Files.createDirectory(temporaryDirectory.resolve("world-zips"));
+        WorldArchiveConfig defaults = WorldArchiveConfig.defaults();
+        WorldArchiveConfig current = new WorldArchiveConfig(
+                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
+                defaults.triggers(),
+                defaults.git(),
+                defaults.zip(),
+                java.util.List.of(new WorldConfig(
+                        dev.ishaanko.worldarchive.model.WorldId.create(),
+                        true,
+                        world,
+                        Optional.empty(),
+                        Optional.of(override),
+                        StoragePolicy.defaults())));
+        WorldArchiveConfigStore store = new WorldArchiveConfigStore(file);
+        store.save(current, java.util.List.of(world));
+        Files.writeString(file, Files.readString(file, StandardCharsets.UTF_8).replace(
+                "\"schemaVersion\": " + WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
+                "\"schemaVersion\": 4"), StandardCharsets.UTF_8);
+
+        WorldArchiveConfig migrated = store.load(java.util.List.of(world));
+
+        assertEquals(override.toRealPath(), migrated.worlds().getFirst().zipDestination().orElseThrow());
+    }
+
+    @Test
     void migratesSchemaFourTemplateToEachExistingWorld() throws IOException {
         Path file = temporaryDirectory.resolve("schema-four-template.json");
         Path world = Files.createDirectory(temporaryDirectory.resolve("migrated-world"));

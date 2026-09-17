@@ -29,8 +29,6 @@ import java.util.Set;
 
 /** Copies a stable world view into private outside-world staging. */
 public final class FileSystemBackupCaptureFactory implements BackupCaptureFactory {
-    private static final int COPY_BUFFER_BYTES = 64 * 1_024;
-
     // A live world can write a handful of small files (player data, level.dat,
     // POI data) even while chunk autosaving is paused. A capture that observed a
     // change starts over; the writes are rare, so a retry almost always succeeds.
@@ -226,7 +224,7 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
 
     private static CopyResult copyAndHash(InputStream input, OutputStream output) throws IOException {
         MessageDigest digest = Digests.sha256();
-        byte[] buffer = new byte[COPY_BUFFER_BYTES];
+        byte[] buffer = new byte[Digests.COPY_BUFFER_BYTES];
         long size = 0;
         int read;
         while ((read = input.read(buffer)) >= 0) {
@@ -350,11 +348,11 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
         public FileVisitResult preVisitDirectory(Path directory, BasicFileAttributes attributes)
                 throws IOException {
             requireNotInterrupted();
-            requireSafeDirectory(directory, "World source contains a link or special directory");
             Path relative = source.relativize(directory);
             if (!relative.toString().isEmpty() && isExcluded(relative)) {
                 return FileVisitResult.SKIP_SUBTREE;
             }
+            requireSafeDirectory(directory, "World source contains a link or special directory");
             String portable = relative.toString().isEmpty() ? "" : portable(relative);
             if (!portable.isEmpty()) {
                 register(portable, EntryKind.DIRECTORY);
@@ -536,11 +534,11 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
         }
     }
 
+    /** macOS may move birth time backwards when an older modification time is applied. */
+    private static final boolean IGNORE_CREATION_TIME = System.getProperty("os.name").startsWith("Mac");
+
     private static FileTime identityCreationTime(BasicFileAttributes attributes) {
-        // macOS may move birth time backwards when an older modification time is applied.
-        return System.getProperty("os.name").startsWith("Mac")
-                ? FileTime.fromMillis(0)
-                : attributes.creationTime();
+        return IGNORE_CREATION_TIME ? FileTime.fromMillis(0) : attributes.creationTime();
     }
 
     private record CopyResult(long size, String sha256) {

@@ -1,7 +1,6 @@
 package dev.ishaanko.worldarchive.importing;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.ishaanko.worldarchive.model.BackupId;
@@ -58,13 +57,14 @@ final class FileImportSourceRegistryTest {
     }
 
     @Test
-    void rejectsARelativeLinkedFolderFromStoredData() {
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> new ImportSource(
-                        ImportSourceId.create(),
-                        ImportSourceMode.ZIP_LINK,
-                        "relative/folder",
-                        Map.of()));
+    void keepsALegacyLinkedFolderFromStoredDataAsWritten() {
+        // A registry synced from another platform may hold a path this platform cannot
+        // parse; the retired ZIP_LINK mode is never resolved, so the text is kept as it is.
+        ImportSource legacy = new ImportSource(
+                ImportSourceId.create(),
+                ImportSourceMode.ZIP_LINK,
+                "C:\\Users\\bob\\zips",
+                Map.of());
+        assertEquals("C:\\Users\\bob\\zips", legacy.location());
     }
 }

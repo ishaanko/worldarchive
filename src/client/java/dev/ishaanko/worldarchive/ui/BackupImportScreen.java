@@ -9,6 +9,7 @@ import dev.ishaanko.worldarchive.ui.model.ScreenGeometry;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletionStage;
+import java.util.function.Supplier;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.EditBox;
@@ -74,7 +75,7 @@ public final class BackupImportScreen extends Screen {
         addRenderableWidget(remoteBox);
         Button gitPreview = Button.builder(
                         Component.literal("Find Backups from Repository"),
-                        ignored -> preview(imports.previewGit(remote)))
+                        ignored -> startPreview(() -> imports.previewGit(remote)))
                 .bounds(x, 86, contentWidth, 20).build();
         gitPreview.active = !busy && !remote.isBlank();
         addRenderableWidget(gitPreview);
@@ -123,7 +124,7 @@ public final class BackupImportScreen extends Screen {
             }
             switch (result) {
                 case FolderSelectionResult.Selected selected ->
-                        preview(imports.previewZip(selected.path()));
+                        startPreview(() -> imports.previewZip(selected.path()));
                 case FolderSelectionResult.Cancelled ignored -> {
                     status = Component.literal("No folder was selected")
                             .withStyle(ChatFormatting.GRAY);
@@ -139,6 +140,21 @@ public final class BackupImportScreen extends Screen {
                 }
             }
         }));
+    }
+
+    /** The import service throws synchronously while the runtime is still loading. */
+    private void startPreview(Supplier<CompletionStage<ImportPreview>> operation) {
+        CompletionStage<ImportPreview> started;
+        try {
+            started = operation.get();
+        } catch (RuntimeException exception) {
+            busy = false;
+            status = Component.literal(FailureMessages.safe(exception, 200))
+                    .withStyle(ChatFormatting.RED);
+            rebuildWidgets();
+            return;
+        }
+        preview(started);
     }
 
     private void preview(CompletionStage<ImportPreview> operation) {
@@ -176,7 +192,7 @@ public final class BackupImportScreen extends Screen {
         status = Component.literal("Looking for backups already stored by WorldArchive...")
                 .withStyle(ChatFormatting.YELLOW);
         rebuildWidgets();
-        preview(imports.previewLocal());
+        startPreview(imports::previewLocal);
     }
 
     @Override

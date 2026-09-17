@@ -16,11 +16,6 @@ public record OperationId(UUID value) {
         return new OperationId(UUID.randomUUID());
     }
 
-    public static OperationId parse(String value) {
-        Objects.requireNonNull(value, "value");
-        return new OperationId(UUID.fromString(value));
-    }
-
     @Override
     public String toString() {
         return value.toString();

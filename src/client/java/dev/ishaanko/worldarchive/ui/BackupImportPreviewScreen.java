@@ -7,7 +7,9 @@ import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.ui.model.ScreenGeometry;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.time.format.FormatStyle;
 import java.util.HashSet;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
 import net.minecraft.ChatFormatting;
@@ -27,7 +29,8 @@ public final class BackupImportPreviewScreen extends Screen {
     private static final int CONTENT_MARGIN = 24;
 
     private static final DateTimeFormatter DATE_FORMAT = DateTimeFormatter
-            .ofPattern("MMM d, yyyy h:mm a")
+            .ofLocalizedDateTime(FormatStyle.SHORT)
+            .withLocale(Locale.getDefault())
             .withZone(ZoneId.systemDefault());
 
     private final Screen parent;
@@ -45,6 +48,8 @@ public final class BackupImportPreviewScreen extends Screen {
     private boolean finished;
 
     private boolean successful;
+
+    private boolean active = true;
 
     private int page;
 
@@ -144,6 +149,9 @@ public final class BackupImportPreviewScreen extends Screen {
         rebuildWidgets();
         facade.importService().execute(preview.token(), Set.copyOf(selected))
                 .whenComplete((summary, throwable) -> minecraft.execute(() -> {
+                    if (!active) {
+                        return;
+                    }
                     busy = false;
                     finished = true;
                     successful = throwable == null && summary != null;
@@ -155,6 +163,12 @@ public final class BackupImportPreviewScreen extends Screen {
                                     .withStyle(ChatFormatting.RED);
                     rebuildWidgets();
                 }));
+    }
+
+    @Override
+    public void removed() {
+        active = false;
+        super.removed();
     }
 
     private void updateSelectionStatus() {

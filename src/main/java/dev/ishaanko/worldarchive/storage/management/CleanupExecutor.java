@@ -16,6 +16,8 @@ import dev.ishaanko.worldarchive.storage.git.GitVerification;
 import dev.ishaanko.worldarchive.storage.git.WorldGitSnapshotStore;
 import dev.ishaanko.worldarchive.storage.zip.ZipBackupArtifact;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -77,14 +79,18 @@ final class CleanupExecutor {
                     Thread.currentThread().interrupt();
                     throw exception;
                 } catch (Exception exception) {
-                    failures.putIfAbsent(
+                    // Compaction belongs to no single backup; attach it to the first selected
+                    // Git removal so the result screen still shows it.
+                    failures.merge(
                             plan.items().stream()
                                     .filter(CleanupItem::removeGit)
                                     .map(CleanupItem::backupId)
+                                    .filter(request.selectedBackups()::contains)
                                     .findFirst()
                                     .orElseThrow(),
                             "Git cleanup completed but compaction failed: "
-                                    + safeMessage(exception));
+                                    + safeMessage(exception),
+                            (first, second) -> first + " " + second);
                 }
             }
             Snapshot after = overviewBuilder.snapshot(plan.worldId());
@@ -325,6 +331,16 @@ final class CleanupExecutor {
         try {
             snapshot.zipStore().delete(artifact);
         } catch (IOException | RuntimeException exception) {
+            if (Files.notExists(artifact.archivePath(), LinkOption.NOFOLLOW_LINKS)) {
+                // The archive is gone, so the backup is deleted even though the sidecar
+                // failed; the catalog already agrees. Leave nothing behind if possible.
+                try {
+                    Files.deleteIfExists(artifact.checksumPath());
+                } catch (IOException | RuntimeException sidecarFailure) {
+                    exception.addSuppressed(sidecarFailure);
+                }
+                return;
+            }
             if (snapshot.zipStore().verify(artifact.archivePath()).valid()) {
                 restoreRecord(previous, exception);
             }

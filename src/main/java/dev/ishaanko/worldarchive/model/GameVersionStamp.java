@@ -3,6 +3,7 @@ package dev.ishaanko.worldarchive.model;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 
+/** The Minecraft version a backup was made with: display name plus the world data version. */
 public record GameVersionStamp(String name, int dataVersion) {
     public static final int MAXIMUM_NAME_LENGTH = 64;
 
@@ -11,14 +12,6 @@ public record GameVersionStamp(String name, int dataVersion) {
         if (dataVersion <= 0) {
             throw new IllegalArgumentException("dataVersion must be positive");
         }
-    }
-
-    public static GameVersionStamp of(String name, int dataVersion) {
-        return new GameVersionStamp(name, dataVersion);
-    }
-
-    public boolean isNewerThan(GameVersionStamp other) {
-        return dataVersion > Objects.requireNonNull(other, "other").dataVersion;
     }
 
     public boolean isOlderThan(GameVersionStamp other) {
