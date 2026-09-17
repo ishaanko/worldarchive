@@ -130,11 +130,6 @@ public record WorldInventory(
         return changed + earlier.size();
     }
 
-    public boolean hasSameFiles(WorldInventory other) {
-        Objects.requireNonNull(other, "other");
-        return inventorySha256.equals(other.inventorySha256);
-    }
-
     private static String contentDigest(List<Entry> entries) {
         MessageDigest digest = Digests.sha256();
         ByteBuffer number = ByteBuffer.allocate(Long.BYTES);

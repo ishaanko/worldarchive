@@ -97,7 +97,7 @@ body:
     attributes:
       label: Environment
       description: OS, Minecraft version, Fabric Loader and API versions, Java version, Git/Git LFS versions if relevant.
-      placeholder: macOS 15.3, Minecraft 26.2, Fabric Loader 0.19.3, Java 25, Git 2.49
+      placeholder: macOS 15.3, Minecraft 26.3, Fabric Loader 0.19.5, Java 25, Git 2.49
     validations:
       required: true
 

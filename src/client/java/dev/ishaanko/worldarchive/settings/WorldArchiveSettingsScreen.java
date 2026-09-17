@@ -82,6 +82,8 @@ public final class WorldArchiveSettingsScreen extends Screen {
 
     private Button zipBrowseButton;
 
+    private boolean zipBrowseEnabled = true;
+
     private MultiLineTextWidget statusWidget;
 
     public WorldArchiveSettingsScreen(Screen parent, NativeFolderChooser folderChooser) {
@@ -124,12 +126,13 @@ public final class WorldArchiveSettingsScreen extends Screen {
     protected void init() {
         int contentWidth = ScreenGeometry.contentWidth(width, CONTENT_MIN, CONTENT_MAX, CONTENT_MARGIN);
         layout = SettingsLayout.forScreen(Math.max(height, 120), contentWidth);
-        gitSection = Math.min(gitSection, layout.paged() ? 2 : 0);
-        zipSection = Math.min(zipSection, layout.paged() ? 1 : 0);
+        gitSection = Math.min(gitSection, layout.gitSectionCount() - 1);
+        zipSection = Math.min(zipSection, layout.zipSectionCount() - 1);
         validatedFields.clear();
         saveButton = null;
         gitBrowseButton = null;
         zipBrowseButton = null;
+        zipBrowseEnabled = true;
         statusWidget = null;
 
         int contentX = ScreenGeometry.centerX(width, contentWidth);
@@ -443,9 +446,12 @@ public final class WorldArchiveSettingsScreen extends Screen {
         addRenderableOnly(text);
     }
 
-    void setWorldZipBrowseButton(Button button) {
+    /** The world page's browse button is only usable while that world's override is on. */
+    void setWorldZipBrowseButton(Button button, boolean overrideEnabled) {
         zipBrowseButton = button;
+        zipBrowseEnabled = overrideEnabled;
         addRenderableWidget(button);
+        refreshControls();
     }
 
     void clearWorldStatus() {
@@ -743,7 +749,6 @@ public final class WorldArchiveSettingsScreen extends Screen {
         if (healthRequest != null) {
             CancellableRequest<SettingsHealthSnapshot> previous = healthRequest;
             healthRequest = null;
-            screenState.nextHealthProbe();
             previous.cancel();
         }
         SettingsProbeRequest request = draft.probeRequest();
@@ -792,7 +797,7 @@ public final class WorldArchiveSettingsScreen extends Screen {
             gitBrowseButton.active = !controlsLocked();
         }
         if (zipBrowseButton != null) {
-            zipBrowseButton.active = !controlsLocked();
+            zipBrowseButton.active = zipBrowseEnabled && !controlsLocked();
         }
         if (statusWidget != null) {
             updateStatusWidget();

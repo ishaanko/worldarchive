@@ -1,5 +1,6 @@
 package dev.ishaanko.worldarchive.storage.zip;
 
+import dev.ishaanko.worldarchive.core.Digests;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -71,7 +72,7 @@ class ZipBackupStoreTest {
     @Test
     void roundTripPreservesBytesUnicodeAndEmptyDirectories() throws Exception {
         Path world = Files.createDirectories(temporaryDirectory.resolve("world"));
-        byte[] level = new byte[ZipDigests.COPY_BUFFER_BYTES * 2 + 37];
+        byte[] level = new byte[Digests.COPY_BUFFER_BYTES * 2 + 37];
         for (int index = 0; index < level.length; index++) {
             level[index] = (byte) (index * 31);
         }
@@ -367,7 +368,7 @@ class ZipBackupStoreTest {
         for (ZipSourceScanner.SourceEntry entry : ZipSourceScanner.snapshot(world).entries()) {
             if (!entry.directory()) {
                 files.add(new ZipInventoryEntry(
-                        entry.relativePath(), entry.size(), ZipDigests.sha256(entry.path())));
+                        entry.relativePath(), entry.size(), Digests.sha256(entry.path())));
             }
         }
         ZipInventory inventory = ZipInventory.create(files);
@@ -411,7 +412,7 @@ class ZipBackupStoreTest {
                 throw exception.cause();
             }
         }
-        String checksum = ZipDigests.sha256(archive);
+        String checksum = Digests.sha256(archive);
         Files.writeString(
                 Path.of(archive + ".sha256"),
                 checksum + "  " + archive.getFileName() + "\n",
@@ -440,9 +441,9 @@ class ZipBackupStoreTest {
     }
 
     private static String sha256(byte[] bytes) {
-        var digest = ZipDigests.sha256();
+        var digest = Digests.sha256();
         digest.update(bytes);
-        return ZipDigests.hex(digest.digest());
+        return Digests.hex(digest.digest());
     }
 
     private record CreatedBackup(ZipBackupStore store, ZipBackupArtifact artifact) {

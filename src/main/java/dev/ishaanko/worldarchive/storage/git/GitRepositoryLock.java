@@ -5,6 +5,7 @@ import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -31,7 +32,7 @@ final class GitRepositoryLock {
             GitRepositoryPathGuard.createDirectories(parent);
             Path lockPath = parent.resolve(settings.repository().getFileName() + ".worldarchive.lock");
             try (FileChannel channel = GitRepositoryPathGuard.openLockFile(lockPath);
-                    FileLock ignored = acquireFileLock(channel)) {
+                    FileLock ignored = acquireFileLock(channel, settings.commandTimeout())) {
                 return operation.run();
             }
         } finally {
@@ -39,8 +40,14 @@ final class GitRepositoryLock {
         }
     }
 
-    private static FileLock acquireFileLock(FileChannel channel)
+    /**
+     * Waits for the cross-process lock no longer than one command timeout. A second game
+     * instance or a stale lock on a network share then gets a plain failure instead of a
+     * backup that never finishes.
+     */
+    private static FileLock acquireFileLock(FileChannel channel, Duration timeout)
             throws IOException, InterruptedException, GitStorageException {
+        long deadline = System.nanoTime() + timeout.toNanos();
         while (true) {
             try {
                 FileLock lock = channel.tryLock();
@@ -53,11 +60,11 @@ final class GitRepositoryLock {
             if (Thread.interrupted()) {
                 throw new InterruptedException("Interrupted while waiting for the Git repository lock");
             }
-            try {
-                Thread.sleep(25L);
-            } catch (InterruptedException exception) {
-                throw exception;
+            if (System.nanoTime() - deadline >= 0) {
+                throw new GitStorageException(
+                        "Another program is using this backup repository; close it and try again");
             }
+            Thread.sleep(25L);
         }
     }
 }

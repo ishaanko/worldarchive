@@ -63,20 +63,6 @@ final class GitRecoveryDestination implements RecoveryDestination {
         return verificationOutcome(record, destination, verification);
     }
 
-    @Override
-    public VerificationOutcome verifyForRestore(
-            BackupRecord record,
-            DestinationResult destination) throws Exception {
-        requireArtifact(record, destination);
-        GitVerification verification = destination.ownership() == ArtifactOwnership.EXTERNAL
-                ? hydrateExternal(record, destination)
-                : awaitDrained(backend.verifyRestorableSnapshot(
-                        record.manifest().worldId(),
-                        record.manifest().backupId(),
-                        record.manifest()));
-        return verificationOutcome(record, destination, verification);
-    }
-
     static VerificationOutcome verificationOutcome(
             BackupRecord record,
             DestinationResult destination,

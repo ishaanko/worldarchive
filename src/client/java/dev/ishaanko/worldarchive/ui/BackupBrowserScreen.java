@@ -188,7 +188,8 @@ public final class BackupBrowserScreen extends Screen {
                 88,
                 height - (capabilities.warning().isPresent() ? 100 : 84));
         int rowTop = 64;
-        int rowCapacity = Math.max(1, (paginationY - rowTop) / (ROW_HEIGHT + ROW_GAP));
+        int rowCapacity = Math.clamp(
+                (paginationY - rowTop) / (ROW_HEIGHT + ROW_GAP), 1, BackupBrowserQuery.MAXIMUM_PAGE_SIZE);
         BackupBrowserPage page = page(rowCapacity);
         pageIndex = page.pageIndex();
         visibleRows = page.rows();
@@ -248,9 +249,8 @@ public final class BackupBrowserScreen extends Screen {
         Button selectButton = Button.builder(
                         Component.literal(allMatchingSelected ? "Clear" : "Select all"),
                         ignored -> {
-                            if (allMatchingSelected) {
-                                selectedBackupIds.clear();
-                            } else {
+                            selectedBackupIds.clear();
+                            if (!allMatchingSelected) {
                                 selectedBackupIds.addAll(page.matchingBackupIds());
                             }
                             rebuildWidgets();
@@ -311,12 +311,8 @@ public final class BackupBrowserScreen extends Screen {
             }
             selectionAnchor = clicked;
         } else {
-            boolean onlyThisRow = selectedBackupIds.size() == 1
-                    && selectedBackupIds.contains(clicked);
             selectedBackupIds.clear();
-            if (!onlyThisRow) {
-                selectedBackupIds.add(clicked);
-            }
+            selectedBackupIds.add(clicked);
             selectionAnchor = clicked;
         }
         rebuildWidgets();
@@ -610,11 +606,18 @@ public final class BackupBrowserScreen extends Screen {
                         finishInlineFailureOnClient(token, revision, throwable);
                         return;
                     }
-                    busy = false;
-                    List<DeleteBackupRequest> requests = preparations.stream()
+                    List<DeletePreparation> prepared = preparations.stream()
                             .map(CompletableFuture::join)
-                            .map(prepared -> new DeleteBackupRequest(
-                                    prepared.backupId(), prepared.confirmationToken()))
+                            .toList();
+                    if (prepared.stream().anyMatch(Objects::isNull)) {
+                        finishInlineFailureOnClient(token, revision, new IllegalStateException(
+                                "Delete preparation returned no result"));
+                        return;
+                    }
+                    busy = false;
+                    List<DeleteBackupRequest> requests = prepared.stream()
+                            .map(preparation -> new DeleteBackupRequest(
+                                    preparation.backupId(), preparation.confirmationToken()))
                             .toList();
                     ConfirmationState confirmation = new ConfirmationState(
                             ConfirmationKind.DELETE,

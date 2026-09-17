@@ -468,8 +468,8 @@ public final class WorldArchiveRuntime implements BackupClientFacade {
     }
 
     /** Opens the live world's backup browser; false when there is no resolved live world yet. */
-    public boolean openBrowser() {
-        return navigation.openBrowser();
+    public boolean openBrowser(Screen returnTo) {
+        return navigation.openBrowser(returnTo);
     }
 
     private RuntimeState buildState(WorldArchiveConfig config) {

@@ -6,8 +6,10 @@ import dev.ishaanko.worldarchive.storage.management.CleanupPlan;
 import dev.ishaanko.worldarchive.ui.model.ScreenGeometry;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.time.format.FormatStyle;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
 import net.minecraft.ChatFormatting;
@@ -21,7 +23,8 @@ import net.minecraft.network.chat.Component;
 /** Selectable exact cleanup preview; no mutation occurs on this screen. */
 final class CleanupPreviewScreen extends Screen {
     private static final DateTimeFormatter DATE = DateTimeFormatter
-            .ofPattern("uuuu-MM-dd HH:mm")
+            .ofLocalizedDateTime(FormatStyle.SHORT)
+            .withLocale(Locale.getDefault())
             .withZone(ZoneId.systemDefault());
 
     private static final int CONTENT_MIN = 240;

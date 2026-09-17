@@ -24,7 +24,6 @@ import dev.ishaanko.worldarchive.ui.model.BackupRow;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.server.IntegratedServer;
@@ -144,6 +143,12 @@ final class RuntimeClientFacade implements BackupClientFacade {
         if (state == null || runtime.isClosed()) {
             return WorldArchiveRuntime.failedStage("WorldArchive is still loading");
         }
+        // Folder checks and destination validation touch the filesystem; the browser polls
+        // this every second, so it must not run on the render thread.
+        return runtime.submit(() -> capabilities(world, state));
+    }
+
+    private BackupBrowserCapabilities capabilities(BackupWorldContext world, RuntimeState state) {
         CreateBackupRequest request = WorldArchiveRuntime.request(
                 world, Optional.empty(), BackupTrigger.MANUAL);
         WorldArchiveConfig config = state.config();
@@ -159,7 +164,7 @@ final class RuntimeClientFacade implements BackupClientFacade {
         boolean folderAvailable = config.zip().destination().isPresent()
                 || config.git().repository().isPresent();
         Optional<String> storageIssue = runtime.storageIssue(state);
-        return CompletableFuture.completedFuture(new BackupBrowserCapabilities(
+        return new BackupBrowserCapabilities(
                 runtime.busyAcrossStates(world.worldId()),
                 sourceAvailable,
                 storageIssue.isEmpty() && sourceAvailable && createAvailable,
@@ -167,7 +172,7 @@ final class RuntimeClientFacade implements BackupClientFacade {
                 storageIssue.isEmpty() && folderAvailable,
                 storageIssue.or(() -> runtime.worldSettingsWarning()
                         .or(() -> backgroundBackups.warning()
-                                .or(state.selector()::warning)))));
+                                .or(state.selector()::warning))));
     }
 
     @Override

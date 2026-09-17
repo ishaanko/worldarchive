@@ -75,7 +75,7 @@ final class RecoveryHealthOperations {
                         Thread.currentThread().interrupt();
                         throw exception;
                     } catch (Exception exception) {
-                        status = VerificationStatus.UNAVAILABLE;
+                        // The destination could not be checked; UNAVAILABLE already says so.
                     }
                 }
                 updates.put(RecoverySupport.DestinationKey.from(destination), status);

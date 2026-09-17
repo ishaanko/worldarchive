@@ -5,6 +5,7 @@ import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.BackupManifest;
 import dev.ishaanko.worldarchive.model.BackupRecord;
 import dev.ishaanko.worldarchive.model.BackupResult;
+import dev.ishaanko.worldarchive.model.BackupStatus;
 import dev.ishaanko.worldarchive.model.BackupTrigger;
 import dev.ishaanko.worldarchive.model.DestinationResult;
 import dev.ishaanko.worldarchive.model.DestinationStatus;
@@ -137,10 +138,10 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
         Objects.requireNonNull(progressListener, "progressListener");
         BackupId backupId = BackupId.create();
         OperationId operationId = OperationId.create();
-        OperationProgress queued = preparationProgress(
-                request,
-                backupId,
+        OperationProgress queued = progressFor(
                 operationId,
+                request.worldId(),
+                backupId,
                 OperationPhase.QUEUED,
                 0,
                 0,
@@ -151,19 +152,19 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
         CapturedBackup captured = null;
         boolean transferred = false;
         try (WorldOperationGate.Permit ignored = captureMutex.enter(request.worldId())) {
-            capturePreparations.put(request.worldId(), preparationProgress(
-                    request,
-                    backupId,
+            capturePreparations.put(request.worldId(), progressFor(
                     operationId,
+                    request.worldId(),
+                    backupId,
                     OperationPhase.PREPARING,
                     0,
                     0,
                     "Preparing private world capture"));
             Optional<WorldInventory> previous = loadInventoryOrFallback(request.worldId(), () ->
-                    capturePreparations.put(request.worldId(), preparationProgress(
-                            request,
-                            backupId,
+                    capturePreparations.put(request.worldId(), progressFor(
                             operationId,
+                            request.worldId(),
+                            backupId,
                             OperationPhase.PREPARING,
                             0,
                             0,
@@ -174,20 +175,20 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
                     clock.instant(),
                     previous,
                     (completed, total) -> {
-                        capturePreparations.put(request.worldId(), preparationProgress(
-                                request,
-                                backupId,
+                        capturePreparations.put(request.worldId(), progressFor(
                                 operationId,
+                                request.worldId(),
+                                backupId,
                                 OperationPhase.READING,
                                 completed,
                                 total,
                                 "Capturing world files"));
                         progressListener.onProgress(completed, total);
                     });
-            capturePreparations.put(request.worldId(), preparationProgress(
-                    request,
-                    backupId,
+            capturePreparations.put(request.worldId(), progressFor(
                     operationId,
+                    request.worldId(),
+                    backupId,
                     OperationPhase.PREPARING,
                     1,
                     1,
@@ -599,7 +600,7 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
         if (!operation.terminal.compareAndSet(false, true)) {
             return;
         }
-        Throwable terminalFailure = releaseOperationResources(operation, failure);
+        Throwable terminalFailure = releaseOperationResources(operation, failure, result != null);
         reportTerminalProgress(operation, result, terminalFailure);
         CreateOperation next = releaseLane(operation);
         completeOperation(operation, result, terminalFailure);
@@ -608,9 +609,14 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
         }
     }
 
+    /**
+     * Releases the capture and the world permit. Once a result exists the backup is recorded,
+     * so a failure while releasing must not turn that success into a reported failure.
+     */
     private static Throwable releaseOperationResources(
             CreateOperation operation,
-            Throwable failure) {
+            Throwable failure,
+            boolean recorded) {
         Throwable terminalFailure = failure;
         CapturedBackup captured = operation.capture.getAndSet(null);
         if (captured != null) {
@@ -627,10 +633,10 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
             try {
                 permit.close();
             } catch (RuntimeException exception) {
-                if (terminalFailure == null) {
-                    terminalFailure = exception;
-                } else {
+                if (terminalFailure != null) {
                     terminalFailure.addSuppressed(exception);
+                } else if (!recorded) {
+                    terminalFailure = exception;
                 }
             }
         }
@@ -641,7 +647,7 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
             CreateOperation operation,
             BackupResult result,
             Throwable terminalFailure) {
-        if (terminalFailure == null && result.status() != dev.ishaanko.worldarchive.model.BackupStatus.FAILED) {
+        if (terminalFailure == null && result.status() != BackupStatus.FAILED) {
             report(operation, OperationPhase.COMPLETE, 1, 1, completionMessage(result));
         } else if (terminalFailure == null) {
             report(operation, OperationPhase.FAILED, 0, 0, completionMessage(result));
@@ -760,17 +766,6 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
         for (ProgressListener listener : operation.listeners) {
             safeNotify(listener, progress);
         }
-    }
-
-    private static OperationProgress preparationProgress(
-            CreateBackupRequest request,
-            BackupId backupId,
-            OperationId operationId,
-            OperationPhase phase,
-            long completed,
-            long total,
-            String message) {
-        return progressFor(operationId, request.worldId(), backupId, phase, completed, total, message);
     }
 
     private DestinationPlan selectDestinations(CreateBackupRequest request) {

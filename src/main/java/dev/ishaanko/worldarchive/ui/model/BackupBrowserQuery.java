@@ -18,7 +18,4 @@ public record BackupBrowserQuery(String filter, BackupSort sort, int pageIndex, 
         }
     }
 
-    public static BackupBrowserQuery defaults() {
-        return new BackupBrowserQuery("", BackupSort.NEWEST, 0, 20);
-    }
 }

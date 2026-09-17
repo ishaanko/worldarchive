@@ -35,15 +35,6 @@ public final class ZipImportScanner {
         List<ZipImportIssue> issues = new ArrayList<>();
         Files.walkFileTree(root, new SimpleFileVisitor<>() {
             @Override
-            public FileVisitResult preVisitDirectory(Path directory, BasicFileAttributes attributes) {
-                if (attributes.isSymbolicLink() || attributes.isOther()) {
-                    issues.add(new ZipImportIssue(directory, "Skipped an unsafe linked or special directory"));
-                    return FileVisitResult.SKIP_SUBTREE;
-                }
-                return FileVisitResult.CONTINUE;
-            }
-
-            @Override
             public FileVisitResult visitFile(Path file, BasicFileAttributes attributes) {
                 if (!attributes.isRegularFile()
                         || attributes.isSymbolicLink()

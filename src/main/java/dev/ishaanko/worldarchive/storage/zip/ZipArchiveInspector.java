@@ -1,5 +1,6 @@
 package dev.ishaanko.worldarchive.storage.zip;
 
+import dev.ishaanko.worldarchive.core.Digests;
 import dev.ishaanko.worldarchive.model.BackupManifest;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -8,12 +9,8 @@ import java.io.InterruptedIOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.Channels;
-import java.nio.channels.FileChannel;
 import java.nio.channels.SeekableByteChannel;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.LinkOption;
-import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -52,14 +49,6 @@ final class ZipArchiveInspector {
     private ZipArchiveInspector() {
     }
 
-    static Inspection inspect(Path archive) throws IOException {
-        try (SeekableByteChannel channel = FileChannel.open(
-                archive,
-                Set.of(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS))) {
-            return inspect(channel);
-        }
-    }
-
     static Inspection inspect(SeekableByteChannel archive) throws IOException {
         long archiveSize = archive.size();
         if (archiveSize <= 0 || archiveSize > ZipLimits.MAXIMUM_ARCHIVE_BYTES) {
@@ -77,15 +66,6 @@ final class ZipArchiveInspector {
             }
         }
         return scan.finish(archive, archiveSize);
-    }
-
-    static BackupManifest readManifest(Path archive) throws IOException {
-        Inspection inspection = inspect(archive);
-        if (!inspection.problems().isEmpty()) {
-            throw new IOException("ZIP archive failed structural verification");
-        }
-        return inspection.manifest()
-                .orElseThrow(() -> new IOException("ZIP archive manifest is missing"));
     }
 
     /**
@@ -229,7 +209,7 @@ final class ZipArchiveInspector {
                 ? (int) Math.min(declaredSize, maximumBytes)
                 : Math.min(8_192, maximumBytes);
         try (ByteArrayOutputStream output = new ByteArrayOutputStream(initialCapacity)) {
-            byte[] buffer = new byte[Math.min(ZipDigests.COPY_BUFFER_BYTES, maximumBytes)];
+            byte[] buffer = new byte[Math.min(Digests.COPY_BUFFER_BYTES, maximumBytes)];
             int total = 0;
             int read;
             while ((read = input.read(buffer)) >= 0) {
@@ -252,8 +232,8 @@ final class ZipArchiveInspector {
 
     private static DigestResult digest(InputStream input, long[] aggregateBytes)
             throws IOException {
-        MessageDigest digest = ZipDigests.sha256();
-        byte[] buffer = new byte[ZipDigests.COPY_BUFFER_BYTES];
+        MessageDigest digest = Digests.sha256();
+        byte[] buffer = new byte[Digests.COPY_BUFFER_BYTES];
         long total = 0;
         try {
             int read;
@@ -269,11 +249,11 @@ final class ZipArchiveInspector {
         } catch (ArithmeticException exception) {
             throw new IOException("ZIP entry size overflow", exception);
         }
-        return new DigestResult(total, ZipDigests.hex(digest.digest()));
+        return new DigestResult(total, Digests.hex(digest.digest()));
     }
 
     private static long drain(InputStream input, long[] aggregateBytes) throws IOException {
-        byte[] buffer = new byte[ZipDigests.COPY_BUFFER_BYTES];
+        byte[] buffer = new byte[Digests.COPY_BUFFER_BYTES];
         long total = 0;
         try {
             int read;

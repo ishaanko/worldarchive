@@ -76,29 +76,6 @@ public final class BackupRecoveryService implements BackupMaintenanceService {
             WorldIdentityStore identityStore,
             RestoredWorldMetadataFinalizer metadataFinalizer,
             Executor executor,
-            WorldOperationGate operationGate) {
-        this(
-                catalog,
-                gitBackend,
-                zipStore,
-                sources,
-                deletions,
-                identityStore,
-                metadataFinalizer,
-                executor,
-                operationGate,
-                Clock.systemUTC());
-    }
-
-    public BackupRecoveryService(
-            BackupCatalog catalog,
-            Optional<? extends GitSnapshotStore> gitBackend,
-            Optional<? extends ZipBackupStoreResolver> zipStore,
-            ImportSourceRegistry sources,
-            BackupDeletionRegistry deletions,
-            WorldIdentityStore identityStore,
-            RestoredWorldMetadataFinalizer metadataFinalizer,
-            Executor executor,
             WorldOperationGate operationGate,
             Clock clock) {
         this(

@@ -8,7 +8,7 @@ import java.util.Set;
 
 /** Cross-platform validation and collision normalization for snapshot paths. */
 final class GitPortablePath {
-    static final int MAXIMUM_PATH_BYTES = 4_096;
+    private static final int MAXIMUM_PATH_BYTES = 4_096;
 
     private static final int MAXIMUM_SEGMENT_BYTES = 255;
 

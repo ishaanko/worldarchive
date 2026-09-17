@@ -44,10 +44,6 @@ final class CaptureWorkspace {
         cleanupAtStartup();
     }
 
-    Path directory() {
-        return directory;
-    }
-
     Lease open(Path source) throws IOException {
         Path normalizedSource = source.toAbsolutePath().normalize();
         if (normalizedSource.startsWith(directory) || directory.startsWith(normalizedSource)) {
@@ -84,8 +80,35 @@ final class CaptureWorkspace {
             return;
         }
         for (Path candidate : candidates) {
-            cleanupAbandonedCapture(candidate);
+            if (candidate.getFileName().toString().endsWith(OWNERSHIP_SUFFIX)) {
+                cleanupOrphanedMarker(candidate);
+            } else {
+                cleanupAbandonedCapture(candidate);
+            }
         }
+    }
+
+    /**
+     * A marker outlives its capture directory when the process died between deleting the tree
+     * and deleting the marker. The directory is always created before the marker, so a marker
+     * with no directory is never a capture that is still starting.
+     */
+    private static void cleanupOrphanedMarker(Path marker) {
+        String name = marker.getFileName().toString();
+        Path captureRoot = marker.resolveSibling(
+                name.substring(0, name.length() - OWNERSHIP_SUFFIX.length()));
+        Optional<UUID> captureId = parseCaptureId(captureRoot);
+        if (captureId.isEmpty()) {
+            return;
+        }
+        try {
+            if (!isAbsent(captureRoot)) {
+                return;
+            }
+        } catch (IOException exception) {
+            return;
+        }
+        deleteOwnershipMarkerIfSafe(marker, ownershipMarkerContents(captureId.orElseThrow()));
     }
 
     private static void cleanupAbandonedCapture(Path candidate) {

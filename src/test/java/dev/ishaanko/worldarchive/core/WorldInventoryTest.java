@@ -1,9 +1,7 @@
 package dev.ishaanko.worldarchive.core;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -45,8 +43,6 @@ final class WorldInventoryTest {
                 new WorldInventory.Entry("same.dat", 5, A_SHA)));
 
         assertEquals(3, current.changedFilesSince(previous));
-        assertFalse(current.hasSameFiles(previous));
-        assertTrue(current.hasSameFiles(WorldInventory.create(current.files())));
     }
 
     @Test

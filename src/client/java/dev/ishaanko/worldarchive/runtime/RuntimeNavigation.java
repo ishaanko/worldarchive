@@ -1,5 +1,6 @@
 package dev.ishaanko.worldarchive.runtime;
 
+import com.mojang.blaze3d.Blaze3D;
 import dev.ishaanko.worldarchive.core.RestoreBackupResult;
 import dev.ishaanko.worldarchive.settings.ClientSettingsAccess;
 import dev.ishaanko.worldarchive.ui.BackupBrowserScreen;
@@ -13,12 +14,10 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.RejectedExecutionException;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.gui.screens.PauseScreen;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.client.gui.screens.worldselection.SelectWorldScreen;
 import net.minecraft.client.multiplayer.ClientLevel;
-import net.minecraft.util.Util;
 import net.minecraft.world.level.storage.LevelStorageSource;
 import net.minecraft.world.level.validation.ContentValidationException;
 
@@ -72,8 +71,12 @@ final class RuntimeNavigation {
         transitionToRestoredWorld(returnTo, result, true);
     }
 
-    /** Opens the live world's browser; false when no world is resolved or the runtime is not ready. */
-    boolean openBrowser() {
+    /**
+     * Opens the live world's browser over {@code returnTo}; false when no world is resolved or
+     * the runtime is not ready.
+     */
+    boolean openBrowser(Screen returnTo) {
+        Objects.requireNonNull(returnTo, "returnTo");
         BackupWorldContext world = runtime.currentLiveWorld();
         if (world == null || runtime.unavailable()) {
             return false;
@@ -81,10 +84,7 @@ final class RuntimeNavigation {
         Minecraft minecraft = runtime.services().minecraft();
         minecraft.execute(() -> {
             if (!runtime.isClosed()) {
-                minecraft.setScreenAndShow(new BackupBrowserScreen(
-                        new PauseScreen(true),
-                        world,
-                        runtime));
+                minecraft.setScreenAndShow(new BackupBrowserScreen(returnTo, world, runtime));
             }
         });
         return true;
@@ -114,7 +114,7 @@ final class RuntimeNavigation {
                 runtime.services().minecraft().execute(() -> {
                     try {
                         if (!runtime.isClosed()) {
-                            Util.getPlatform().openPath(destination);
+                            Blaze3D.openPath(destination);
                         }
                     } catch (RuntimeException exception) {
                         runtime.logFailure(

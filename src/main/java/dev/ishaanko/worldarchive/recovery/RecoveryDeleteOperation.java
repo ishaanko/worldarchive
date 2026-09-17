@@ -30,6 +30,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Queue;
+import java.util.Set;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -129,25 +130,39 @@ final class RecoveryDeleteOperation {
         int total = claimed.size();
         AtomicInteger completed = new AtomicInteger();
         Map<BackupId, BackupResult> results = new ConcurrentHashMap<>();
-        for (Map.Entry<WorldId, List<DeleteConfirmation>> world : byWorld.entrySet()) {
-            RecoverySupport.report(progressListener, batchProgress(
-                    operationId, world.getKey(), OperationPhase.PREPARING,
-                    completed.get(), total, "Preparing to delete " + total + " backups"));
-            try (WorldOperationGate.Permit ignored = operationGate.enter(world.getKey())) {
-                cancellation.checkpoint();
-                List<Runnable> tasks = new ArrayList<>();
-                for (DeleteConfirmation confirmation : world.getValue()) {
-                    tasks.add(() -> {
-                        results.put(confirmation.backupId(), deleteOrReport(
-                                confirmation, cancellation));
-                        int done = completed.incrementAndGet();
-                        RecoverySupport.report(progressListener, batchProgress(
-                                operationId, world.getKey(), OperationPhase.WRITING,
-                                done, total, "Deleting backups (" + done + " of " + total + ")"));
-                    });
+        Set<BackupId> started = ConcurrentHashMap.newKeySet();
+        try {
+            for (Map.Entry<WorldId, List<DeleteConfirmation>> world : byWorld.entrySet()) {
+                RecoverySupport.report(progressListener, batchProgress(
+                        operationId, world.getKey(), OperationPhase.PREPARING,
+                        completed.get(), total, "Preparing to delete " + total + " backups"));
+                try (WorldOperationGate.Permit ignored = operationGate.enter(world.getKey())) {
+                    cancellation.checkpoint();
+                    List<Runnable> tasks = new ArrayList<>();
+                    for (DeleteConfirmation confirmation : world.getValue()) {
+                        tasks.add(() -> {
+                            started.add(confirmation.backupId());
+                            results.put(confirmation.backupId(), deleteOrReport(
+                                    confirmation, cancellation));
+                            int done = completed.incrementAndGet();
+                            RecoverySupport.report(progressListener, batchProgress(
+                                    operationId, world.getKey(), OperationPhase.WRITING,
+                                    done, total, "Deleting backups (" + done + " of " + total + ")"));
+                        });
+                    }
+                    runAll(tasks);
                 }
-                runAll(tasks);
             }
+        } catch (Exception exception) {
+            // A backup whose task never ran keeps its confirmation, so the same token works
+            // again once the user retries. A task that threw may already have removed the
+            // record, so its token stays consumed.
+            for (DeleteBackupRequest request : requests) {
+                if (!started.contains(request.backupId())) {
+                    confirmations.put(request.confirmationToken(), claimed.get(request.backupId()));
+                }
+            }
+            throw exception;
         }
         RecoverySupport.report(progressListener, batchProgress(
                 operationId, byWorld.keySet().iterator().next(), OperationPhase.COMPLETE,
@@ -328,11 +343,29 @@ final class RecoveryDeleteOperation {
             RecoverySupport.report(progressListener, RecoverySupport.progress(
                     operationId, current, BackupOperation.DELETE, OperationPhase.COMPLETE,
                     present.size(), present.size(), "Destination deletion complete"));
+            restoreDeletionIntent(backupId, deletionIntentRecorded, null);
             return result;
-        } finally {
-            if (deletionIntentRecorded && catalog.find(backupId).isPresent()) {
+        } catch (Exception exception) {
+            restoreDeletionIntent(backupId, deletionIntentRecorded, exception);
+            throw exception;
+        }
+    }
+
+    /** Clears the recorded intent when the record survived; never hides the failure that led here. */
+    private void restoreDeletionIntent(BackupId backupId, boolean recorded, Exception failure)
+            throws IOException {
+        if (!recorded) {
+            return;
+        }
+        try {
+            if (catalog.find(backupId).isPresent()) {
                 deletions.restore(backupId);
             }
+        } catch (IOException | RuntimeException exception) {
+            if (failure == null) {
+                throw exception;
+            }
+            failure.addSuppressed(exception);
         }
     }
 
@@ -402,9 +435,11 @@ final class RecoveryDeleteOperation {
             return Optional.of(exception.getClass().getSimpleName());
         }
         String redacted = SensitiveDataRedactor.redact(message);
-        return Optional.of(redacted.length() > MAXIMUM_FAILURE_REASON_LENGTH
-                ? redacted.substring(0, MAXIMUM_FAILURE_REASON_LENGTH - 1) + "…"
-                : redacted);
+        if (redacted.codePointCount(0, redacted.length()) <= MAXIMUM_FAILURE_REASON_LENGTH) {
+            return Optional.of(redacted);
+        }
+        int end = redacted.offsetByCodePoints(0, MAXIMUM_FAILURE_REASON_LENGTH - 1);
+        return Optional.of(redacted.substring(0, end) + "…");
     }
 
     private static String deletionFailureMessage(Optional<String> reason) {

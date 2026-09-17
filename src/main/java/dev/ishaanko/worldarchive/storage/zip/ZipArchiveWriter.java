@@ -1,6 +1,7 @@
 package dev.ishaanko.worldarchive.storage.zip;
 
 import dev.ishaanko.worldarchive.core.BackupCapture;
+import dev.ishaanko.worldarchive.core.Digests;
 import dev.ishaanko.worldarchive.storage.zip.ZipSourceScanner.SourceEntry;
 import java.io.IOException;
 import java.io.InputStream;
@@ -34,7 +35,7 @@ final class ZipArchiveWriter {
             List<SourceEntry> sourceEntries,
             LongConsumer bytesWritten) throws IOException {
         List<ZipInventoryEntry> inventoryEntries = new ArrayList<>();
-        byte[] buffer = new byte[ZipDigests.COPY_BUFFER_BYTES];
+        byte[] buffer = new byte[Digests.COPY_BUFFER_BYTES];
         long completedBytes = 0;
         try (SeekableByteChannel channel = destination.createNew(partialName);
                 ZipOutputStream zip = new ZipOutputStream(
@@ -51,7 +52,7 @@ final class ZipArchiveWriter {
                     continue;
                 }
                 ZipSourceScanner.requireUnchanged(source);
-                MessageDigest digest = ZipDigests.sha256();
+                MessageDigest digest = Digests.sha256();
                 ZipEntry entry = new ZipEntry(entryName);
                 entry.setTime(timestamp);
                 zip.putNextEntry(entry);
@@ -79,7 +80,7 @@ final class ZipArchiveWriter {
                 }
                 ZipSourceScanner.requireUnchanged(source);
                 inventoryEntries.add(new ZipInventoryEntry(
-                        source.relativePath(), written, ZipDigests.hex(digest.digest())));
+                        source.relativePath(), written, Digests.hex(digest.digest())));
             }
             ZipInventory inventory = ZipInventory.create(inventoryEntries);
             requireNotInterrupted();

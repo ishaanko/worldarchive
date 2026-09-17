@@ -1,5 +1,6 @@
 package dev.ishaanko.worldarchive.storage.zip;
 
+import dev.ishaanko.worldarchive.core.Digests;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InterruptedIOException;
@@ -50,7 +51,10 @@ final class ZipArchiveExtractor {
             StagingDirectory staging,
             ZipInventory inventory,
             ZipStoreHooks hooks) throws IOException {
-        if (inventory.byteCount() > Files.getFileStore(staging.path()).getUsableSpace()) {
+        // Network shares and some virtual filesystems report zero when they cannot measure
+        // free space; zero means unknown, not full.
+        long usableSpace = Files.getFileStore(staging.path()).getUsableSpace();
+        if (usableSpace > 0 && inventory.byteCount() > usableSpace) {
             throw new ZipBackupException(
                     "ZIP restore staging storage has insufficient free space");
         }
@@ -59,7 +63,7 @@ final class ZipArchiveExtractor {
             expected.put(PortableZipPath.collisionKey(file.path(), false), file);
         }
         Set<String> seen = new HashSet<>();
-        byte[] buffer = new byte[ZipDigests.COPY_BUFFER_BYTES];
+        byte[] buffer = new byte[Digests.COPY_BUFFER_BYTES];
         try (ZipFile zip = new ZipFile(archive.toFile(), StandardCharsets.UTF_8)) {
             Enumeration<? extends ZipEntry> entries = zip.entries();
             while (entries.hasMoreElements()) {
@@ -67,7 +71,6 @@ final class ZipArchiveExtractor {
                 staging.requireIdentity();
                 ZipEntry entry = entries.nextElement();
                 String name = entry.getName();
-                PortableZipPath.collisionKey(name, entry.isDirectory());
                 if (name.equals(ZipArchiveFormat.MANIFEST_ENTRY)
                         || name.equals(ZipArchiveFormat.INVENTORY_ENTRY)
                         || name.equals(ZipArchiveFormat.WORLD_PREFIX)) {
@@ -144,7 +147,7 @@ final class ZipArchiveExtractor {
             Path target,
             ZipInventoryEntry expected,
             byte[] buffer) throws IOException {
-        MessageDigest digest = ZipDigests.sha256();
+        MessageDigest digest = Digests.sha256();
         long written = 0;
         try (InputStream input = zip.getInputStream(entry);
                 OutputStream output = Files.newOutputStream(
@@ -169,7 +172,7 @@ final class ZipArchiveExtractor {
             throw new ZipBackupException("ZIP restoration size overflow", exception);
         }
         if (written != expected.size()
-                || !ZipDigests.hex(digest.digest()).equals(expected.sha256())) {
+                || !Digests.hex(digest.digest()).equals(expected.sha256())) {
             throw new ZipBackupException(
                     "ZIP entry failed integrity checking during restoration");
         }

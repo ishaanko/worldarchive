@@ -38,6 +38,9 @@ public record DeleteBatchSummary(
                 if (destination.status() == DestinationStatus.FAILED) {
                     problems.add(shortId(result) + " · " + destination.destination() + ": "
                             + destination.detail().orElse("not deleted"));
+                } else if (destination.status() == DestinationStatus.PENDING_SYNC) {
+                    problems.add(shortId(result) + " · " + destination.destination() + ": "
+                            + destination.detail().orElse("deletion pending"));
                 }
             }
         }
