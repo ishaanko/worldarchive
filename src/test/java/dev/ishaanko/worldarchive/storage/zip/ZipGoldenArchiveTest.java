@@ -34,7 +34,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * Archives written by the WorldArchive 0.4.0 ZIP writer, kept byte for byte under
+ * Archives written by the WorldArchive 0.3.9 ZIP writer, kept byte for byte under
  * {@code src/test/resources/zip/golden}: one per file-name format (the readable name and the
  * 0.1.0 {@code <timestamp>_<backup id>.zip} name), with and without a label and a game version.
  * Players keep such archives for years, so every later reader must list, verify, restore and

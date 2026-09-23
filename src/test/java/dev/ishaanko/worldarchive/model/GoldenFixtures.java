@@ -5,7 +5,7 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * Fixed backup metadata and the exact bytes and digests that WorldArchive 0.4.0 writes for it.
+ * Fixed backup metadata and the exact bytes and digests that WorldArchive 0.3.9 writes for it.
  * Stored backups depend on these formats: if a golden value changes, old backups stop verifying.
  * The expected values were produced by the encoders as they were before the shared helpers.
  */

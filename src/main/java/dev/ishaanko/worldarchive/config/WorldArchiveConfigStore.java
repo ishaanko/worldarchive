@@ -377,7 +377,7 @@ public final class WorldArchiveConfigStore {
     }
 
     /**
-     * WorldArchive 0.4 and older refuse a destination without this object, and a version that
+     * WorldArchive 0.3.9 and older refuse a destination without this object, and a version that
      * cannot read its settings replaces them with defaults. Writing it keeps a downgrade from
      * losing the settings; it is ignored when read.
      */

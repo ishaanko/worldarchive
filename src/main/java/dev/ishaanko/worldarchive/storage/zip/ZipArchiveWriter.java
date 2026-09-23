@@ -80,7 +80,7 @@ final class ZipArchiveWriter {
         zip.write(ZipArchiveFormat.encodeInventory(capture.inventory()));
     }
 
-    /** The entry of every folder and file, in the order of their paths, as 0.4.0 wrote them. */
+    /** The entry of every folder and file, in the order of their paths, as 0.3.9 wrote them. */
     private Collection<String> worldEntryNames() throws IOException {
         Map<String, String> entries = new TreeMap<>();
         Path root = capture.worldDirectory();

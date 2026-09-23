@@ -35,7 +35,7 @@ public final class RuntimeNoticeStore {
 
     /**
      * Hands the kept notice, if any, to {@code display}, and forgets it once the display returned.
-     * A file this version cannot read, such as the plain text notice of WorldArchive 0.4, is removed.
+     * A file this version cannot read, such as the plain text notice of WorldArchive 0.3.9, is removed.
      */
     public synchronized void showKept(Consumer<Notice> display) throws IOException {
         read().ifPresent(display);

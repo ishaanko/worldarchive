@@ -37,10 +37,10 @@ final class ZipFolder {
     /** The lock file is {@code .worldarchive.lock}, the name every WorldArchive version has used. */
     private static final String LOCK_NAME = ".worldarchive";
 
-    /** 0.4.0 held this file open on Windows to pin the folder; it is never needed now. */
+    /** 0.3.9 held this file open on Windows to pin the folder; it is never needed now. */
     private static final String OLD_GUARD_NAME = ".worldarchive.guard";
 
-    /** Partial files of a create (and of an import since this version) and of an import in 0.4.0. */
+    /** Partial files of a create (and of an import since this version) and of an import in 0.3.9. */
     private static final List<String> PARTIAL_SUFFIXES = List.of(ManagedZipArchive.PARTIAL_SUFFIX, ".importing");
 
     private static final Pattern CHECKSUM_LINE = Pattern.compile("([0-9a-f]{64})  [^\\r\\n]+(?:\\r?\\n)?");

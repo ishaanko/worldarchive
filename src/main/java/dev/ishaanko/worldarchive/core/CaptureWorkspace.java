@@ -37,7 +37,7 @@ final class CaptureWorkspace {
     private static final Pattern OWNER_ID = Pattern.compile(
             "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
 
-    /** WorldArchive 0.4 named a capture {@code .capture-<id>} and kept an owner marker file beside it. */
+    /** WorldArchive 0.3.9 named a capture {@code .capture-<id>} and kept an owner marker file beside it. */
     private static final Pattern LEGACY_CAPTURE = Pattern.compile(
             "\\.capture-" + OWNER_ID.pattern() + "(\\.worldarchive-owner)?");
 
@@ -69,7 +69,7 @@ final class CaptureWorkspace {
 
     /**
      * Deletes the capture folders of game instances that have ended, such as after a crash, and
-     * the leftovers of WorldArchive 0.4. Run it once at startup, off the render thread.
+     * the leftovers of WorldArchive 0.3.9. Run it once at startup, off the render thread.
      */
     void removeAbandoned() throws IOException {
         List<Path> entries;
@@ -211,7 +211,7 @@ final class CaptureWorkspace {
         });
     }
 
-    /** Deletes one entry. A capture left by WorldArchive 0.4 is read-only, so it is made writable first. */
+    /** Deletes one entry. A capture left by WorldArchive 0.3.9 is read-only, so it is made writable first. */
     private static void delete(Path path) throws IOException {
         try {
             Files.deleteIfExists(path);

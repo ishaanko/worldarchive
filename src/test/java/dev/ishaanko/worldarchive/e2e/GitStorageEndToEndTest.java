@@ -168,7 +168,7 @@ class GitStorageEndToEndTest {
         engine = start(root, Engine.onlyDestination(DestinationType.GIT));
         TestWorld world = TestWorld.create(engine, "Opened");
         Map<String, byte[]> files = world.files();
-        // WorldArchive 0.4.0 made this folder when the player opened the backup folder first.
+        // WorldArchive 0.3.9 made this folder when the player opened the backup folder first.
         Files.createDirectories(engine.git.repositoryFor(world.id()));
 
         BackupResult result = engine.backupNow(world, BackupTrigger.MANUAL);

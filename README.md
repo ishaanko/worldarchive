@@ -232,7 +232,7 @@ WorldArchive keeps a copy when it changes a file that it cannot use as is:
 `config/worldarchive.json.unreadable-<time>` after a settings reset, and
 `config/worldarchive.json.schema<number>.bak` before a settings upgrade. From a
 damaged backup catalog, WorldArchive keeps every entry that it can still read.
-WorldArchive 0.4.0 and older also left `inventories/*.lock` files and a
+WorldArchive 0.3.9 and older also left `inventories/*.lock` files and a
 `storage-reviews/` folder, which this version does not use. You can delete
 them.
 

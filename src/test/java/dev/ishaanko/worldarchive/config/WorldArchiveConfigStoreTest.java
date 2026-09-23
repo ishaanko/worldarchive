@@ -55,7 +55,7 @@ final class WorldArchiveConfigStoreTest {
         assertEquals(expected.canonicalize(), saved);
         assertEquals(saved, store().load());
         JsonObject destinations = written().getAsJsonObject("destinations");
-        // WorldArchive 0.4 refuses a destination without "health", and replaces unreadable settings.
+        // WorldArchive 0.3.9 refuses a destination without "health", and replaces unreadable settings.
         assertTrue(destinations.getAsJsonObject("git").has("health"));
         assertTrue(destinations.getAsJsonObject("zip").has("health"));
     }

@@ -38,7 +38,7 @@ import org.junit.jupiter.api.io.TempDir;
 final class FileBackupCatalogTest {
     private static final String SOURCE_HASH = "a".repeat(64);
 
-    /** A catalog written by WorldArchive 0.4.0; the bytes must never change. */
+    /** A catalog written by WorldArchive 0.3.9; the bytes must never change. */
     private static final String GOLDEN_CATALOG = """
             {
               "schemaVersion": 3,

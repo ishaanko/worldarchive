@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 (2026-09-22)
 
 ### Changed
 
@@ -180,7 +180,7 @@
   path that contains `%`.
 - An import no longer replaces a remote that a world already has.
 
-## 0.4.0 (2026-09-15)
+## 0.3.9 (2026-09-15)
 
 ### Changed
 
