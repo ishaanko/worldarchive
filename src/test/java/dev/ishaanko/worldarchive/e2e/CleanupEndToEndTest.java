@@ -266,6 +266,39 @@ class CleanupEndToEndTest {
                 ProgressListener.NO_OP)).restoredWorldDirectory());
     }
 
+    /**
+     * The remote keeps the oldest backup listed, so cleanup marks nothing deleted. Its ZIP archive
+     * cannot be deleted, and the deleted-backup list cannot be changed either: the archive is
+     * listed again all the same.
+     */
+    @Test
+    void aZipArchiveThatCannotBeDeletedIsListedAgainWhenTheDeletedBackupListCannotBeChanged() throws Exception {
+        Assumptions.assumeTrue(FileSystems.getDefault().supportedFileAttributeViews().contains("posix"));
+        Path remote = root.resolve("remote.git");
+        Files.createDirectories(remote);
+        new ProcessBuilder("git", "init", "--bare", "--quiet", remote.toString()).start().waitFor();
+        TestWorld world = TestWorld.create(root.resolve("saves"), "Stubborn");
+        engine = start(Engine.defaultConfig(
+                Engine.world(world.id(), world.path(), Optional.of(remote.toString()), TIGHT)));
+        BackupId oldest = backupOnFourDays(world, Optional.empty()).getFirst();
+        CleanupPlan plan = await(engine.cleanup.prepareCleanup(world.id()));
+        Files.createDirectories(engine.catalogFile().resolveSibling("deleted-backups.txt.lock"));
+        Path folder = engine.zipFolder(world.id()).resolve(world.id().toString());
+        Set<PosixFilePermission> writable = Files.getPosixFilePermissions(folder);
+        CleanupResult result;
+        Files.setPosixFilePermissions(folder, PosixFilePermissions.fromString("r-xr-xr-x"));
+        try {
+            Assumptions.assumeFalse(Files.isWritable(folder), "permissions do not apply to this user");
+            result = await(engine.cleanup.applyCleanup(new CleanupRequest(plan.confirmationToken(), Set.of(oldest))));
+        } finally {
+            Files.setPosixFilePermissions(folder, writable);
+        }
+
+        assertEquals(Set.of(oldest), result.failures().keySet());
+        assertEquals(Set.of(DestinationType.GIT, DestinationType.ZIP), engine.catalog.find(oldest).orElseThrow()
+                .result().destinations().stream().map(destination -> destination.destination()).collect(Collectors.toSet()));
+    }
+
     /** Backs up on four consecutive days, changing the world each day, and verifies the newest. */
     private List<BackupId> backupOnFourDays(TestWorld world, Optional<String> firstLabel) throws Exception {
         List<BackupId> backups = new ArrayList<>();

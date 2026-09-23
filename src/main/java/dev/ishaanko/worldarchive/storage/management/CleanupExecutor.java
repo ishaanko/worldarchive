@@ -17,8 +17,6 @@ import dev.ishaanko.worldarchive.storage.git.WorldGitSnapshotStore;
 import dev.ishaanko.worldarchive.storage.zip.ZipArchiveSize;
 import dev.ishaanko.worldarchive.support.AsyncTasks;
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.LinkOption;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.EnumSet;
@@ -32,6 +30,8 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Applies a confirmed {@link CleanupPlan}. Cleanup frees space on this computer only: it never
@@ -42,6 +42,8 @@ import java.util.stream.Collectors;
  * backup with no copy left leaves the catalog.
  */
 final class CleanupExecutor {
+    private static final Logger LOGGER = LoggerFactory.getLogger("WorldArchive");
+
     private final BackupCatalog catalog;
 
     private final FileBackupDeletionRegistry deletions;
@@ -205,7 +207,11 @@ final class CleanupExecutor {
                 backupId, record.manifest().worldId(), kept, record.result().completedAt()));
     }
 
-    /** Deletes each item's copies; returns, per backup, the kinds of copy that are still there. */
+    /**
+     * Deletes each item's copies; returns, per backup, the kinds of copy that could not be deleted.
+     * A failed delete keeps its copy even when the file seems gone: a drive that is away cannot
+     * show that it is.
+     */
     private Map<BackupId, Set<DestinationType>> deleteCopies(
             WorldId worldId,
             Snapshot snapshot,
@@ -225,9 +231,7 @@ final class CleanupExecutor {
                 try {
                     snapshot.zipStore().delete(archive.archivePath());
                 } catch (IOException failure) {
-                    if (Files.exists(archive.archivePath(), LinkOption.NOFOLLOW_LINKS)) {
-                        keep(kept, failures, item.backupId(), DestinationType.ZIP, failure);
-                    }
+                    keep(kept, failures, item.backupId(), DestinationType.ZIP, failure);
                 }
             }
         }
@@ -245,7 +249,11 @@ final class CleanupExecutor {
                 first + " " + second);
     }
 
-    /** Lists again, in one write, each copy that could not be deleted. */
+    /**
+     * Lists again, in one write, each copy that could not be deleted, and unmarks its backup. Each
+     * write is tried even when the other fails: an unmarked backup comes back with Find Stored
+     * Backups, and a listed one stays listed.
+     */
     private void relist(Snapshot snapshot, Map<BackupId, Set<DestinationType>> kept, List<String> warnings) {
         if (kept.isEmpty()) {
             return;
@@ -255,13 +263,28 @@ final class CleanupExecutor {
             BackupRecord previous = snapshot.record(backupId).orElseThrow();
             changes.put(backupId, current -> Optional.of(withCopiesOf(current, previous, types)));
         });
+        boolean unmarked = unmark(kept.keySet());
         try {
-            deletions.unmark(List.copyOf(kept.keySet()));
             catalog.updateAll(changes);
         } catch (IOException failure) {
+            String next = unmarked
+                    ? "use Import > Find Stored Backups to list them again."
+                    : "their files are kept, but they are still marked deleted. Remove their lines, which the game"
+                            + " log names, from deleted-backups.txt, then use Import > Find Stored Backups.";
             warnings.add("Some copies that could not be deleted are no longer listed ("
-                    + SafeText.from(failure, "the backup list could not be saved", 300)
-                    + "); use Import > Find Stored Backups to list them again.");
+                    + SafeText.from(failure, "the backup list could not be saved", 300) + "); " + next);
+        }
+    }
+
+    /** Unmarks the backups that keep a copy; false when they stay marked, which the log then names. */
+    private boolean unmark(Set<BackupId> backupIds) {
+        try {
+            deletions.unmark(backupIds);
+            return true;
+        } catch (IOException failure) {
+            LOGGER.warn("Backups {} kept a copy but are still marked deleted, so a rebuild of the backup list"
+                    + " will not list them again: {}", backupIds, failure.toString());
+            return false;
         }
     }
 
