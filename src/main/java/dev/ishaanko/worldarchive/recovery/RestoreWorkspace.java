@@ -1,9 +1,8 @@
 package dev.ishaanko.worldarchive.recovery;
 
-import dev.ishaanko.worldarchive.core.DirectoryIdentityMarker;
-import dev.ishaanko.worldarchive.core.FileSystemSafety;
+import dev.ishaanko.worldarchive.support.FileSystemSafety;
 import java.io.IOException;
-import java.nio.file.CopyOption;
+import java.nio.file.DirectoryStream;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
@@ -14,229 +13,212 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
 import java.text.Normalizer;
+import java.time.Clock;
+import java.time.Duration;
 import java.util.HashSet;
 import java.util.Locale;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.locks.ReentrantLock;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-/** Owns the private staging and atomic publication boundary for restored worlds. */
-final class RestoreWorkspace {
+/**
+ * The saves folder as a restore uses it. A restore writes into a private staging folder there,
+ * {@code .worldarchive-restore-*}, and publishes it with one atomic rename to a free name, so a
+ * half-restored world never appears under a world name and no existing folder is overwritten. A
+ * saves folder that the game reaches through a link or junction is used where it really is.
+ */
+public final class RestoreWorkspace {
+    /** The start of the name of every staging folder, which the settings' world scan skips. */
+    public static final String STAGING_PREFIX = ".worldarchive-restore-";
+
+    private static final Logger LOGGER = LoggerFactory.getLogger("WorldArchive");
+
+    private static final Duration STALE_STAGING_AGE = Duration.ofDays(1);
+
     private static final int MAXIMUM_DIRECTORY_NAME_CODE_POINTS = 96;
+
+    private static final int MAXIMUM_NAME_ATTEMPTS = 10_000;
+
+    private static final String DEFAULT_NAME = "Restored World";
 
     private static final Set<String> WINDOWS_DEVICE_NAMES = windowsDeviceNames();
 
-    private static final ConcurrentMap<Path, ReentrantLock> PUBLICATION_LOCKS =
-            new ConcurrentHashMap<>();
+    /** One restore at a time picks a name in a saves folder, so two never take the same one. */
+    private static final ConcurrentMap<Path, ReentrantLock> PUBLICATION_LOCKS = new ConcurrentHashMap<>();
 
-    private final Root root;
+    private final Path root;
 
-    private final DirectoryMove directoryMove;
-
-    private RestoreWorkspace(Root root, DirectoryMove directoryMove) {
+    private RestoreWorkspace(Path root) {
         this.root = root;
-        this.directoryMove = directoryMove;
     }
 
-    static RestoreWorkspace open(Path worldsDirectory, DirectoryMove directoryMove)
-            throws IOException {
-        return new RestoreWorkspace(
-                Root.open(worldsDirectory),
-                Objects.requireNonNull(directoryMove, "directoryMove"));
-    }
-
-    Staging createStaging() throws IOException {
-        return createStaging(ignored -> {
-        });
-    }
-
-    Staging createStaging(StagingCreationHook stagingCreationHook) throws IOException {
-        Objects.requireNonNull(stagingCreationHook, "stagingCreationHook");
-        root.requireUnchanged();
-        Path path = Files.createTempDirectory(root.path(), ".worldarchive-restore-");
-        try {
-            stagingCreationHook.afterCreate(path);
-            BasicFileAttributes attributes = Files.readAttributes(
-                    path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-            if (!FileSystemSafety.isOrdinaryDirectory(path, attributes)) {
-                throw new IOException("Private restore staging is unsafe");
-            }
-            Optional<String> identityMarker = DirectoryIdentityMarker.create(path);
-            if (attributes.fileKey() == null && identityMarker.isEmpty()) {
-                throw new IOException("Private restore staging has no stable identity");
-            }
-            root.requireUnchanged();
-            return new Staging(
-                    path,
-                    attributes.fileKey(),
-                    attributes.creationTime(),
-                    identityMarker);
-        } catch (IOException | RuntimeException exception) {
-            try {
-                deleteTree(root.path(), path);
-            } catch (IOException | RuntimeException cleanupFailure) {
-                exception.addSuppressed(cleanupFailure);
-            }
-            throw exception;
+    /** Opens the saves folder, creating it when missing, and logs staging folders a crash left there. */
+    static RestoreWorkspace open(Path worldsDirectory, Clock clock) throws IOException {
+        Files.createDirectories(worldsDirectory);
+        Path root = worldsDirectory.toRealPath();
+        if (root.getParent() == null) {
+            throw new IOException("The worlds folder " + root + " is the root of a drive; choose a folder in it.");
         }
+        logStaleStaging(root, clock);
+        return new RestoreWorkspace(root);
     }
 
-    Path publish(
-            Staging staging,
-            String requestedName,
-            OperationCancellation cancellation) throws Exception {
+    Path createStaging() throws IOException {
+        return Files.createTempDirectory(root, STAGING_PREFIX);
+    }
+
+    /**
+     * Moves the staging folder to the first free name based on the requested one. The rename is
+     * the point of no return: once it starts, the restore can no longer be cancelled.
+     */
+    Path publish(Path staging, String requestedName, CancellableTask<?> task) throws Exception {
         String base = safeDirectoryName(requestedName);
-        ReentrantLock lock = PUBLICATION_LOCKS.computeIfAbsent(
-                root.path(), ignored -> new ReentrantLock(true));
+        ReentrantLock lock = PUBLICATION_LOCKS.computeIfAbsent(root, ignored -> new ReentrantLock());
+        lock.lockInterruptibly();
         try {
-            lock.lockInterruptibly();
-        } catch (InterruptedException exception) {
-            Thread.currentThread().interrupt();
-            throw new IOException("Restore publication was interrupted", exception);
-        }
-        try {
-            root.requireUnchanged();
-            staging.requireUnchanged();
-            for (int index = 1; index <= 10_000; index++) {
-                String filename = index == 1 ? base : appendSuffix(base, index);
-                Path target = root.path().resolve(filename).normalize();
-                if (!Objects.equals(target.getParent(), root.path())) {
-                    throw new IOException("Restore target escaped the worlds directory");
+            for (int index = 1; index <= MAXIMUM_NAME_ATTEMPTS; index++) {
+                Path target = root.resolve(index == 1 ? base : appendSuffix(base, index));
+                if (!root.equals(target.getParent())) {
+                    throw new IOException("The restored world's name leads outside the worlds folder");
                 }
                 if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
                     continue;
                 }
                 try {
-                    return cancellation.pointOfNoReturn(
-                            () -> publishAt(staging, target));
-                } catch (FileAlreadyExistsException exception) {
-                    continue;
+                    return task.pointOfNoReturn(() -> move(staging, target));
+                } catch (FileAlreadyExistsException taken) {
+                    // Another program took the name after the check; try the next one.
                 }
             }
-            throw new IOException("No unique restore target name is available");
+            throw new IOException("No free folder name is left for the restored world in " + root);
         } finally {
             lock.unlock();
         }
     }
 
-    boolean cleanup(Staging staging, Throwable failure) {
-        boolean interrupted = Thread.interrupted();
-        try {
-            root.requireUnchanged();
-            staging.requireUnchanged();
-            deleteTree(root.path(), staging.path());
-            return true;
-        } catch (IOException | RuntimeException cleanupFailure) {
-            failure.addSuppressed(cleanupFailure);
-            return false;
-        } finally {
-            if (interrupted) {
-                Thread.currentThread().interrupt();
+    /** Removes a staging folder of this workspace; links inside it are removed, never followed. */
+    void delete(Path staging) throws IOException {
+        Path target = staging.toAbsolutePath().normalize();
+        if (!root.equals(target.getParent()) || !target.getFileName().toString().startsWith(STAGING_PREFIX)) {
+            throw new IOException("Refusing to remove " + target + ", which is not a restore staging folder");
+        }
+        if (!Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
+            return;
+        }
+        Files.walkFileTree(target, new SimpleFileVisitor<>() {
+            @Override
+            public FileVisitResult preVisitDirectory(Path directory, BasicFileAttributes attributes)
+                    throws IOException {
+                if (!FileSystemSafety.isOrdinaryDirectory(attributes)) {
+                    Files.delete(directory);
+                    return FileVisitResult.SKIP_SUBTREE;
+                }
+                return FileVisitResult.CONTINUE;
             }
-        }
-    }
 
-    void deletePublished(Path published) throws IOException {
-        deleteTree(root.path(), published);
-    }
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attributes) throws IOException {
+                Files.delete(file);
+                return FileVisitResult.CONTINUE;
+            }
 
-    private Path publishAt(Staging staging, Path target) throws IOException {
-        try {
-            directoryMove.move(staging.path(), target, StandardCopyOption.ATOMIC_MOVE);
-        } catch (IOException moveFailure) {
-            return reconcileAmbiguousPublication(staging, target, moveFailure);
-        }
-        try {
-            return requirePublishedRestore(staging, target);
-        } catch (IOException | RuntimeException validationFailure) {
-            cleanupPublishedStaging(staging, target, validationFailure);
-            throw validationFailure;
-        }
-    }
-
-    private Path reconcileAmbiguousPublication(
-            Staging staging,
-            Path target,
-            IOException moveFailure) throws IOException {
-        try {
-            return requirePublishedRestore(staging, target);
-        } catch (IOException | RuntimeException validationFailure) {
-            moveFailure.addSuppressed(validationFailure);
-            cleanupPublishedStaging(staging, target, moveFailure);
-            throw moveFailure;
-        }
-    }
-
-    private void cleanupPublishedStaging(
-            Staging staging,
-            Path target,
-            Throwable failure) {
-        try {
-            staging.requireIdentityAt(target);
-            deleteTree(root.path(), target);
-        } catch (IOException | RuntimeException cleanupFailure) {
-            failure.addSuppressed(cleanupFailure);
-        }
-    }
-
-    private Path requirePublishedRestore(Staging staging, Path target) throws IOException {
-        root.requireUnchanged();
-        BasicFileAttributes attributes = Files.readAttributes(
-                target,
-                BasicFileAttributes.class,
-                LinkOption.NOFOLLOW_LINKS);
-        if (!FileSystemSafety.isOrdinaryDirectory(target, attributes)
-                || !Objects.equals(target.toRealPath().getParent(), root.path())) {
-            throw new IOException("Published restore target is unsafe");
-        }
-        staging.requireIdentityAt(target);
-        return target;
-    }
-
-    private static String safeDirectoryName(String requestedName) {
-        String normalized = Normalizer.normalize(
-                Objects.requireNonNull(requestedName, "requestedName"), Normalizer.Form.NFKC);
-        StringBuilder safe = new StringBuilder();
-        normalized.codePoints().forEach(codePoint -> {
-            if (codePoint < 32
-                    || codePoint == 127
-                    || "<>:\"/\\|?*".indexOf(codePoint) >= 0) {
-                safe.append('_');
-            } else {
-                safe.appendCodePoint(codePoint);
+            @Override
+            public FileVisitResult postVisitDirectory(Path directory, IOException exception) throws IOException {
+                if (exception != null) {
+                    throw exception;
+                }
+                Files.delete(directory);
+                return FileVisitResult.CONTINUE;
             }
         });
-        String result = safe.toString().strip();
-        while (!result.isEmpty() && (result.endsWith(".") || result.endsWith(" "))) {
-            result = result.substring(0, result.length() - 1);
+    }
+
+    /**
+     * A rename can report a failure after it happened, for example on a network share. The name
+     * was free a moment ago under the publication lock, so a target that exists while the staging
+     * folder is gone is this restore.
+     */
+    private static Path move(Path staging, Path target) throws IOException {
+        try {
+            return Files.move(staging, target, StandardCopyOption.ATOMIC_MOVE);
+        } catch (FileAlreadyExistsException taken) {
+            throw taken;
+        } catch (IOException failure) {
+            if (Files.notExists(staging, LinkOption.NOFOLLOW_LINKS)
+                    && Files.isDirectory(target, LinkOption.NOFOLLOW_LINKS)) {
+                return target;
+            }
+            throw failure;
         }
-        if (result.isBlank() || result.equals(".") || result.equals("..")) {
-            result = "Restored World";
+    }
+
+    /**
+     * Staging folders older than a day were left by a restore that stopped, for example when the
+     * game crashed. They are only named in the log: a folder is never deleted by its name alone.
+     */
+    private static void logStaleStaging(Path root, Clock clock) {
+        FileTime staleBefore = FileTime.from(clock.instant().minus(STALE_STAGING_AGE));
+        try (DirectoryStream<Path> leftovers = Files.newDirectoryStream(root, STAGING_PREFIX + "*")) {
+            for (Path leftover : leftovers) {
+                if (Files.getLastModifiedTime(leftover, LinkOption.NOFOLLOW_LINKS).compareTo(staleBefore) < 0) {
+                    LOGGER.warn("An unfinished restore left the folder {}. It may hold part of a world;"
+                            + " delete it when no restore is running.", leftover);
+                }
+            }
+        } catch (IOException exception) {
+            LOGGER.warn("The worlds folder {} could not be checked for unfinished restores: {}",
+                    root, exception.toString());
         }
-        result = truncateCodePoints(result, MAXIMUM_DIRECTORY_NAME_CODE_POINTS);
-        while (!result.isEmpty() && (result.endsWith(".") || result.endsWith(" "))) {
-            result = result.substring(0, result.length() - 1);
+    }
+
+    /**
+     * A folder name that works on every system: unsafe characters become underscores, trailing
+     * dots and spaces go, the length is limited, and a Windows device name gets a leading
+     * underscore. The world keeps the exact requested name as its display name.
+     */
+    static String safeDirectoryName(String requestedName) {
+        String normalized = Normalizer.normalize(
+                Objects.requireNonNull(requestedName, "requestedName"), Normalizer.Form.NFKC);
+        String name = withoutTrailingDotsAndSpaces(replaceUnsafeCharacters(normalized).strip());
+        if (name.isEmpty()) {
+            name = DEFAULT_NAME;
         }
-        if (result.isBlank()) {
-            result = "Restored World";
+        name = withoutTrailingDotsAndSpaces(truncateCodePoints(name, MAXIMUM_DIRECTORY_NAME_CODE_POINTS));
+        if (name.isEmpty()) {
+            name = DEFAULT_NAME;
         }
-        String stem = result.split("\\.", 2)[0].toUpperCase(Locale.ROOT);
-        return WINDOWS_DEVICE_NAMES.contains(stem) ? "_" + result : result;
+        String stem = name.split("\\.", 2)[0].toUpperCase(Locale.ROOT);
+        return WINDOWS_DEVICE_NAMES.contains(stem) ? "_" + name : name;
+    }
+
+    private static String replaceUnsafeCharacters(String name) {
+        StringBuilder safe = new StringBuilder(name.length());
+        name.codePoints().forEach(codePoint -> {
+            boolean unsafe = codePoint < 32 || codePoint == 127 || "<>:\"/\\|?*".indexOf(codePoint) >= 0;
+            safe.appendCodePoint(unsafe ? '_' : codePoint);
+        });
+        return safe.toString();
+    }
+
+    private static String withoutTrailingDotsAndSpaces(String name) {
+        int end = name.length();
+        while (end > 0 && (name.charAt(end - 1) == '.' || name.charAt(end - 1) == ' ')) {
+            end--;
+        }
+        return name.substring(0, end);
     }
 
     private static String appendSuffix(String base, int index) {
         String suffix = " (" + index + ")";
-        int maximumBase = MAXIMUM_DIRECTORY_NAME_CODE_POINTS
-                - suffix.codePointCount(0, suffix.length());
-        return truncateCodePoints(base, maximumBase) + suffix;
+        return truncateCodePoints(base, MAXIMUM_DIRECTORY_NAME_CODE_POINTS - suffix.length()) + suffix;
     }
 
     private static String truncateCodePoints(String value, int maximum) {
-        int count = value.codePointCount(0, value.length());
-        return count <= maximum
+        return value.codePointCount(0, value.length()) <= maximum
                 ? value
                 : value.substring(0, value.offsetByCodePoints(0, maximum));
     }
@@ -248,141 +230,5 @@ final class RestoreWorkspace {
             names.add("LPT" + index);
         }
         return Set.copyOf(names);
-    }
-
-    private static void deleteTree(Path root, Path target) throws IOException {
-        Path safeRoot = root.toAbsolutePath().normalize();
-        Path safeTarget = target.toAbsolutePath().normalize();
-        if (safeTarget.equals(safeRoot) || !Objects.equals(safeTarget.getParent(), safeRoot)) {
-            throw new IOException("Refusing to remove a path outside the worlds directory");
-        }
-        if (!Files.exists(safeTarget, LinkOption.NOFOLLOW_LINKS)) {
-            return;
-        }
-        Files.walkFileTree(safeTarget, new SimpleFileVisitor<>() {
-            @Override
-            public FileVisitResult preVisitDirectory(
-                    Path directory,
-                    BasicFileAttributes attributes) throws IOException {
-                if (!FileSystemSafety.isOrdinaryDirectory(directory, attributes)) {
-                    Files.delete(directory);
-                    return FileVisitResult.SKIP_SUBTREE;
-                }
-                return FileVisitResult.CONTINUE;
-            }
-
-            @Override
-            public FileVisitResult visitFile(Path file, BasicFileAttributes attributes)
-                    throws IOException {
-                Files.delete(file);
-                return FileVisitResult.CONTINUE;
-            }
-
-            @Override
-            public FileVisitResult postVisitDirectory(Path directory, IOException exception)
-                    throws IOException {
-                if (exception != null) {
-                    throw exception;
-                }
-                Files.delete(directory);
-                return FileVisitResult.CONTINUE;
-            }
-        });
-    }
-
-    record Staging(
-            Path path,
-            Object fileKey,
-            FileTime creationTime,
-            Optional<String> identityMarker) {
-        Staging afterMaterialization(
-                RecoveryDestination.Materialization materialization) throws IOException {
-            if (!path.equals(materialization.path())) {
-                throw new IOException("Restore destination changed its staging path");
-            }
-            if (materialization.preservesDirectoryIdentity()) {
-                requireUnchanged();
-                return this;
-            }
-            if (materialization.fileKey() == null
-                    && materialization.directoryIdentityMarker().isEmpty()) {
-                throw new IOException("Restored directory has no stable identity");
-            }
-            Staging replacement = new Staging(
-                    path,
-                    materialization.fileKey(),
-                    materialization.creationTime(),
-                    materialization.directoryIdentityMarker());
-            replacement.requireUnchanged();
-            return replacement;
-        }
-
-        void requireUnchanged() throws IOException {
-            requireIdentityAt(path);
-        }
-
-        void requireIdentityAt(Path candidate) throws IOException {
-            BasicFileAttributes attributes = Files.readAttributes(
-                    candidate, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-            Optional<String> currentMarker = identityMarker.isPresent()
-                    ? DirectoryIdentityMarker.read(candidate)
-                    : Optional.empty();
-            boolean sameIdentity = fileKey != null
-                    ? Objects.equals(fileKey, attributes.fileKey())
-                    : identityMarker.isPresent() && identityMarker.equals(currentMarker);
-            boolean sameMarker = identityMarker.isEmpty() || identityMarker.equals(currentMarker);
-            if (!sameIdentity
-                    || !sameMarker
-                    || !FileSystemSafety.isOrdinaryDirectory(candidate, attributes)) {
-                throw new IOException("Private restore staging changed during restoration");
-            }
-        }
-    }
-
-    private record Root(Path path, Object fileKey, FileTime creationTime) {
-        private static Root open(Path requested) throws IOException {
-            Path normalized = Objects.requireNonNull(requested, "requested")
-                    .toAbsolutePath()
-                    .normalize();
-            Files.createDirectories(normalized);
-            if (Files.isSymbolicLink(normalized)
-                    || FileSystemSafety.isWindowsReparsePoint(normalized)) {
-                throw new IOException("Worlds directory must not be a link or reparse point");
-            }
-            Path real = normalized.toRealPath();
-            if (real.getParent() == null || real.getFileName() == null) {
-                throw new IOException("Worlds directory must not be a filesystem root");
-            }
-            BasicFileAttributes attributes = Files.readAttributes(
-                    real, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-            if (!FileSystemSafety.isOrdinaryDirectory(real, attributes)) {
-                throw new IOException("Worlds directory is unsafe");
-            }
-            return new Root(real, attributes.fileKey(), attributes.creationTime());
-        }
-
-        private void requireUnchanged() throws IOException {
-            if (!path.toRealPath().equals(path)) {
-                throw new IOException("Worlds directory changed during restore");
-            }
-            BasicFileAttributes attributes = Files.readAttributes(
-                    path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-            boolean sameIdentity = fileKey != null
-                    ? Objects.equals(fileKey, attributes.fileKey())
-                    : Objects.equals(creationTime, attributes.creationTime());
-            if (!sameIdentity || !FileSystemSafety.isOrdinaryDirectory(path, attributes)) {
-                throw new IOException("Worlds directory changed during restore");
-            }
-        }
-    }
-
-    @FunctionalInterface
-    interface DirectoryMove {
-        Path move(Path source, Path target, CopyOption... options) throws IOException;
-    }
-
-    @FunctionalInterface
-    interface StagingCreationHook {
-        void afterCreate(Path path) throws IOException;
     }
 }

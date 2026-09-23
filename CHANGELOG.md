@@ -1,5 +1,185 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Breaking.** WorldArchive no longer reads settings files from WorldArchive 0.1.0. The
+  settings screen says so and offers **Reset settings**, which keeps the old file. Settings
+  from 0.1.1 and newer load as before.
+- **Breaking.** WorldArchive no longer reads the shared Git repository of WorldArchive 0.1.0.
+  Its backups stay out of the backup list until you import them one time. Open **World
+  Backups** and click **Import**. Paste the local path of the repository into **Repository
+  address**, then click **Find Backups from Repository**. The default path was
+  `.minecraft/worldarchive/worldarchive.git`.
+- Each backup copies the world faster, up to four files at the same time, so autosave stops for
+  a shorter time. A backup of an open world checks every file twice. A backup of a closed world
+  reads each file once.
+- A backup never makes a Git or ZIP folder that you chose when that folder is missing, for
+  example because its drive is not connected. The backup to that folder fails and says that the
+  folder cannot be reached. When you save the settings with a new folder, WorldArchive makes it.
+  The default folders in `worldarchive` are still made when a backup needs them.
+- **Verify** tells you when the checksum file (`.sha256`) of a ZIP backup is missing.
+- Git backups are much faster. A backup starts a few Git commands instead of one for each file,
+  and it copies only new Git LFS files. The full repository check with `git fsck` no longer
+  runs after each backup. **Verify** still reads every file of the backup.
+- A ZIP backup writes its archive one time and reads it back one time to check it. ZIP backups
+  no longer use the temporary folder of your system.
+- A delete of many backups and the backup scan at start are much faster. A Git delete also
+  frees its space on this computer at once.
+- **World Backups** checks the storage of each world one time when you open it. Before, it
+  scanned every backup folder again each time you came back to it.
+- The schedule skips a world that did not run since its last backup, for example while the
+  game is paused. A skip makes no save and shows no message. Before, the save before each
+  scheduled backup changed the world, so the schedule never skipped.
+- **Sync**, **Verify**, and **Restore** now have a **Cancel** button.
+- The delete prompt names each backup by date and label. It also says how many copies are on
+  the Git remote and how many backups have a label. The delete removes the remote copies too.
+- A delete prompt no longer expires. WorldArchive deletes only the copies that the prompt
+  showed. If a backup changed after you confirmed, WorldArchive deletes nothing of it and
+  says why.
+- Delete results name each backup by date and label.
+- The cleanup confirmation shows the same date, label, and changes as the preview. The cleanup
+  result says why each kept backup stayed. It also warns you when Git could not free the space
+  yet.
+- The backup filter matches labels, triggers as the list shows them, such as "world exit",
+  and the start of a backup ID. It no longer matches the world name, which every row has.
+- **Review Cleanup** stays off until you save the storage limits. A storage limit accepts a
+  comma as the decimal mark, for example "1,5".
+- The settings file no longer stores the default backup folders. A copied or moved game folder
+  uses its own backup folders.
+- **Defaults** on the settings screen keeps your backup folders.
+- Before WorldArchive upgrades an older settings file, it keeps a copy named
+  `worldarchive.json.schema<number>.bak`.
+- The screens say "remote" where they said "GitHub". The **Worlds** tab now says that
+  **Sync** tries a failed upload again. Before, it said that the next backup does.
+
+### Fixed
+
+- A save that replaces `level.dat` while a backup copies the world no longer fails the backup.
+  The backup copies the file again.
+- WorldArchive can back up a world that contains a `.git` folder or file, for example a data
+  pack that is a Git clone. The backup leaves out every `.git` entry.
+- A saves folder or a world folder that is a symbolic link or a Windows junction now works.
+  WorldArchive uses the real folder. A link inside a world still stops a backup.
+- When a file name or a link stops a backup, the message names the file.
+- Cancel during a Git upload keeps the copies that are already complete.
+- When the backup list cannot be saved after a backup, the result says so. The next start lists
+  the backup again.
+- A second game that uses the same WorldArchive folder no longer deletes the world copy of a
+  backup that the first game makes.
+- A backup of the open world no longer turns autosave on again after `/save-off`.
+- A schedule that you turned off no longer gives warnings.
+- Menus no longer freeze while a backup runs. A change to a backup folder while a backup runs
+  gets a message that asks you to try again later.
+- An error in WorldArchive while a world opens, saves, or closes no longer reaches the game, also
+  a Java error such as a missing class. A backup that the error stops fails with a notice.
+- A backup that you start while the previous one gives autosave back no longer leaves autosave
+  off. WorldArchive asks you to try again in a moment.
+- One file with a date in the future, as in some downloaded maps, no longer lets a backup of a
+  closed world miss a change that the game made during the copy.
+- When you quit during a backup, the game waits at most about 35 seconds, world copy included.
+  A notice at the next start says what did not finish.
+- A world whose name has no readable text gets automatic backups. WorldArchive uses the folder
+  name.
+- A label keeps the exact text that you typed. Before, the credential filter could change it.
+- One damaged object in a Git repository, for example after a power loss, no longer makes every
+  later Git backup of that world fail.
+- A lock file that a stopped Git process left behind no longer blocks backups and deletes.
+- Hooks in a world's Git repository never run. A `core.hooksPath` in your global Git settings no
+  longer breaks Git backups, and WorldArchive no longer writes Git LFS hooks into that folder.
+- A remote that does not allow changes to `main` no longer makes uploads fail.
+- When a remote refuses a delete, nothing changes on the remote. Before, `main` could move
+  although the delete failed.
+- A delete of an imported Git backup also removes it from the world's remote.
+- A deleted Git backup no longer comes back after a restart.
+- A remote with more than 256 backups can be imported. When one backup of an import cannot be
+  downloaded, the other backups still import.
+- When this computer's Git copy of a backup is damaged, a restore uses the remote copy and
+  repairs the local one.
+- WorldArchive writes Git backups to disk before it reports them complete. It also writes the
+  Git LFS files that a restore or an import downloads to disk before it records them.
+- When **Verify** or a restore finds a damaged Git LFS file, WorldArchive moves it out of the
+  way. The next backup writes the file again, and a restore gets it again from the remote.
+  Before, later backups used the damaged file and reported success.
+- A file that holds the text of a Git LFS pointer, for example in a data pack cloned without
+  Git LFS, no longer makes every Git backup of the world fail.
+- A cancel right after a Git backup was written no longer reports that backup as failed. It
+  waits for its upload as pending sync.
+- **Open Folder** no longer makes an empty Git folder. The first Git backup also works when such
+  a folder is there.
+- A ZIP backup that lost its `.sha256` file stays in the list, and it verifies and restores.
+- The next backup removes the files that a crash left in a ZIP folder. It keeps the checksum
+  file (`.sha256`) of an archive that is missing for a moment, for example while a sync tool
+  delivers it.
+- **Verify** and import refuse a ZIP archive with a folder entry that has the name of a file. No
+  restore can write such an archive.
+- **Verify** and import refuse a ZIP backup whose checksum file is gone and whose end is cut
+  short, because other ZIP programs cannot open it. WorldArchive can still restore it.
+- The ZIP folder of a world can be a link to another drive. Before, the list and delete did
+  not see the archives there.
+- **Verify** says "unavailable" instead of "damaged" when it cannot read a ZIP archive, for
+  example on a drive that is not connected.
+- Messages for a full drive, a missing ZIP folder, and a failed delete say what happened and
+  what to do.
+- An import never writes into the folder that you choose. Identical copies of one archive
+  import one time.
+- On Windows, WorldArchive tries again for a short time when another program, such as an
+  antivirus scanner, holds a file.
+- A delete that leaves a copy now reports that it failed. Before, a backup whose remote refused
+  the delete counted as deleted.
+- A delete fails when a backup folder that you chose cannot be reached, for example on a drive
+  that is not connected, and nothing is made in its place. Before, the delete said that the
+  backup was deleted, and the backup came back later. If you remove a world's folder by hand
+  from WorldArchive's default backup folders, you can still delete its backups.
+- A deleted backup whose files are on a drive that was not connected at a start no longer comes
+  back when the drive is back.
+- A delete that you confirmed before a sync finished no longer deletes the remote copy that the
+  sync made. WorldArchive deletes nothing and says that the backup changed.
+- A delete of a ZIP backup whose archive has a new name now also deletes that archive when only
+  the checksum file kept the old name.
+- A failure message with a line break no longer stops a delete.
+- After you remove a world's remote from its settings, a delete removes the copies on this
+  computer and says that the copy on the old remote stays. A backup whose only copy is on that
+  remote stays in the list, and the result tells you to add the remote again.
+- Cleanup decides from the files on disk. A backup whose last copy is gone leaves the backup
+  list. Before, cleanup could promise a copy that no longer existed.
+- Cleanup never offers the last intact copy of a labeled backup. Before, it could offer the Git
+  copy of a labeled backup whose ZIP archive **Verify** had found damaged.
+- WorldArchive moves a damaged backup list to `catalog.json.corrupt-<time>`, keeps every entry
+  that it can still read, and lists the other backups from the files again. A Git copy that it
+  lists again stays synced when the world's remote has it. It still refuses a backup list from
+  a newer WorldArchive.
+- The backup scan continues when one repository or ZIP folder cannot be read. A backup that
+  completes during the scan keeps its record.
+- When no copy can restore a backup, the message gives the reason for each copy.
+- A restore from **Edit World** keeps the original world in the world list.
+- A settings save during a restore no longer makes the restore fail, and the unfinished folder
+  of a restore never becomes a world in the settings.
+- A default backup folder that is a link to a drive that is not connected no longer makes the
+  settings unreadable. Only the backups to that folder fail.
+- **Reset settings** keeps a settings file that can be read again, for example after another
+  game window fixed it.
+- A restore into a saves folder that is a link puts the new world into the real folder.
+- An import no longer reports a failure when only the world's remote could not be saved. The
+  backups are imported.
+- An import error shows the reason.
+- The backup list reloads when a background backup of the world completes. The filter keeps its
+  cursor while the list reloads.
+- WorldArchive never saves over a settings file that it cannot read. Backups pause, and the
+  settings screen shows the reason. **Reset settings** keeps the old file as
+  `worldarchive.json.unreadable-<time>`. After you fix the file and open the settings screen
+  again, backups start without a restart.
+- Settings that name a folder on a drive that is not connected now load.
+- A copy of a world folder gets its own backup history. Before, the copy and the original
+  shared one history.
+- Two open game windows no longer erase each other's settings changes.
+- World names such as "Basic Survival" or "Secret=Base" can be saved. WorldArchive looks for
+  credentials only in remote addresses.
+- The remote forms `ssh://user@host:port/path` and `host:path` are accepted, and so is a local
+  path that contains `%`.
+- An import no longer replaces a remote that a world already has.
+
 ## 0.4.0 (2026-09-15)
 
 ### Changed

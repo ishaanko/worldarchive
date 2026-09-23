@@ -1,19 +1,31 @@
 package dev.ishaanko.worldarchive.ui.model;
 
-import dev.ishaanko.worldarchive.core.BackupOperation;
+import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.BackupResult;
 import dev.ishaanko.worldarchive.model.BackupStatus;
+import dev.ishaanko.worldarchive.model.DestinationResult;
 import dev.ishaanko.worldarchive.model.DestinationStatus;
+import dev.ishaanko.worldarchive.model.SafeText;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
-/** Presentation summary for a multi-backup delete: counts plus one line per problem. */
+/**
+ * What a delete of one or more backups did: how many are gone, one line for each copy that is
+ * still there, and one for each note of a deleted copy, such as a copy on a remote that is no
+ * longer in the settings. Lines name the backup the way the browser does. A backup counts as
+ * deleted only when no copy of it is left, because until then it stays listed.
+ */
 public record DeleteBatchSummary(
         BackupStatus status,
         String headline,
         List<String> details) {
     private static final int MAXIMUM_DETAIL_LINES = 6;
+
+    private static final int MAXIMUM_REASON_LENGTH = 160;
 
     public DeleteBatchSummary {
         Objects.requireNonNull(status, "status");
@@ -21,51 +33,58 @@ public record DeleteBatchSummary(
         details = List.copyOf(details);
     }
 
-    public static DeleteBatchSummary from(List<BackupResult> results) {
-        Objects.requireNonNull(results, "results");
-        int removed = 0;
-        List<String> problems = new ArrayList<>();
+    /** Summarizes {@code results}; {@code rows} are the browser rows that were confirmed. */
+    public static DeleteBatchSummary from(List<BackupResult> results, List<BackupRow> rows) {
+        Map<BackupId, BackupRow> confirmed = rows.stream()
+                .collect(Collectors.toMap(BackupRow::backupId, Function.identity(), (first, second) -> first));
+        int deleted = 0;
+        List<String> lines = new ArrayList<>();
         for (BackupResult result : results) {
-            BackupOutcomeSummary summary = BackupOutcomeSummary.from(BackupOperation.DELETE, result);
-            if (summary.status() == BackupStatus.SUCCESS || summary.status() == BackupStatus.SKIPPED) {
-                removed++;
-                continue;
-            }
-            if (summary.status() == BackupStatus.PARTIAL_SUCCESS) {
-                removed++;
-            }
-            for (DestinationOutcomeView destination : summary.destinations()) {
-                if (destination.status() == DestinationStatus.FAILED) {
-                    problems.add(shortId(result) + " · " + destination.destination() + ": "
-                            + destination.detail().orElse("not deleted"));
-                } else if (destination.status() == DestinationStatus.PENDING_SYNC) {
-                    problems.add(shortId(result) + " · " + destination.destination() + ": "
-                            + destination.detail().orElse("deletion pending"));
+            String name = confirmed.containsKey(result.backupId())
+                    ? BackupText.name(confirmed.get(result.backupId()))
+                    : result.backupId().toString();
+            boolean gone = true;
+            for (DestinationResult destination : result.destinations()) {
+                boolean kept = leftBehind(destination);
+                gone &= !kept;
+                if (kept || destination.message().isPresent()) {
+                    lines.add(name + BackupText.SEPARATOR + line(destination));
                 }
             }
+            if (gone) {
+                deleted++;
+            }
+        }
+        List<String> details = new ArrayList<>(lines.subList(0, Math.min(lines.size(), MAXIMUM_DETAIL_LINES)));
+        if (lines.size() > MAXIMUM_DETAIL_LINES) {
+            details.add("…and " + (lines.size() - MAXIMUM_DETAIL_LINES) + " more");
         }
         int total = results.size();
-        BackupStatus status;
-        String headline;
-        if (problems.isEmpty()) {
-            status = BackupStatus.SUCCESS;
-            headline = "Deleted " + total + " backups";
-        } else if (removed == 0) {
-            status = BackupStatus.FAILED;
-            headline = "No backups were deleted";
-        } else {
-            status = BackupStatus.PARTIAL_SUCCESS;
-            headline = "Deleted " + removed + " of " + total + " backups";
+        if (deleted == total) {
+            return new DeleteBatchSummary(
+                    BackupStatus.SUCCESS,
+                    total == 1 ? "Deleted 1 backup" : "Deleted " + total + " backups",
+                    details);
         }
-        List<String> details = new ArrayList<>(problems.subList(
-                0, Math.min(problems.size(), MAXIMUM_DETAIL_LINES)));
-        if (problems.size() > MAXIMUM_DETAIL_LINES) {
-            details.add("…and " + (problems.size() - MAXIMUM_DETAIL_LINES) + " more problems");
+        if (deleted == 0) {
+            return new DeleteBatchSummary(BackupStatus.FAILED, "No backups were deleted", details);
         }
-        return new DeleteBatchSummary(status, headline, details);
+        return new DeleteBatchSummary(
+                BackupStatus.PARTIAL_SUCCESS,
+                "Deleted " + deleted + " of " + total + " backups",
+                details);
     }
 
-    private static String shortId(BackupResult result) {
-        return result.backupId().toString().substring(0, 8);
+    /** True when the delete kept this copy: it failed, or its remote deletion still waits. */
+    private static boolean leftBehind(DestinationResult destination) {
+        return destination.status() == DestinationStatus.FAILED
+                || destination.status() == DestinationStatus.PENDING_SYNC;
+    }
+
+    private static String line(DestinationResult destination) {
+        String reason = destination.message()
+                .map(message -> SafeText.clean(message, MAXIMUM_REASON_LENGTH))
+                .orElse(destination.status() == DestinationStatus.PENDING_SYNC ? "deletion pending" : "not deleted");
+        return destination.destination() + ": " + reason;
     }
 }

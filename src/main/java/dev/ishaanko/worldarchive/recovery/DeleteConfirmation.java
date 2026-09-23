@@ -1,75 +1,53 @@
 package dev.ishaanko.worldarchive.recovery;
 
 import dev.ishaanko.worldarchive.model.ArtifactOwnership;
-import dev.ishaanko.worldarchive.model.BackupId;
-import dev.ishaanko.worldarchive.model.BackupManifest;
 import dev.ishaanko.worldarchive.model.BackupRecord;
 import dev.ishaanko.worldarchive.model.DestinationResult;
-import dev.ishaanko.worldarchive.model.DestinationStatus;
 import dev.ishaanko.worldarchive.model.DestinationType;
 import dev.ishaanko.worldarchive.model.ImportSourceId;
-import java.time.Instant;
-import java.util.Objects;
+import dev.ishaanko.worldarchive.model.SyncStatus;
+import java.util.Collection;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-/** Exact backup and artifact scope approved by one delete preview. */
-record DeleteConfirmation(
-        BackupId backupId,
-        BackupManifest manifest,
-        Set<ConfirmedDestination> destinations,
-        Instant expiresAt) {
+/** The copies of a backup that the player saw when confirming its delete. */
+record DeleteConfirmation(Set<ConfirmedCopy> copies) {
     DeleteConfirmation {
-        Objects.requireNonNull(backupId, "backupId");
-        Objects.requireNonNull(manifest, "manifest");
-        destinations = Set.copyOf(Objects.requireNonNull(destinations, "destinations"));
-        Objects.requireNonNull(expiresAt, "expiresAt");
+        copies = Set.copyOf(copies);
     }
 
-    static DeleteConfirmation create(BackupRecord record, Instant expiresAt) {
-        return new DeleteConfirmation(
-                record.manifest().backupId(),
-                record.manifest(),
-                destinations(record),
-                expiresAt);
+    /** What a delete request confirmed: its copies that hold the backup. */
+    static DeleteConfirmation of(Collection<DestinationResult> shown) {
+        return new DeleteConfirmation(shown.stream()
+                .filter(DestinationResult::isDurable)
+                .map(ConfirmedCopy::of)
+                .collect(Collectors.toUnmodifiableSet()));
     }
 
-    /** Destination types the user approved; used to report a deletion that never started. */
-    Set<DestinationType> destinationTypes() {
-        return destinations.stream()
-                .map(ConfirmedDestination::type)
-                .collect(Collectors.toUnmodifiableSet());
+    /** Whether the record still lists exactly the copies that were confirmed. */
+    boolean matches(BackupRecord current) {
+        return copies.equals(of(current.result().destinations()).copies());
     }
 
-    void requireMatches(BackupRecord current) {
-        if (!manifest.equals(current.manifest())
-                || !destinations.equals(destinations(current))) {
-            throw new BackupRecoveryException(
-                    "The backup changed after deletion was confirmed");
-        }
+    /** The kinds of copy that were confirmed, to report a delete that did not start. */
+    Set<DestinationType> copyTypes() {
+        return copies.stream().map(ConfirmedCopy::type).collect(Collectors.toUnmodifiableSet());
     }
 
-    private static Set<ConfirmedDestination> destinations(BackupRecord record) {
-        return record.result().destinations().stream()
-                .filter(result -> result.artifactId().isPresent()
-                        && (result.status() == DestinationStatus.SUCCESS
-                                || result.status() == DestinationStatus.PENDING_SYNC))
-                .map(ConfirmedDestination::from)
-                .collect(Collectors.toUnmodifiableSet());
-    }
-
-    private record ConfirmedDestination(
+    /**
+     * One confirmed copy: which artifact, whose, and whether it was on a remote. The prompt names a
+     * remote copy only for a synced backup, so a copy synced after the player confirmed is another copy.
+     */
+    record ConfirmedCopy(
             DestinationType type,
             String artifactId,
             ArtifactOwnership ownership,
-            Optional<ImportSourceId> importSourceId) {
-        private static ConfirmedDestination from(DestinationResult result) {
-            return new ConfirmedDestination(
-                    result.destination(),
-                    result.artifactId().orElseThrow(),
-                    result.ownership(),
-                    result.importSourceId());
+            Optional<ImportSourceId> importSourceId,
+            SyncStatus syncStatus) {
+        private static ConfirmedCopy of(DestinationResult result) {
+            return new ConfirmedCopy(result.destination(), result.artifactId().orElseThrow(), result.ownership(),
+                    result.importSourceId(), result.syncStatus());
         }
     }
 }

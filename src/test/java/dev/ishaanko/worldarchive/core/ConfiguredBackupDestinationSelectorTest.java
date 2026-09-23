@@ -8,12 +8,11 @@ import dev.ishaanko.worldarchive.config.WorldConfig;
 import dev.ishaanko.worldarchive.model.BackupTrigger;
 import dev.ishaanko.worldarchive.model.DestinationResult;
 import dev.ishaanko.worldarchive.model.DestinationType;
+import dev.ishaanko.worldarchive.model.ProgressListener;
 import dev.ishaanko.worldarchive.model.WorldId;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -42,11 +41,10 @@ final class ConfiguredBackupDestinationSelectorTest {
                 selector.select(request(worldId, world, BackupTrigger.SCHEDULED)));
 
         configuration.set(new WorldArchiveConfig(
-                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
                 defaults.triggers(),
                 defaults.git(),
                 defaults.zip(),
-                List.of(new WorldConfig(worldId, false, world))));
+                List.of(WorldConfig.defaults(worldId, world).withEnabled(false))));
         assertEquals(
                 List.of(),
                 selector.select(request(worldId, world, BackupTrigger.MANUAL)));
@@ -58,11 +56,10 @@ final class ConfiguredBackupDestinationSelectorTest {
         WorldId worldId = WorldId.create();
         Path configuredPath = temporaryDirectory.resolve("original-world");
         WorldArchiveConfig config = new WorldArchiveConfig(
-                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
                 defaults.triggers(),
                 defaults.git(),
                 defaults.zip(),
-                List.of(new WorldConfig(worldId, true, configuredPath)));
+                List.of(WorldConfig.defaults(worldId, configuredPath)));
         ConfiguredBackupDestinationSelector selector = new ConfiguredBackupDestinationSelector(
                 () -> config,
                 List.of(backend(DestinationType.GIT), backend(DestinationType.ZIP)));
@@ -98,12 +95,10 @@ final class ConfiguredBackupDestinationSelectorTest {
             }
 
             @Override
-            public CompletionStage<DestinationResult> createBackup(
+            public DestinationResult createBackup(
                     BackupCapture capture,
                     ProgressListener progressListener) {
-                return CompletableFuture.completedFuture(DestinationResult.success(
-                        destination,
-                        destination.name().toLowerCase()));
+                return DestinationResult.success(destination, destination.name().toLowerCase());
             }
         };
     }

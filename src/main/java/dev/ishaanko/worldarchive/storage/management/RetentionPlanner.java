@@ -16,11 +16,15 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
 
-/** Deterministic story-preserving daily, weekly, and monthly anchor selection. */
+/**
+ * Which backups cleanup keeps: every labeled backup, the newest verified one, and one per period
+ * for the most recent days, then weeks, then months that have backups. Within a period, a manual
+ * backup and one with more changed files is the one kept. Cleanup takes the rest in reverse order
+ * of that preference.
+ */
 public final class RetentionPlanner {
     private static final Comparator<BackupRecord> REPRESENTATIVE_ORDER = Comparator
             .comparing((BackupRecord record) ->
@@ -36,7 +40,7 @@ public final class RetentionPlanner {
             List<BackupRecord> records,
             StoragePolicy policy,
             ZoneId zoneId,
-            Optional<BackupId> verifiedSafetyFloor) {
+            BackupId verifiedSafetyFloor) {
         Objects.requireNonNull(records, "records");
         Objects.requireNonNull(policy, "policy");
         Objects.requireNonNull(zoneId, "zoneId");
@@ -47,7 +51,7 @@ public final class RetentionPlanner {
                 .filter(record -> record.manifest().label().isPresent())
                 .map(record -> record.manifest().backupId())
                 .forEach(protectedIds::add);
-        verifiedSafetyFloor.ifPresent(protectedIds::add);
+        protectedIds.add(verifiedSafetyFloor);
 
         List<BackupRecord> remaining = records.stream()
                 .sorted(Comparator
@@ -76,23 +80,15 @@ public final class RetentionPlanner {
         return Set.copyOf(protectedIds);
     }
 
+    /** The unprotected backups, the ones cleanup should take first at the front. */
     public static List<BackupRecord> cleanupOrder(
             List<BackupRecord> records,
             Set<BackupId> protectedBackups) {
         Objects.requireNonNull(records, "records");
         Objects.requireNonNull(protectedBackups, "protectedBackups");
         return records.stream()
-                .filter(record -> !protectedBackups.contains(
-                        record.manifest().backupId()))
-                .sorted(Comparator
-                        .comparing((BackupRecord record) ->
-                                record.manifest().trigger() == BackupTrigger.MANUAL)
-                        .thenComparingLong(record ->
-                                record.manifest().changedFileCount())
-                        .thenComparing(record ->
-                                record.manifest().createdAt())
-                        .thenComparing(record ->
-                                record.manifest().backupId()))
+                .filter(record -> !protectedBackups.contains(record.manifest().backupId()))
+                .sorted(REPRESENTATIVE_ORDER)
                 .toList();
     }
 

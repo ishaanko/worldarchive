@@ -1,17 +1,15 @@
 package dev.ishaanko.worldarchive.ui;
 
-import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.storage.management.CleanupItem;
 import dev.ishaanko.worldarchive.storage.management.CleanupPlan;
+import dev.ishaanko.worldarchive.ui.model.BackupText;
+import dev.ishaanko.worldarchive.ui.model.BackupWorldContext;
+import dev.ishaanko.worldarchive.ui.model.CleanupSelection;
+import dev.ishaanko.worldarchive.ui.model.Paging;
 import dev.ishaanko.worldarchive.ui.model.ScreenGeometry;
-import java.time.ZoneId;
-import java.time.format.DateTimeFormatter;
-import java.time.format.FormatStyle;
-import java.util.HashSet;
+import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.Objects;
-import java.util.Set;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.MultiLineTextWidget;
@@ -20,12 +18,12 @@ import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 
-/** Selectable exact cleanup preview; no mutation occurs on this screen. */
+/**
+ * Lets the player choose which backups of a cleanup plan to delete. Nothing changes on this
+ * screen; Continue opens the final confirmation, and leaving discards the plan.
+ */
 final class CleanupPreviewScreen extends Screen {
-    private static final DateTimeFormatter DATE = DateTimeFormatter
-            .ofLocalizedDateTime(FormatStyle.SHORT)
-            .withLocale(Locale.getDefault())
-            .withZone(ZoneId.systemDefault());
+    private static final int ROW_HEIGHT = 24;
 
     private static final int CONTENT_MIN = 240;
 
@@ -41,7 +39,7 @@ final class CleanupPreviewScreen extends Screen {
 
     private final CleanupPlan plan;
 
-    private final Set<BackupId> selected = new HashSet<>();
+    private final CleanupSelection selection;
 
     private int page;
 
@@ -55,7 +53,7 @@ final class CleanupPreviewScreen extends Screen {
         this.world = Objects.requireNonNull(world, "world");
         this.facade = Objects.requireNonNull(facade, "facade");
         this.plan = Objects.requireNonNull(plan, "plan");
-        plan.items().forEach(item -> selected.add(item.backupId()));
+        selection = new CleanupSelection(plan);
     }
 
     @Override
@@ -63,119 +61,56 @@ final class CleanupPreviewScreen extends Screen {
         int contentWidth = ScreenGeometry.contentWidth(width, CONTENT_MIN, CONTENT_MAX, CONTENT_MARGIN);
         int x = ScreenGeometry.centerX(width, contentWidth);
         addRenderableOnly(Widgets.title(font, x, 9, contentWidth, 20, title));
-        String summary = plan.items().isEmpty()
-                ? "Nothing to clean up right now. Your keep settings protect every backup."
-                : "Choose which backups to delete from this computer. Copies on GitHub are kept and stay listed; use Delete to remove one from GitHub.";
-        addRenderableOnly(new MultiLineTextWidget(
-                        x,
-                        31,
-                        Component.literal(summary),
-                        font)
+        Component summary = plan.items().isEmpty()
+                ? Component.literal("Nothing to clean up right now. Your keep settings protect every backup.")
+                : Component.translatable("screen.worldarchive.cleanup.choose");
+        addRenderableOnly(new MultiLineTextWidget(x, 31, summary, font)
                 .setMaxWidth(contentWidth)
                 .setMaxRows(2));
-        int pageSize = Math.max(1, Math.min(7, (height - 132) / 24));
-        int pageCount = Math.max(1, (plan.items().size() + pageSize - 1) / pageSize);
-        page = Math.min(page, pageCount - 1);
-        addItems(x, contentWidth, pageSize);
-        addFooter(x, contentWidth, pageCount);
-    }
-
-    private void addItems(int x, int contentWidth, int pageSize) {
-        int first = page * pageSize;
-        int limit = Math.min(plan.items().size(), first + pageSize);
+        Paging paging = Paging.of(plan.items().size(), Math.min(7, (height - 132) / ROW_HEIGHT), page);
+        page = paging.pageIndex();
         int y = 72;
-        for (int index = first; index < limit; index++) {
-            CleanupItem item = plan.items().get(index);
-            boolean checked = selected.contains(item.backupId());
-            String label = (checked ? "[x] " : "[ ] ")
-                    + DATE.format(item.createdAt())
-                    + " · "
-                    + identity(item)
-                    + " · "
-                    + actions(plan, item)
-                    + " · "
-                    + item.changedFileCount()
-                    + " changed";
-            Button row = Button.builder(Component.literal(label), ignored -> {
-                        toggle(item);
-                        rebuildWidgets();
-                    })
+        for (CleanupItem item : paging.slice(plan.items())) {
+            Button row = Button.builder(
+                            Widgets.checkbox(
+                                    selection.contains(item.backupId()),
+                                    Component.literal(CleanupText.row(plan, item))),
+                            ignored -> {
+                                selection.toggle(item.backupId());
+                                rebuildWidgets();
+                            })
                     .bounds(x, y, contentWidth, 20)
                     .build();
-            row.setTooltip(Tooltip.create(Component.literal(details(item))));
+            row.setTooltip(Tooltip.create(CleanupText.details(item)));
             addRenderableWidget(row);
-            y += 24;
+            y += ROW_HEIGHT;
         }
+        addFooter(x, contentWidth, paging);
     }
 
-    /** Protected backups give up their local Git copies together or not at all. */
-    private void toggle(CleanupItem item) {
-        boolean removing = selected.contains(item.backupId());
-        if (!item.removeGit() || !plan.protectedBackups().contains(item.backupId())) {
-            if (removing) {
-                selected.remove(item.backupId());
-            } else {
-                selected.add(item.backupId());
-            }
-            return;
-        }
-        plan.items().stream()
-                .filter(CleanupItem::removeGit)
-                .map(CleanupItem::backupId)
-                .filter(plan.protectedBackups()::contains)
-                .forEach(backupId -> {
-                    if (removing) {
-                        selected.remove(backupId);
-                    } else {
-                        selected.add(backupId);
-                    }
-                });
-    }
-
-    private void addFooter(int x, int contentWidth, int pageCount) {
-        long estimate = plan.items().stream()
-                .filter(item -> selected.contains(item.backupId()))
-                .mapToLong(CleanupItem::estimatedReclaimableBytes)
-                .sum();
-        boolean selectedTargetReachable =
-                Math.max(0, plan.currentBytes() - estimate) <= plan.targetBytes();
-        String total = selected.size() + " backup(s) selected · frees about "
-                + StorageScreen.bytes(estimate);
-        if (!selectedTargetReachable) {
-            total += plan.targetReachable()
-                    ? " · still over the limit; select more backups"
-                    : " · still over the limit; the rest is protected";
-        }
+    private void addFooter(int x, int contentWidth, Paging paging) {
+        String total = selection.selected().size() + " backup(s) selected · frees about "
+                + BackupText.bytes(selection.freedBytes());
+        CleanupSelection.Coverage coverage = selection.coverage();
+        total += switch (coverage) {
+            case REACHES_TARGET -> "";
+            case SELECT_MORE -> " · still over the limit; select more backups";
+            case REST_PROTECTED -> " · still over the limit; the rest is protected";
+        };
         addRenderableOnly(new StringWidget(
                 x,
                 height - 52,
                 contentWidth,
                 16,
-                        Component.literal(total).withStyle(
-                        selectedTargetReachable
-                                ? ChatFormatting.GRAY
-                                : ChatFormatting.YELLOW),
+                Component.literal(total).withStyle(coverage == CleanupSelection.Coverage.REACHES_TARGET
+                        ? ChatFormatting.GRAY
+                        : ChatFormatting.YELLOW),
                 font));
 
-        int gap = 4;
-        int width = (contentWidth - gap * 3) / 4;
-        int y = height - 28;
-        Button previous = Button.builder(Component.literal("Previous"), ignored -> {
-                    page--;
-                    rebuildWidgets();
-                })
-                .bounds(x, y, width, 20)
-                .build();
-        previous.active = page > 0;
-        addRenderableWidget(previous);
-        Button next = Button.builder(Component.literal("Next"), ignored -> {
-                    page++;
-                    rebuildWidgets();
-                })
-                .bounds(x + width + gap, y, width, 20)
-                .build();
-        next.active = page + 1 < pageCount;
-        addRenderableWidget(next);
+        List<Button> buttons = new ArrayList<>(Widgets.pageButtons(paging, index -> {
+            page = index;
+            rebuildWidgets();
+        }));
         Button continueButton = Button.builder(Component.literal("Continue"), ignored ->
                         minecraft.setScreenAndShow(new CleanupConfirmationScreen(
                                 this,
@@ -183,45 +118,17 @@ final class CleanupPreviewScreen extends Screen {
                                 world,
                                 facade,
                                 plan,
-                                Set.copyOf(selected))))
-                .bounds(x + (width + gap) * 2, y, width, 20)
+                                selection.selected())))
                 .build();
-        continueButton.active = !selected.isEmpty();
-        addRenderableWidget(continueButton);
-        addRenderableWidget(Button.builder(Component.literal("Cancel"), ignored -> onClose())
-                .bounds(x + (width + gap) * 3, y, width, 20)
-                .build());
-    }
-
-    private static String identity(CleanupItem item) {
-        return item.label().orElse(item.backupId().toString().substring(0, 8));
-    }
-
-    private static String actions(CleanupPlan plan, CleanupItem item) {
-        if (plan.protectedBackups().contains(item.backupId())) {
-            return "local Git copy only";
-        }
-        if (item.removeGit() && item.removeZip()) {
-            return "delete Git + ZIP";
-        }
-        return item.removeGit() ? "delete Git" : "delete ZIP";
-    }
-
-    static String details(CleanupItem item) {
-        List<String> artifacts = new java.util.ArrayList<>();
-        item.gitRef().ifPresent(ref -> artifacts.add("Git ref: " + ref));
-        item.zipArtifactId().ifPresent(id -> artifacts.add("ZIP: " + id));
-        artifacts.add("Frees about "
-                + StorageScreen.bytes(item.estimatedReclaimableBytes()));
-        artifacts.add(item.removesRestorePoint()
-                ? "You cannot restore this backup after cleanup."
-                : "Another copy of this backup still exists.");
-        return String.join("\n", artifacts);
+        continueButton.active = !selection.selected().isEmpty();
+        buttons.add(continueButton);
+        buttons.add(Button.builder(Component.literal("Cancel"), ignored -> onClose()).build());
+        Widgets.row(x, height - 28, contentWidth, buttons);
+        buttons.forEach(this::addRenderableWidget);
     }
 
     @Override
     public void onClose() {
-        facade.discardCleanup(plan.confirmationToken());
         minecraft.setScreenAndShow(parent);
     }
 }

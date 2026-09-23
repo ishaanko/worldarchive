@@ -2,96 +2,35 @@ package dev.ishaanko.worldarchive.settings;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-import dev.ishaanko.worldarchive.model.DestinationHealthStatus;
 import java.nio.file.Path;
-import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 class SettingsHealthSnapshotTest {
+    /** Before a probe finishes and after it fails, only the parts that are on and configured change state. */
     @Test
-    void uncheckedSnapshotDistinguishesMissingPathsFromPendingChecks() {
-        SettingsHealthSnapshot missing = SettingsHealthSnapshot.unchecked(new SettingsProbeRequest(
-                true,
-                "git",
-                Optional.empty(),
-                false,
-                true,
-                Optional.empty()));
+    void placeholdersKeepDisabledAndUnconfiguredParts() {
+        SettingsProbeRequest gitWithoutFolder = new SettingsProbeRequest(
+                true, Optional.empty(), false, Optional.of(Path.of("archives")));
+        SettingsProbeRequest bothConfigured = new SettingsProbeRequest(
+                true, Optional.of(Path.of("git")), true, Optional.of(Path.of("archives")));
+        for (SettingsHealthStatus pending : List.of(SettingsHealthStatus.UNCHECKED, SettingsHealthStatus.UNAVAILABLE)) {
+            SettingsHealthSnapshot partial = placeholder(pending, gitWithoutFolder);
+            assertEquals(pending, partial.gitTool().status());
+            assertEquals(pending, partial.lfsTool().status());
+            assertEquals(SettingsHealthStatus.UNCONFIGURED, partial.repository().status());
+            assertEquals(SettingsHealthStatus.DISABLED, partial.zipFolder().status());
 
-        assertEquals(SettingsHealthStatus.UNCHECKED, missing.gitTool().status());
-        assertEquals(SettingsHealthStatus.UNCONFIGURED, missing.repository().status());
-        assertEquals(SettingsHealthStatus.UNCONFIGURED, missing.remote().status());
-        assertEquals(SettingsHealthStatus.UNCONFIGURED, missing.zipDirectory().status());
-        assertEquals(
-                DestinationHealthStatus.UNCONFIGURED,
-                missing.gitDestinationHealth(Instant.EPOCH).status());
-
-        SettingsHealthSnapshot configured = SettingsHealthSnapshot.unchecked(new SettingsProbeRequest(
-                true,
-                "git",
-                Optional.of(Path.of("configured-git")),
-                true,
-                true,
-                Optional.of(Path.of("configured-zip"))));
-
-        assertEquals(SettingsHealthStatus.UNCHECKED, configured.repository().status());
-        assertEquals(SettingsHealthStatus.UNCHECKED, configured.remote().status());
-        assertEquals(SettingsHealthStatus.UNCHECKED, configured.zipDirectory().status());
+            SettingsHealthSnapshot complete = placeholder(pending, bothConfigured);
+            assertEquals(pending, complete.repository().status());
+            assertEquals(pending, complete.zipFolder().status());
+        }
     }
 
-    @Test
-    void disabledDestinationsAreReportedIndependently() {
-        SettingsHealthSnapshot snapshot = SettingsHealthSnapshot.unchecked(new SettingsProbeRequest(
-                false,
-                "git",
-                Optional.empty(),
-                false,
-                true,
-                Optional.of(Path.of("archives"))));
-
-        assertEquals(
-                DestinationHealthStatus.DISABLED,
-                snapshot.gitDestinationHealth(Instant.EPOCH).status());
-        assertEquals(
-                DestinationHealthStatus.UNCONFIGURED,
-                snapshot.zipDestinationHealth(Instant.EPOCH).status());
-    }
-
-    @Test
-    void failedProbePreservesDisabledAndUnconfiguredComponents() {
-        SettingsHealthSnapshot snapshot = SettingsHealthSnapshot.unavailable(
-                new SettingsProbeRequest(
-                        true,
-                        "git",
-                        Optional.empty(),
-                        false,
-                        false,
-                        Optional.of(Path.of("archives"))),
-                "probe failed");
-
-        assertEquals(SettingsHealthStatus.UNAVAILABLE, snapshot.gitTool().status());
-        assertEquals(SettingsHealthStatus.UNCONFIGURED, snapshot.repository().status());
-        assertEquals(SettingsHealthStatus.UNCONFIGURED, snapshot.remote().status());
-        assertEquals(SettingsHealthStatus.DISABLED, snapshot.zipDirectory().status());
-    }
-
-    @Test
-    void displaySummariesStayConciseWhileFullDiagnosticsRemainAvailable() {
-        SettingsHealthSnapshot snapshot = new SettingsHealthSnapshot(
-                new SettingsHealthItem(SettingsHealthStatus.HEALTHY, "git version 2.55.0.windows.3"),
-                new SettingsHealthItem(SettingsHealthStatus.TOOL_MISSING, "Git LFS is not installed"),
-                new SettingsHealthItem(SettingsHealthStatus.HEALTHY, "repository is ready"),
-                new SettingsHealthItem(SettingsHealthStatus.UNCONFIGURED, "not configured"),
-                new SettingsHealthItem(SettingsHealthStatus.HEALTHY, "archive folder is ready"));
-
-        assertEquals(
-                "Git Ready | LFS Missing | Repository Ready | Remote Not Configured",
-                snapshot.gitDisplaySummary());
-        assertEquals("ZIP Folder Ready", snapshot.zipDisplaySummary());
-        assertEquals(
-                "Git git version 2.55.0.windows.3 | LFS Git LFS is not installed"
-                        + " | repository repository is ready | remote not configured",
-                snapshot.gitSummary());
+    private static SettingsHealthSnapshot placeholder(SettingsHealthStatus pending, SettingsProbeRequest request) {
+        return pending == SettingsHealthStatus.UNCHECKED
+                ? SettingsHealthSnapshot.unchecked(request)
+                : SettingsHealthSnapshot.unavailable(request, "probe failed");
     }
 }

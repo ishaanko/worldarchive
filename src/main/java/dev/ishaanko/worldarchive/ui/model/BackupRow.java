@@ -1,129 +1,96 @@
 package dev.ishaanko.worldarchive.ui.model;
 
 import dev.ishaanko.worldarchive.model.BackupId;
+import dev.ishaanko.worldarchive.model.BackupManifest;
 import dev.ishaanko.worldarchive.model.BackupRecord;
-import dev.ishaanko.worldarchive.model.BackupStatus;
 import dev.ishaanko.worldarchive.model.BackupTrigger;
 import dev.ishaanko.worldarchive.model.DestinationResult;
 import dev.ishaanko.worldarchive.model.DestinationType;
 import dev.ishaanko.worldarchive.model.GameVersionStamp;
-import dev.ishaanko.worldarchive.model.SensitiveDataRedactor;
 import dev.ishaanko.worldarchive.model.SyncStatus;
-import dev.ishaanko.worldarchive.model.VerificationStatus;
-import dev.ishaanko.worldarchive.model.WorldId;
 import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.stream.Stream;
 
-/** Deterministic row data for the backup browser. */
+/**
+ * One backup as the browser shows it. The browser builds its rows once per catalog load, off the
+ * render thread, and every browser rule reads rows instead of catalog records.
+ */
 public record BackupRow(
         BackupId backupId,
-        WorldId worldId,
-        String worldName,
         Instant createdAt,
         Optional<String> label,
         BackupTrigger trigger,
-        BackupStatus status,
-        BackupDestinationView git,
-        BackupDestinationView zip,
+        Copy git,
+        Copy zip,
         long logicalSizeBytes,
         long changedFileCount,
         Optional<GameVersionStamp> gameVersion) {
     public BackupRow {
         Objects.requireNonNull(backupId, "backupId");
-        Objects.requireNonNull(worldId, "worldId");
-        worldName = SensitiveDataRedactor.redact(Objects.requireNonNull(worldName, "worldName"));
         Objects.requireNonNull(createdAt, "createdAt");
-        label = Objects.requireNonNull(label, "label").map(SensitiveDataRedactor::redact);
+        label = Objects.requireNonNull(label, "label");
         Objects.requireNonNull(trigger, "trigger");
-        Objects.requireNonNull(status, "status");
         Objects.requireNonNull(git, "git");
         Objects.requireNonNull(zip, "zip");
-        if (git.destination() != DestinationType.GIT || zip.destination() != DestinationType.ZIP) {
-            throw new IllegalArgumentException("Destination views must use their matching destination types");
-        }
         if (logicalSizeBytes < 0 || changedFileCount < 0) {
             throw new IllegalArgumentException("Backup counts must not be negative");
         }
-        Objects.requireNonNull(gameVersion, "gameVersion");
-    }
-
-    public BackupRow(
-            BackupId backupId,
-            WorldId worldId,
-            String worldName,
-            Instant createdAt,
-            Optional<String> label,
-            BackupTrigger trigger,
-            BackupStatus status,
-            BackupDestinationView git,
-            BackupDestinationView zip,
-            long logicalSizeBytes,
-            long changedFileCount) {
-        this(
-                backupId,
-                worldId,
-                worldName,
-                createdAt,
-                label,
-                trigger,
-                status,
-                git,
-                zip,
-                logicalSizeBytes,
-                changedFileCount,
-                Optional.empty());
+        gameVersion = Objects.requireNonNull(gameVersion, "gameVersion");
     }
 
     public static BackupRow from(BackupRecord record) {
-        Objects.requireNonNull(record, "record");
+        BackupManifest manifest = record.manifest();
         List<DestinationResult> destinations = record.result().destinations();
         return new BackupRow(
-                record.manifest().backupId(),
-                record.manifest().worldId(),
-                record.manifest().worldName(),
-                record.manifest().createdAt(),
-                record.manifest().label(),
-                record.manifest().trigger(),
-                record.result().status(),
-                destination(destinations, DestinationType.GIT),
-                destination(destinations, DestinationType.ZIP),
-                record.manifest().sourceByteCount(),
-                record.manifest().changedFileCount(),
-                record.manifest().gameVersion());
+                manifest.backupId(),
+                manifest.createdAt(),
+                manifest.label(),
+                manifest.trigger(),
+                Copy.of(destinations, DestinationType.GIT),
+                Copy.of(destinations, DestinationType.ZIP),
+                manifest.sourceByteCount(),
+                manifest.changedFileCount(),
+                manifest.gameVersion());
     }
 
+    /** True when Git or ZIP holds a copy that can be restored. */
     public boolean hasDurableCopy() {
         return git.durable() || zip.durable();
     }
 
-    public SyncStatus remoteSyncStatus() {
-        return git.syncStatus();
+    /** True when the Git copy is also on the world's remote, so a delete removes it there too. */
+    public boolean onRemote() {
+        return git.durable() && git.syncStatus() == SyncStatus.SYNCED;
     }
 
-    public VerificationStatus verificationStatus() {
-        List<BackupDestinationView> durable = List.of(git, zip).stream()
-                .filter(BackupDestinationView::durable)
-                .toList();
-        if (durable.isEmpty()) {
-            return VerificationStatus.UNAVAILABLE;
-        }
-        if (durable.stream().anyMatch(view -> view.verificationStatus() == VerificationStatus.FAILED)) {
-            return VerificationStatus.FAILED;
-        }
-        if (durable.stream().allMatch(view -> view.verificationStatus() == VerificationStatus.VERIFIED)) {
-            return VerificationStatus.VERIFIED;
-        }
-        return VerificationStatus.NOT_VERIFIED;
+    /** The copies the browser shows for this backup; a delete request names them, so it deletes only these. */
+    public List<DestinationResult> copies() {
+        return Stream.of(git, zip).flatMap(copy -> copy.result().stream()).toList();
     }
 
-    private static BackupDestinationView destination(
-            List<DestinationResult> destinations,
-            DestinationType type) {
-        Optional<DestinationResult> result = destinations.stream()
-                .filter(candidate -> candidate.destination() == type)
-                .findFirst();
-        return BackupDestinationView.from(type, result);
+    /** One destination's copy as the catalog records it; empty when that destination wrote none. */
+    public record Copy(Optional<DestinationResult> result) {
+        public Copy {
+            Objects.requireNonNull(result, "result");
+        }
+
+        private static Copy of(List<DestinationResult> destinations, DestinationType type) {
+            return new Copy(destinations.stream()
+                    .filter(destination -> destination.destination() == type)
+                    .findFirst());
+        }
+
+        /** True when this destination holds the backup. */
+        public boolean durable() {
+            return result.filter(DestinationResult::isDurable).isPresent();
+        }
+
+        /** The state of the remote copy; NOT_CONFIGURED when this destination wrote nothing. */
+        public SyncStatus syncStatus() {
+            return result.map(DestinationResult::syncStatus).orElse(SyncStatus.NOT_CONFIGURED);
+        }
     }
 }

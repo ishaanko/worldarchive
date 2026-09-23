@@ -1,7 +1,6 @@
 package dev.ishaanko.worldarchive.ui.model;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.ishaanko.worldarchive.model.GameVersionStamp;
@@ -17,7 +16,6 @@ final class GameVersionNoticeTest {
 
         assertEquals(GameVersionNoticeLevel.UNKNOWN, notice.level());
         assertTrue(notice.message().contains("before version tracking"));
-        assertFalse(notice.isWarning());
     }
 
     @Test
@@ -26,7 +24,6 @@ final class GameVersionNoticeTest {
 
         assertEquals(GameVersionNoticeLevel.MATCHED, notice.level());
         assertTrue(notice.message().contains("26.2"));
-        assertFalse(notice.isWarning());
     }
 
     @Test
@@ -37,7 +34,6 @@ final class GameVersionNoticeTest {
 
         assertEquals(GameVersionNoticeLevel.UPGRADE, notice.level());
         assertTrue(notice.message().contains("upgrade"));
-        assertFalse(notice.isWarning());
     }
 
     @Test
@@ -48,14 +44,13 @@ final class GameVersionNoticeTest {
 
         assertEquals(GameVersionNoticeLevel.DOWNGRADE, notice.level());
         assertTrue(notice.message().contains("may not open"));
-        assertTrue(notice.isWarning());
     }
 
     @Test
     void namesTheBackupVersionWhenTheRunningVersionIsUnreadable() {
         GameVersionNotice notice = GameVersionNotice.of(Optional.of(RUNNING), Optional.empty());
 
-        assertEquals(GameVersionNoticeLevel.MATCHED, notice.level());
+        assertEquals(GameVersionNoticeLevel.UNKNOWN, notice.level());
         assertTrue(notice.message().contains("26.2"));
     }
 }

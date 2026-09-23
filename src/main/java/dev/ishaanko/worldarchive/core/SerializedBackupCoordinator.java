@@ -3,773 +3,483 @@ package dev.ishaanko.worldarchive.core;
 import dev.ishaanko.worldarchive.catalog.BackupCatalog;
 import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.BackupManifest;
+import dev.ishaanko.worldarchive.model.BackupOperation;
 import dev.ishaanko.worldarchive.model.BackupRecord;
 import dev.ishaanko.worldarchive.model.BackupResult;
-import dev.ishaanko.worldarchive.model.BackupStatus;
-import dev.ishaanko.worldarchive.model.BackupTrigger;
 import dev.ishaanko.worldarchive.model.DestinationResult;
-import dev.ishaanko.worldarchive.model.DestinationStatus;
 import dev.ishaanko.worldarchive.model.DestinationType;
+import dev.ishaanko.worldarchive.model.OperationId;
+import dev.ishaanko.worldarchive.model.OperationPhase;
+import dev.ishaanko.worldarchive.model.OperationProgress;
+import dev.ishaanko.worldarchive.model.ProgressListener;
 import dev.ishaanko.worldarchive.model.SensitiveDataRedactor;
 import dev.ishaanko.worldarchive.model.WorldId;
+import dev.ishaanko.worldarchive.support.AsyncTasks;
+import dev.ishaanko.worldarchive.support.AsyncTasks.InterruptibleFuture;
+import dev.ishaanko.worldarchive.support.Observers;
 import java.io.IOException;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Create coordinator with FIFO per-world lanes and independent parallel destination attempts.
+ * Runs backups. A backup first copies its world into a private capture; only one capture of a
+ * world runs at a time. The selected destinations then write that capture in parallel while the
+ * world's operation gate keeps restore, delete and cleanup of the same world out. The backups of
+ * one world write in the order their captures finished; different worlds proceed independently.
+ * The result is recorded in the catalog.
  *
- * <p>Capture is the only phase allowed through {@link BackupCaptureGate}; every backend starts
- * after that gate has returned and consumes the same private source tree.</p>
+ * <p>Cancelling a returned stage stops a backup that captures or waits. While destinations write,
+ * a cancel interrupts them; a destination that already made a copy keeps it and it is recorded.
+ * Once recording starts, a cancel is refused and the backup completes normally.</p>
  */
-public final class SerializedBackupCoordinator implements BackupCoordinator {
+public final class SerializedBackupCoordinator {
+    private static final String WAITING_MESSAGE = "Waiting for the previous backup of this world";
+
     private final BackupCatalog catalog;
 
-    private final BackupCaptureFactory captureFactory;
+    private final FileSystemBackupCaptureFactory captureFactory;
 
-    private final WorldInventoryStore inventoryStore;
+    private final FileWorldInventoryStore inventoryStore;
 
     private final BackupDestinationSelector destinationSelector;
-
-    private final BackupMaintenanceService maintenanceService;
-
-    private final BackupCaptureGate captureGate;
 
     private final WorldOperationGate captureMutex;
 
     private final WorldOperationGate operationGate;
 
-    private final ExecutorService coordinatorExecutor;
+    private final ExecutorService executor;
 
     private final Clock clock;
 
-    private final ConcurrentMap<WorldId, WorldLane<CreateOperation>> lanes = new ConcurrentHashMap<>();
+    /** Never removed, so every operation of a world finds the same lane. */
+    private final ConcurrentMap<WorldId, Lane> lanes = new ConcurrentHashMap<>();
 
-    private final ConcurrentMap<WorldId, OperationProgress> capturePreparations = new ConcurrentHashMap<>();
-
+    /**
+     * Both gates may be shared with coordinators that replaced this one after a settings change:
+     * {@code captureMutex} admits one capture per world, and {@code operationGate} is the per-world
+     * gate that restore, delete and cleanup also enter.
+     */
     public SerializedBackupCoordinator(
             BackupCatalog catalog,
-            BackupCaptureFactory captureFactory,
-            WorldInventoryStore inventoryStore,
+            FileSystemBackupCaptureFactory captureFactory,
+            FileWorldInventoryStore inventoryStore,
             BackupDestinationSelector destinationSelector,
-            BackupMaintenanceService maintenanceService,
-            ExecutorService coordinatorExecutor,
-            Clock clock) {
-        this(
-                catalog,
-                captureFactory,
-                inventoryStore,
-                destinationSelector,
-                maintenanceService,
-                BackupCaptureGate.DIRECT,
-                new LockingWorldOperationGate(),
-                new LockingWorldOperationGate(),
-                coordinatorExecutor,
-                clock);
-    }
-
-    public SerializedBackupCoordinator(
-            BackupCatalog catalog,
-            BackupCaptureFactory captureFactory,
-            WorldInventoryStore inventoryStore,
-            BackupDestinationSelector destinationSelector,
-            BackupMaintenanceService maintenanceService,
-            BackupCaptureGate captureGate,
-            WorldOperationGate operationGate,
-            ExecutorService coordinatorExecutor,
-            Clock clock) {
-        this(
-                catalog,
-                captureFactory,
-                inventoryStore,
-                destinationSelector,
-                maintenanceService,
-                captureGate,
-                new LockingWorldOperationGate(),
-                operationGate,
-                coordinatorExecutor,
-                clock);
-    }
-
-    public SerializedBackupCoordinator(
-            BackupCatalog catalog,
-            BackupCaptureFactory captureFactory,
-            WorldInventoryStore inventoryStore,
-            BackupDestinationSelector destinationSelector,
-            BackupMaintenanceService maintenanceService,
-            BackupCaptureGate captureGate,
             WorldOperationGate captureMutex,
             WorldOperationGate operationGate,
-            ExecutorService coordinatorExecutor,
+            ExecutorService executor,
             Clock clock) {
         this.catalog = Objects.requireNonNull(catalog, "catalog");
         this.captureFactory = Objects.requireNonNull(captureFactory, "captureFactory");
         this.inventoryStore = Objects.requireNonNull(inventoryStore, "inventoryStore");
         this.destinationSelector = Objects.requireNonNull(destinationSelector, "destinationSelector");
-        this.maintenanceService = Objects.requireNonNull(maintenanceService, "maintenanceService");
-        this.captureGate = Objects.requireNonNull(captureGate, "captureGate");
         this.captureMutex = Objects.requireNonNull(captureMutex, "captureMutex");
         this.operationGate = Objects.requireNonNull(operationGate, "operationGate");
-        this.coordinatorExecutor = Objects.requireNonNull(coordinatorExecutor, "coordinatorExecutor");
+        this.executor = Objects.requireNonNull(executor, "executor");
         this.clock = Objects.requireNonNull(clock, "clock");
     }
 
-    @Override
+    /**
+     * Captures the world on the calling thread, for a save hook that must copy the world right
+     * after a save; {@code kind} says whether the game still runs it. Waits while another capture
+     * of the same world runs. Interrupting the calling thread stops the capture.
+     */
     public PreparedBackup prepareCapture(
             CreateBackupRequest request,
-            CaptureProgressListener progressListener)
-            throws IOException, InterruptedException {
-        Objects.requireNonNull(request, "request");
-        Objects.requireNonNull(progressListener, "progressListener");
-        BackupId backupId = BackupId.create();
-        OperationId operationId = OperationId.create();
-        OperationProgress queued = progressFor(
-                operationId,
-                request.worldId(),
-                backupId,
-                OperationPhase.QUEUED,
-                0,
-                0,
-                "Waiting for another world capture");
-        if (capturePreparations.putIfAbsent(request.worldId(), queued) != null) {
-            throw new IllegalStateException("A synchronous capture is already pending for this world");
-        }
-        CapturedBackup captured = null;
-        boolean transferred = false;
-        try (WorldOperationGate.Permit ignored = captureMutex.enter(request.worldId())) {
-            capturePreparations.put(request.worldId(), progressFor(
-                    operationId,
-                    request.worldId(),
-                    backupId,
-                    OperationPhase.PREPARING,
-                    0,
-                    0,
-                    "Preparing private world capture"));
-            Optional<WorldInventory> previous = loadInventoryOrFallback(request.worldId(), () ->
-                    capturePreparations.put(request.worldId(), progressFor(
-                            operationId,
-                            request.worldId(),
-                            backupId,
-                            OperationPhase.PREPARING,
-                            0,
-                            0,
-                            "Change inventory is unavailable; capturing a full baseline")));
-            captured = captureFactory.capture(
-                    request,
-                    backupId,
-                    clock.instant(),
-                    previous,
-                    (completed, total) -> {
-                        capturePreparations.put(request.worldId(), progressFor(
-                                operationId,
-                                request.worldId(),
-                                backupId,
-                                OperationPhase.READING,
-                                completed,
-                                total,
-                                "Capturing world files"));
-                        progressListener.onProgress(completed, total);
-                    });
-            capturePreparations.put(request.worldId(), progressFor(
-                    operationId,
-                    request.worldId(),
-                    backupId,
-                    OperationPhase.PREPARING,
-                    1,
-                    1,
-                    "Private capture prepared"));
+            CaptureKind kind,
+            ProgressListener progressListener) throws IOException, InterruptedException {
+        Progress progress = new Progress(
+                OperationId.create(), request.worldId(), BackupId.create(), progressListener);
+        Lane lane = lane(request.worldId());
+        lane.register(progress.operationId);
+        boolean handedOver = false;
+        try {
+            CapturedBackup captured = capture(request, kind, progress);
             PreparedBackup prepared = new PreparedBackup(
-                    request,
-                    captured,
-                    previous.isPresent(),
-                    operationId,
-                    () -> capturePreparations.remove(request.worldId()));
-            transferred = true;
+                    this, request, progress.operationId, captured, () -> lane.unregister(progress.operationId));
+            handedOver = true;
             return prepared;
         } finally {
-            if (!transferred) {
-                capturePreparations.remove(request.worldId());
-                if (captured != null) {
-                    captured.close();
-                }
+            if (!handedOver) {
+                lane.unregister(progress.operationId);
             }
         }
     }
 
-    @Override
+    /** Queues destination work for a capture from {@link #prepareCapture}; the backup owns it from here on. */
     public CompletionStage<BackupResult> createPreparedBackup(
-            PreparedBackup preparedBackup,
+            PreparedBackup prepared,
             ProgressListener progressListener) {
-        Objects.requireNonNull(preparedBackup, "preparedBackup");
         Objects.requireNonNull(progressListener, "progressListener");
-        PreparedBackup.Resources resources = preparedBackup.claim();
-        CapturedBackup captured = resources.capturedBackup();
+        CapturedBackup captured;
         try {
-            validatePrepared(preparedBackup.request(), captured.capture().manifest());
-            DestinationPlan plan = selectDestinations(preparedBackup.request());
-            if (plan.backends().isEmpty()) {
-                BackupResult skipped = BackupResult.aggregate(
-                        captured.capture().manifest().backupId(),
-                        preparedBackup.request().worldId(),
-                        List.of(),
-                        completionTime(captured.capture().manifest()));
-                resources.close();
-                return CompletableFuture.completedFuture(skipped);
+            if (prepared.owner() != this) {
+                throw new IllegalArgumentException("The prepared capture belongs to another coordinator");
             }
-            CreateOperation operation = new CreateOperation(
-                    preparedBackup.request(),
-                    plan,
-                    captured.capture().manifest().backupId(),
-                    preparedBackup.operationId(),
-                    false,
-                    captured,
-                    preparedBackup.previousInventoryPresent(),
-                    progressListener);
-            return enqueue(operation);
-        } catch (IOException | RuntimeException exception) {
-            closeAfterFailure(resources, exception);
-            return CompletableFuture.failedFuture(exception);
-        }
-    }
-
-    @Override
-    public CompletionStage<BackupResult> createBackup(
-            CreateBackupRequest request,
-            ProgressListener progressListener) {
-        Objects.requireNonNull(request, "request");
-        Objects.requireNonNull(progressListener, "progressListener");
-        final DestinationPlan plan;
-        try {
-            plan = selectDestinations(request);
+            captured = prepared.claim();
         } catch (RuntimeException exception) {
             return CompletableFuture.failedFuture(exception);
         }
-        BackupId backupId = BackupId.create();
-        if (plan.backends().isEmpty()) {
-            return CompletableFuture.completedFuture(BackupResult.aggregate(
-                    backupId,
-                    request.worldId(),
-                    List.of(),
-                    clock.instant()));
+        CreateBackupRequest request = prepared.request();
+        BackupId backupId = captured.capture().manifest().backupId();
+        Progress progress = new Progress(prepared.operationId(), request.worldId(), backupId, progressListener);
+        List<BackupBackend> backends;
+        try {
+            backends = selectDestinations(request);
+        } catch (RuntimeException exception) {
+            discard(captured, progress, exception);
+            return CompletableFuture.failedFuture(exception);
         }
-        return enqueue(new CreateOperation(
-                request,
-                plan,
-                backupId,
-                OperationId.create(),
-                true,
-                null,
-                false,
-                progressListener));
-    }
-
-    @Override
-    public Optional<OperationProgress> currentOperation(WorldId worldId) {
-        Objects.requireNonNull(worldId, "worldId");
-        OperationProgress preparation = capturePreparations.get(worldId);
-        if (preparation != null && preparation.phase() != OperationPhase.QUEUED) {
-            return Optional.of(preparation);
+        if (backends.isEmpty()) {
+            discard(captured, progress, null);
+            return CompletableFuture.completedFuture(skipped(progress.backupId, request));
         }
-        WorldLane<CreateOperation> lane = lanes.get(worldId);
-        if (lane != null) {
-            synchronized (lane) {
-                if (lane.active != null) {
-                    return Optional.ofNullable(lane.active.progress.get());
-                }
-            }
-        }
-        return Optional.ofNullable(preparation);
-    }
-
-    /** Non-create operations composed with this coordinator; exposed for direct routing by callers. */
-    public BackupMaintenanceService maintenanceService() {
-        return maintenanceService;
-    }
-
-    private CompletionStage<BackupResult> enqueue(CreateOperation operation) {
-        WorldLane<CreateOperation> lane = lanes.computeIfAbsent(
-                operation.request.worldId(), ignored -> new WorldLane<>());
-        operation.lane = lane;
-        CreateOperation start = null;
-        synchronized (lane) {
-            if (operation.coalescible) {
-                CreateOperation compatible = compatibleOperation(lane, operation);
-                if (compatible != null) {
-                    compatible.listeners.addAll(operation.listeners);
-                    OperationProgress current = compatible.progress.get();
-                    if (current != null) {
-                        safeNotify(operation.listeners.getFirst(), current);
-                    }
-                    return compatible.result;
-                }
-            }
-            lane.queue.addLast(operation);
-            report(operation, OperationPhase.QUEUED, 0, 0, "Backup queued");
-            if (lane.active == null) {
-                start = activateNext(lane);
-            }
-        }
-        if (start != null) {
-            startOperation(start);
-        }
+        Operation operation = new Operation(request, progress, backends);
+        enqueue(operation, captured);
         return operation.result;
     }
 
-    private static CreateOperation compatibleOperation(
-            WorldLane<CreateOperation> lane,
-            CreateOperation requested) {
-        if (lane.active != null && lane.active.isCompatibleWith(requested)) {
-            return lane.active;
-        }
-        CreateOperation queued = lane.queue.peekLast();
-        if (queued != null && queued.isCompatibleWith(requested)) {
-            return queued;
-        }
-        return null;
-    }
-
-    private static CreateOperation activateNext(WorldLane<CreateOperation> lane) {
-        CreateOperation next = lane.queue.pollFirst();
-        lane.active = next;
-        return next;
-    }
-
-    private void startOperation(CreateOperation operation) {
-        report(operation, OperationPhase.PREPARING, 0, 0, "Preparing private world capture");
+    /** Captures a world that no game runs on a worker, then queues destination work. */
+    public CompletionStage<BackupResult> createBackup(
+            CreateBackupRequest request,
+            ProgressListener progressListener) {
+        Progress progress = new Progress(
+                OperationId.create(), request.worldId(), BackupId.create(), progressListener);
+        List<BackupBackend> backends;
         try {
-            Future<?> worker = coordinatorExecutor.submit(() -> {
-                operation.workerStarted.set(true);
-                execute(operation);
-            });
-            operation.worker.set(worker);
-            if (operation.cancelled.get()) {
-                boolean preventedStart = worker.cancel(operation.interruptRequested.get());
-                if (preventedStart && !operation.workerStarted.get()) {
-                    finish(operation, null, new CancellationException("Backup was cancelled"));
-                }
+            backends = selectDestinations(request);
+        } catch (RuntimeException exception) {
+            return CompletableFuture.failedFuture(exception);
+        }
+        if (backends.isEmpty()) {
+            return CompletableFuture.completedFuture(skipped(progress.backupId, request));
+        }
+        Operation operation = new Operation(request, progress, backends);
+        operation.lane.register(progress.operationId);
+        InterruptibleFuture<CapturedBackup> capturing = AsyncTasks.supplyInterruptible(
+                executor, () -> capture(request, CaptureKind.CLOSED_WORLD, progress));
+        operation.attach(capturing);
+        capturing.whenComplete((captured, failure) -> {
+            if (failure == null) {
+                enqueue(operation, captured);
+            } else {
+                finish(operation, null, failure);
             }
-        } catch (RejectedExecutionException exception) {
-            finish(operation, null, exception);
+        });
+        return operation.result;
+    }
+
+    /** True while a backup of the world captures, waits, writes, or records. */
+    public boolean isBusy(WorldId worldId) {
+        Lane lane = lanes.get(Objects.requireNonNull(worldId, "worldId"));
+        return lane != null && lane.busy();
+    }
+
+    /**
+     * Completes once no backup of the world captures, waits, writes, or records. A cancelled
+     * backup's stage completes before its workers have stopped; this stage completes after they
+     * have, so a caller that must not change destination folders under a backup waits for it.
+     */
+    public CompletionStage<Void> whenIdle(WorldId worldId) {
+        Lane lane = lanes.get(Objects.requireNonNull(worldId, "worldId"));
+        return lane == null ? CompletableFuture.completedFuture(null) : lane.whenIdle();
+    }
+
+    private Lane lane(WorldId worldId) {
+        return lanes.computeIfAbsent(worldId, ignored -> new Lane());
+    }
+
+    private CapturedBackup capture(CreateBackupRequest request, CaptureKind kind, Progress progress)
+            throws IOException, InterruptedException {
+        progress.report(OperationPhase.PREPARING, 0, 0, "Preparing private world capture");
+        try (WorldOperationGate.Permit ignored = captureMutex.enter(request.worldId())) {
+            Optional<WorldInventory> previous = previousInventory(request.worldId(), progress);
+            return captureFactory.capture(
+                    request,
+                    kind,
+                    progress.backupId,
+                    clock.instant(),
+                    previous,
+                    (completed, total) -> progress.report(
+                            OperationPhase.READING, completed, total, "Capturing world files"));
         }
     }
 
-    private void execute(CreateOperation operation) {
+    /** The last recorded inventory; without one, every file counts as changed. */
+    private Optional<WorldInventory> previousInventory(WorldId worldId, Progress progress) {
         try {
-            if (operation.cancelled.get()) {
-                throw new CancellationException("Backup was cancelled");
+            return inventoryStore.load(worldId);
+        } catch (IOException exception) {
+            progress.report(OperationPhase.PREPARING, 0, 0,
+                    "Change inventory is unavailable; capturing a full baseline");
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * Starts the operation's destination work, or queues it behind the backup of the same world
+     * that is writing. The waiting report comes first, so it never follows the writing report.
+     */
+    private void enqueue(Operation operation, CapturedBackup captured) {
+        Lane lane = operation.lane;
+        if (lane.hasWriter()) {
+            operation.progress.report(OperationPhase.QUEUED, 0, 0, WAITING_MESSAGE);
+        }
+        boolean cancelled;
+        boolean writeNow = false;
+        synchronized (lane) {
+            operation.capture = captured;
+            cancelled = operation.cancelRequested;
+            if (!cancelled && lane.writer == null) {
+                lane.writer = operation;
+                operation.stage = Stage.WRITING;
+                writeNow = true;
+            } else if (!cancelled) {
+                lane.waiting.addLast(operation);
+                operation.stage = Stage.WAITING;
             }
-            if (operation.permit.get() == null) {
-                WorldOperationGate.Permit permit = operationGate.enter(operation.request.worldId());
-                if (!operation.permit.compareAndSet(null, permit)) {
-                    permit.close();
-                    throw new IllegalStateException("Backup operation already owns a world permit");
-                }
+        }
+        if (cancelled) {
+            finish(operation, null, cancellation());
+        } else if (writeNow) {
+            startWriting(operation);
+        }
+    }
+
+    private void startWriting(Operation operation) {
+        InterruptibleFuture<WorldOperationGate.Permit> entering = AsyncTasks.supplyInterruptible(
+                executor, () -> operationGate.enter(operation.request.worldId()));
+        operation.attach(entering);
+        entering.whenComplete((permit, failure) -> {
+            if (failure == null) {
+                writeDestinations(operation, permit);
+            } else {
+                finish(operation, null, failure);
             }
-            CapturedBackup captured = operation.capture.get();
-            if (captured == null) {
-                try (WorldOperationGate.Permit ignored = captureMutex.enter(
-                        operation.request.worldId())) {
-                    Optional<WorldInventory> previous = loadInventoryOrFallback(
-                            operation.request.worldId(), () -> report(
-                                    operation,
-                                    OperationPhase.PREPARING,
-                                    0,
-                                    0,
-                                    "Change inventory is unavailable; capturing a full baseline"));
-                    operation.previousInventoryPresent = previous.isPresent();
-                    captured = captureGate.capture(() -> captureFactory.capture(
-                            operation.request,
-                            operation.backupId,
-                            clock.instant(),
-                            previous,
-                            (completed, total) -> report(
-                                    operation,
-                                    OperationPhase.READING,
-                                    completed,
-                                    total,
-                                    "Capturing world files")));
-                }
-                if (!operation.capture.compareAndSet(null, captured)) {
-                    captured.close();
-                    throw new IllegalStateException("Backup operation already owns a private capture");
-                }
-            }
-            if (operation.cancelled.get()) {
-                throw new CancellationException("Backup was cancelled");
-            }
-            BackupManifest manifest = captured.capture().manifest();
-            if (operation.request.trigger() == BackupTrigger.SCHEDULED
-                    && operation.previousInventoryPresent
-                    && manifest.changedFileCount() == 0) {
-                List<DestinationResult> skipped = operation.plan.backends().stream()
-                        .map(backend -> DestinationResult.skipped(
-                                backend.destinationType(),
-                                "World is unchanged"))
-                        .toList();
-                finish(
-                        operation,
-                        BackupResult.aggregate(
-                                operation.backupId,
-                                operation.request.worldId(),
-                                skipped,
-                                completionTime(manifest)),
-                        null);
+        });
+    }
+
+    /** Starts one worker per destination; each can be interrupted and still reports the copy it made. */
+    private void writeDestinations(Operation operation, WorldOperationGate.Permit permit) {
+        try {
+            BackupCapture capture = operation.admit(permit);
+            if (capture == null) {
+                finish(operation, null, cancellation());
                 return;
             }
-            startDestinations(operation, captured);
+            long total = capture.manifest().sourceByteCount();
+            operation.progress.report(
+                    OperationPhase.WRITING, 0, total, DestinationProgressAggregator.WRITING_MESSAGE);
+            DestinationProgressAggregator aggregator = new DestinationProgressAggregator(
+                    operation.backends.stream().map(BackupBackend::destinationType).toList(), total);
+            List<CompletableFuture<DestinationResult>> outcomes = new ArrayList<>(operation.backends.size());
+            for (BackupBackend backend : operation.backends) {
+                DestinationType destination = backend.destinationType();
+                InterruptibleFuture<DestinationResult> write = AsyncTasks.supplyInterruptible(
+                        executor,
+                        () -> backend.createBackup(capture, progress -> forwardDestinationProgress(
+                                operation, aggregator, destination, progress)));
+                operation.addDestination(write);
+                outcomes.add(write.handle(
+                        (result, failure) -> destinationOutcome(destination, result, failure)));
+            }
+            CompletableFuture.allOf(outcomes.toArray(CompletableFuture[]::new))
+                    .whenComplete((ignored, failure) -> commitOnExecutor(operation, outcomes));
         } catch (Throwable throwable) {
+            // A continuation must always release the permit and the lane.
             finish(operation, null, throwable);
         }
     }
 
-    private void startDestinations(
-            CreateOperation operation,
-            CapturedBackup captured) {
-        synchronized (operation) {
-            if (operation.cancelled.get()) {
-                finish(operation, null, new CancellationException("Backup was cancelled"));
-                return;
-            }
+    /**
+     * Records the outcomes on a coordinator worker, never on the destination worker that
+     * finished last: a cancelled write can leave that thread interrupted, and file locks fail on
+     * an interrupted thread, so the record of a finished copy would be lost.
+     */
+    private void commitOnExecutor(Operation operation, List<CompletableFuture<DestinationResult>> outcomes) {
+        try {
+            executor.execute(() -> commit(operation, outcomes));
+        } catch (RejectedExecutionException exception) {
+            // The game is closing. Recording here beats losing a finished copy.
+            commit(operation, outcomes);
         }
-        if (operation.terminal.get()) {
-            return;
-        }
-        report(
-                operation,
-                OperationPhase.WRITING,
-                0,
-                captured.capture().manifest().sourceByteCount(),
-                DestinationProgressAggregator.WRITING_MESSAGE);
-        DestinationProgressAggregator aggregator = new DestinationProgressAggregator(
-                operation.plan.backends().stream().map(BackupBackend::destinationType).toList(),
-                captured.capture().manifest().sourceByteCount());
-        List<CompletableFuture<DestinationResult>> outcomes = new ArrayList<>(operation.plan.backends().size());
-        for (BackupBackend backend : operation.plan.backends()) {
-            DestinationType expectedDestination = backend.destinationType();
-            CompletableFuture<DestinationResult> source;
-            try {
-                CompletionStage<DestinationResult> stage = Objects.requireNonNull(
-                        backend.createBackup(
-                                captured.capture(),
-                                progress -> forwardDestinationProgress(
-                                        operation,
-                                        aggregator,
-                                        expectedDestination,
-                                        progress)),
-                        "Backup backend returned a null stage");
-                source = stage.toCompletableFuture();
-            } catch (Throwable throwable) {
-                source = CompletableFuture.failedFuture(throwable);
-            }
-            operation.destinationTasks.add(source);
-            if (operation.cancelled.get()) {
-                // A cancellation that raced this loop already stopped the earlier tasks.
-                stopDestination(source, operation.interruptRequested.get());
-            }
-            outcomes.add(source.handle((result, throwable) -> destinationOutcome(
-                    expectedDestination,
-                    result,
-                    throwable)));
-        }
-        CompletableFuture.allOf(outcomes.toArray(CompletableFuture[]::new))
-                .whenComplete((ignored, throwable) -> finalizeDestinations(operation, outcomes));
     }
 
-    /**
-     * Records what the destinations produced. Recording is the point of no return: a
-     * cancellation that arrives later is refused. A cancellation that arrived while the
-     * destinations wrote still records any destination that had already finished, so a
-     * complete artifact is never left out of the catalog.
-     */
-    private void finalizeDestinations(
-            CreateOperation operation,
-            List<CompletableFuture<DestinationResult>> outcomes) {
-        synchronized (operation) {
-            operation.cancellationState.compareAndSet(
-                    CancellationState.CANCELLABLE,
-                    CancellationState.COMMITTING);
-        }
-        boolean cancelled = operation.cancelled.get();
+    /** Records every destination that made a copy, even when the backup was cancelled meanwhile. */
+    private void commit(Operation operation, List<CompletableFuture<DestinationResult>> outcomes) {
         try {
-            List<DestinationResult> destinations = outcomes.stream()
-                    .map(CompletableFuture::join)
-                    .toList();
-            BackupManifest manifest = Objects.requireNonNull(operation.capture.get(), "capture")
-                    .capture()
-                    .manifest();
-            BackupResult result = BackupResult.aggregate(
-                    operation.backupId,
-                    operation.request.worldId(),
-                    destinations,
-                    completionTime(manifest));
-            if (hasDurableDestination(destinations)) {
-                report(
-                        operation,
-                        OperationPhase.PUBLISHING,
-                        manifest.sourceByteCount(),
-                        manifest.sourceByteCount(),
-                        "Recording backup metadata");
-                catalog.add(new BackupRecord(manifest, result));
-                try {
-                    inventoryStore.save(
-                            operation.request.worldId(),
-                            operation.capture.get().inventory());
-                } catch (IOException exception) {
-                    report(
-                            operation,
-                            OperationPhase.PUBLISHING,
-                            manifest.sourceByteCount(),
-                            manifest.sourceByteCount(),
-                            "Backup complete; change inventory could not be updated");
-                }
+            boolean cancelled = operation.beginCommit();
+            BackupCapture capture = operation.capture();
+            BackupManifest manifest = capture.manifest();
+            List<DestinationResult> destinations = outcomes.stream().map(CompletableFuture::join).toList();
+            BackupResult result = new BackupResult(
+                    manifest.backupId(), operation.request.worldId(), destinations, completionTime(manifest));
+            if (destinations.stream().anyMatch(DestinationResult::isDurable)) {
+                record(operation, capture, result);
             }
             if (cancelled) {
-                finish(operation, null, new CancellationException("Backup was cancelled"));
-                return;
+                finish(operation, null, cancellation());
+            } else {
+                finish(operation, result, null);
             }
-            finish(operation, result, null);
         } catch (Throwable throwable) {
+            // A continuation must always release the permit and the lane.
             finish(operation, null, throwable);
         }
     }
 
-    private void cancel(CreateOperation operation, boolean mayInterrupt) {
-        operation.cancelled.set(true);
-        operation.interruptRequested.compareAndSet(false, mayInterrupt);
-        WorldLane<CreateOperation> lane = operation.lane;
-        boolean queued = false;
-        if (lane != null) {
-            synchronized (lane) {
-                if (lane.active != operation) {
-                    queued = lane.queue.remove(operation);
-                    if (lane.active == null && lane.queue.isEmpty()) {
-                        lanes.remove(operation.request.worldId(), lane);
-                    }
-                }
-            }
+    private void record(Operation operation, BackupCapture capture, BackupResult result) throws IOException {
+        long bytes = capture.manifest().sourceByteCount();
+        operation.progress.report(OperationPhase.PUBLISHING, bytes, bytes, "Recording backup metadata");
+        try {
+            catalog.add(new BackupRecord(capture.manifest(), result));
+        } catch (IOException exception) {
+            throw new IOException("The backup was saved, but WorldArchive could not add it to its backup list ("
+                    + exception.getMessage() + "). It appears in the list after the game restarts.", exception);
         }
-        if (queued) {
-            finish(operation, null, new CancellationException("Queued backup was cancelled"));
-            return;
+        try {
+            inventoryStore.save(operation.request.worldId(), capture.inventory());
+        } catch (IOException exception) {
+            // The backup is recorded; the next backup of this world counts every file as changed.
+            operation.progress.report(OperationPhase.PUBLISHING, bytes, bytes,
+                    "Backup complete; change inventory could not be updated");
         }
-        Future<?> worker = operation.worker.get();
-        if (worker != null) {
-            boolean preventedStart = worker.cancel(mayInterrupt);
-            if (preventedStart && !operation.workerStarted.get()) {
-                finish(operation, null, new CancellationException("Backup was cancelled"));
+    }
+
+    /**
+     * Ends the operation once: deletes its capture, releases its permit and its place in the lane,
+     * reports and completes its stage, and starts the next backup of the world.
+     */
+    private void finish(Operation operation, BackupResult result, Throwable failure) {
+        Lane lane = operation.lane;
+        CapturedBackup capture;
+        WorldOperationGate.Permit permit;
+        Operation next = null;
+        List<CompletableFuture<Void>> idle;
+        synchronized (lane) {
+            if (operation.stage == Stage.DONE) {
                 return;
             }
+            operation.stage = Stage.DONE;
+            capture = operation.capture;
+            operation.capture = null;
+            permit = operation.permit;
+            operation.permit = null;
+            idle = lane.remove(operation.progress.operationId);
+            lane.waiting.remove(operation);
+            if (lane.writer == operation) {
+                next = lane.waiting.pollFirst();
+                lane.writer = next;
+                if (next != null) {
+                    next.stage = Stage.WRITING;
+                }
+            }
         }
-        for (CompletableFuture<?> destination : operation.destinationTasks) {
-            stopDestination(destination, mayInterrupt);
+        release(capture, failure);
+        if (permit != null) {
+            permit.close();
+        }
+        if (failure == null) {
+            reportCompleted(operation, result);
+            operation.result.complete(result);
+        } else {
+            // A cancelled operation is silenced, so this reports real failures only.
+            operation.progress.report(OperationPhase.FAILED, 0, 0, "Backup could not be completed");
+            operation.result.completeExceptionally(failure);
+        }
+        // Waiters learn that the world is idle only once its capture is deleted and its permit released.
+        idle.forEach(waiter -> waiter.complete(null));
+        if (next != null) {
+            startWriting(next);
         }
     }
 
     /**
-     * Stops one destination's work. A destination that can be interrupted keeps its own
-     * outcome, so a snapshot it already published is still recorded; any other stage is
-     * cancelled outright.
+     * Deletes the capture. When the backup succeeded, a folder that could not be deleted does not
+     * turn it into a failure; the next game start removes it.
      */
-    private static void stopDestination(CompletableFuture<?> destination, boolean mayInterrupt) {
-        if (destination instanceof AsyncTasks.InterruptibleFuture<?> interruptible) {
-            interruptible.stop(mayInterrupt);
-        } else {
-            destination.cancel(mayInterrupt);
-        }
-    }
-
-    private void finish(
-            CreateOperation operation,
-            BackupResult result,
-            Throwable failure) {
-        if (!operation.terminal.compareAndSet(false, true)) {
+    private static void release(CapturedBackup capture, Throwable failure) {
+        if (capture == null) {
             return;
         }
-        Throwable terminalFailure = releaseOperationResources(operation, failure, result != null);
-        reportTerminalProgress(operation, result, terminalFailure);
-        CreateOperation next = releaseLane(operation);
-        completeOperation(operation, result, terminalFailure);
-        if (next != null) {
-            startOperation(next);
+        try {
+            capture.close();
+        } catch (IOException exception) {
+            if (failure != null) {
+                failure.addSuppressed(exception);
+            }
+        }
+    }
+
+    /** Ends a claimed capture that never became an operation. */
+    private void discard(CapturedBackup captured, Progress progress, Throwable failure) {
+        release(captured, failure);
+        lane(progress.worldId).unregister(progress.operationId);
+    }
+
+    private static void reportCompleted(Operation operation, BackupResult result) {
+        Progress progress = operation.progress;
+        switch (result.status()) {
+            case SUCCESS -> progress.report(OperationPhase.COMPLETE, 1, 1, "Backup complete");
+            case PARTIAL_SUCCESS ->
+                    progress.report(OperationPhase.COMPLETE, 1, 1, "Backup complete with warnings");
+            case SKIPPED -> progress.report(OperationPhase.COMPLETE, 1, 1, "Backup skipped");
+            case FAILED -> progress.report(OperationPhase.FAILED, 0, 0, "Backup destinations failed");
+            default -> throw new IllegalStateException("Unknown backup status: " + result.status());
         }
     }
 
     /**
-     * Releases the capture and the world permit. Once a result exists the backup is recorded,
-     * so a failure while releasing must not turn that success into a reported failure.
+     * Reports one destination's progress. While more than one destination writes, their progress
+     * is combined into one stream, so a destination that finishes first cannot make the whole
+     * backup look complete. A single destination's own phases are passed on, except that its end
+     * is still part of writing: recording follows.
      */
-    private static Throwable releaseOperationResources(
-            CreateOperation operation,
-            Throwable failure,
-            boolean recorded) {
-        Throwable terminalFailure = failure;
-        CapturedBackup captured = operation.capture.getAndSet(null);
-        if (captured != null) {
-            try {
-                captured.close();
-            } catch (IOException exception) {
-                if (terminalFailure != null) {
-                    terminalFailure.addSuppressed(exception);
-                }
-            }
-        }
-        WorldOperationGate.Permit permit = operation.permit.getAndSet(null);
-        if (permit != null) {
-            try {
-                permit.close();
-            } catch (RuntimeException exception) {
-                if (terminalFailure != null) {
-                    terminalFailure.addSuppressed(exception);
-                } else if (!recorded) {
-                    terminalFailure = exception;
-                }
-            }
-        }
-        return terminalFailure;
-    }
-
-    private void reportTerminalProgress(
-            CreateOperation operation,
-            BackupResult result,
-            Throwable terminalFailure) {
-        if (terminalFailure == null && result.status() != BackupStatus.FAILED) {
-            report(operation, OperationPhase.COMPLETE, 1, 1, completionMessage(result));
-        } else if (terminalFailure == null) {
-            report(operation, OperationPhase.FAILED, 0, 0, completionMessage(result));
-        } else if (!operation.cancelled.get()) {
-            report(operation, OperationPhase.FAILED, 0, 0, "Backup could not be completed");
-        }
-    }
-
-    private CreateOperation releaseLane(CreateOperation operation) {
-        CreateOperation next = null;
-        WorldLane<CreateOperation> lane = operation.lane;
-        if (lane != null) {
-            synchronized (lane) {
-                if (lane.active == operation) {
-                    lane.active = null;
-                    if (!lane.queue.isEmpty()) {
-                        next = activateNext(lane);
-                    } else {
-                        lanes.remove(operation.request.worldId(), lane);
-                    }
-                }
-            }
-        }
-        return next;
-    }
-
-    private static void completeOperation(
-            CreateOperation operation,
-            BackupResult result,
-            Throwable terminalFailure) {
-        if (!operation.result.isCancelled()) {
-            if (terminalFailure == null) {
-                operation.result.complete(result);
-            } else {
-                operation.result.completeExceptionally(terminalFailure);
-            }
-        }
-    }
-
-    /**
-     * Reports the progress of one destination.
-     *
-     * <p>While more than one destination writes, the progress of all of them is combined into one
-     * stream. The phase and the message of a single backend must not reach the listeners then,
-     * because a backend that completes first would look like the whole backup is complete.</p>
-     */
-    private void forwardDestinationProgress(
-            CreateOperation operation,
+    private static void forwardDestinationProgress(
+            Operation operation,
             DestinationProgressAggregator aggregator,
             DestinationType destination,
             OperationProgress progress) {
-        if (operation.cancelled.get()) {
-            return;
-        }
         if (aggregator.aggregates()) {
-            report(
-                    operation,
+            operation.progress.report(
                     OperationPhase.WRITING,
                     aggregator.accept(destination, progress),
                     aggregator.totalUnits(),
                     DestinationProgressAggregator.WRITING_MESSAGE);
             return;
         }
-        report(
-                operation,
-                progress.phase(),
+        boolean destinationDone = progress.phase() == OperationPhase.COMPLETE
+                || progress.phase() == OperationPhase.FAILED;
+        operation.progress.report(
+                destinationDone ? OperationPhase.WRITING : progress.phase(),
                 progress.completedUnits(),
                 progress.totalUnits(),
                 SensitiveDataRedactor.redact(progress.message()));
     }
 
-    /** Loads the previous inventory, falling back to an empty baseline (and notifying via {@code onUnavailable}) on IOException. */
-    private Optional<WorldInventory> loadInventoryOrFallback(WorldId worldId, Runnable onUnavailable) {
-        try {
-            return inventoryStore.load(worldId);
-        } catch (IOException exception) {
-            onUnavailable.run();
-            return Optional.empty();
+    private List<BackupBackend> selectDestinations(CreateBackupRequest request) {
+        List<BackupBackend> backends = List.copyOf(destinationSelector.select(request));
+        if (backends.stream().map(BackupBackend::destinationType).distinct().count() != backends.size()) {
+            throw new IllegalStateException("Each destination may be selected only once");
         }
+        return backends;
     }
 
-    private static OperationProgress progressFor(
-            OperationId operationId,
-            WorldId worldId,
-            BackupId backupId,
-            OperationPhase phase,
-            long completed,
-            long total,
-            String message) {
-        return new OperationProgress(
-                operationId,
-                worldId,
-                Optional.of(backupId),
-                BackupOperation.CREATE,
-                phase,
-                completed,
-                total,
-                message);
-    }
-
-    private void report(
-            CreateOperation operation,
-            OperationPhase phase,
-            long completed,
-            long total,
-            String message) {
-        OperationProgress progress = progressFor(
-                operation.operationId,
-                operation.request.worldId(),
-                operation.backupId,
-                phase,
-                completed,
-                total,
-                message);
-        operation.progress.set(progress);
-        for (ProgressListener listener : operation.listeners) {
-            safeNotify(listener, progress);
-        }
-    }
-
-    private DestinationPlan selectDestinations(CreateBackupRequest request) {
-        return new DestinationPlan(destinationSelector.select(request));
+    private BackupResult skipped(BackupId backupId, CreateBackupRequest request) {
+        return new BackupResult(backupId, request.worldId(), List.of(), clock.instant());
     }
 
     private Instant completionTime(BackupManifest manifest) {
@@ -777,159 +487,262 @@ public final class SerializedBackupCoordinator implements BackupCoordinator {
         return now.isBefore(manifest.createdAt()) ? manifest.createdAt() : now;
     }
 
-    private static void validatePrepared(
-            CreateBackupRequest request,
-            BackupManifest manifest) {
-        if (!manifest.worldId().equals(request.worldId())
-                || !manifest.worldName().equals(request.worldName())
-                || !manifest.label().equals(request.label())
-                || manifest.trigger() != request.trigger()) {
-            throw new IllegalArgumentException("Prepared capture does not match its create request");
-        }
-    }
-
     private static DestinationResult destinationOutcome(
-            DestinationType expectedDestination,
+            DestinationType destination,
             DestinationResult result,
-            Throwable throwable) {
-        if (throwable instanceof CancellationException) {
-            return DestinationResult.failed(
-                    expectedDestination,
-                    "Cancelled before this destination finished");
+            Throwable failure) {
+        if (failure instanceof CancellationException || failure instanceof InterruptedException) {
+            return DestinationResult.failed(destination, "Cancelled before this destination finished");
         }
-        if (throwable != null || result == null || result.destination() != expectedDestination) {
+        if (failure != null || result == null || result.destination() != destination) {
             return DestinationResult.failed(
-                    expectedDestination,
-                    "Destination failed before a trustworthy result was available");
+                    destination, "Destination failed before a trustworthy result was available");
         }
         return result;
     }
 
-    private static boolean hasDurableDestination(List<DestinationResult> destinations) {
-        return destinations.stream().anyMatch(result -> result.status() == DestinationStatus.SUCCESS
-                || result.status() == DestinationStatus.PENDING_SYNC);
+    private static CancellationException cancellation() {
+        return new CancellationException("Backup was cancelled");
     }
 
-    private static String completionMessage(BackupResult result) {
-        return switch (result.status()) {
-            case SUCCESS -> "Backup complete";
-            case PARTIAL_SUCCESS -> "Backup complete with warnings";
-            case FAILED -> "Backup destinations failed";
-            case SKIPPED -> "Backup skipped";
-        };
+    /** Where an operation is; every stage but DONE counts as busy. */
+    private enum Stage {
+        CAPTURING,
+        WAITING,
+        WRITING,
+        COMMITTING,
+        DONE
     }
 
-    private static void safeNotify(
-            ProgressListener listener,
-            OperationProgress progress) {
-        Observers.safely(() -> listener.onProgress(progress));
-    }
+    /**
+     * One world's unfinished operations: the backup whose destinations write and the captured
+     * backups that wait behind it. Its monitor also guards the mutable fields of every operation
+     * of the world, so a cancel and a stage change never interleave.
+     */
+    private static final class Lane {
+        private final Set<OperationId> unfinished = new HashSet<>();
 
-    private static void closeAfterFailure(
-            PreparedBackup.Resources resources,
-            Exception failure) {
-        try {
-            resources.close();
-        } catch (IOException closeFailure) {
-            failure.addSuppressed(closeFailure);
+        private final ArrayDeque<Operation> waiting = new ArrayDeque<>();
+
+        private final List<CompletableFuture<Void>> idleWaiters = new ArrayList<>();
+
+        private Operation writer;
+
+        private synchronized void register(OperationId operationId) {
+            unfinished.add(operationId);
+        }
+
+        private void unregister(OperationId operationId) {
+            List<CompletableFuture<Void>> idle;
+            synchronized (this) {
+                idle = remove(operationId);
+            }
+            idle.forEach(waiter -> waiter.complete(null));
+        }
+
+        /** Removes an operation; returns the idle waiters to complete, outside the lock, when it was the last. */
+        private List<CompletableFuture<Void>> remove(OperationId operationId) {
+            unfinished.remove(operationId);
+            if (!unfinished.isEmpty() || idleWaiters.isEmpty()) {
+                return List.of();
+            }
+            List<CompletableFuture<Void>> idle = List.copyOf(idleWaiters);
+            idleWaiters.clear();
+            return idle;
+        }
+
+        private synchronized CompletionStage<Void> whenIdle() {
+            if (unfinished.isEmpty()) {
+                return CompletableFuture.completedFuture(null);
+            }
+            CompletableFuture<Void> waiter = new CompletableFuture<>();
+            idleWaiters.add(waiter);
+            return waiter;
+        }
+
+        private synchronized boolean busy() {
+            return !unfinished.isEmpty();
+        }
+
+        private synchronized boolean hasWriter() {
+            return writer != null;
         }
     }
 
-    private final class CreateOperation {
-        private final CreateBackupRequest request;
+    /** Sends one operation's progress to its listener; after a cancel it reports nothing more. */
+    private static final class Progress {
+        private final OperationId operationId;
 
-        private final DestinationPlan plan;
+        private final WorldId worldId;
 
         private final BackupId backupId;
 
-        private final OperationId operationId;
+        private final ProgressListener listener;
 
-        private final boolean coalescible;
+        private volatile boolean silenced;
 
-        private final CopyOnWriteArrayList<ProgressListener> listeners = new CopyOnWriteArrayList<>();
-
-        private final OperationFuture result;
-
-        private final AtomicReference<CapturedBackup> capture;
-
-        private final AtomicReference<WorldOperationGate.Permit> permit;
-
-        private final AtomicReference<OperationProgress> progress = new AtomicReference<>();
-
-        private final AtomicReference<Future<?>> worker = new AtomicReference<>();
-
-        private final CopyOnWriteArrayList<CompletableFuture<?>> destinationTasks = new CopyOnWriteArrayList<>();
-
-        private final AtomicBoolean workerStarted = new AtomicBoolean();
-
-        private final AtomicBoolean cancelled = new AtomicBoolean();
-
-        private final AtomicReference<CancellationState> cancellationState =
-                new AtomicReference<>(CancellationState.CANCELLABLE);
-
-        private final AtomicBoolean interruptRequested = new AtomicBoolean();
-
-        private final AtomicBoolean terminal = new AtomicBoolean();
-
-        private volatile boolean previousInventoryPresent;
-
-        private volatile WorldLane<CreateOperation> lane;
-
-        private CreateOperation(
-                CreateBackupRequest request,
-                DestinationPlan plan,
-                BackupId backupId,
+        private Progress(
                 OperationId operationId,
-                boolean coalescible,
-                CapturedBackup capture,
-                boolean previousInventoryPresent,
+                WorldId worldId,
+                BackupId backupId,
                 ProgressListener listener) {
-            this.request = request;
-            this.plan = plan;
-            this.backupId = backupId;
             this.operationId = operationId;
-            this.coalescible = coalescible;
-            this.capture = new AtomicReference<>(capture);
-            this.permit = new AtomicReference<>();
-            this.previousInventoryPresent = previousInventoryPresent;
-            this.listeners.add(listener);
-            this.result = new OperationFuture(this);
+            this.worldId = worldId;
+            this.backupId = backupId;
+            this.listener = Objects.requireNonNull(listener, "listener");
         }
 
-        private boolean isCompatibleWith(CreateOperation other) {
-            return coalescible
-                    && other.coalescible
-                    && request.equals(other.request)
-                    && plan.equals(other.plan);
-        }
-    }
-
-    private final class OperationFuture extends CompletableFuture<BackupResult> {
-        private final CreateOperation operation;
-
-        private OperationFuture(CreateOperation operation) {
-            this.operation = operation;
-        }
-
-        @Override
-        public boolean cancel(boolean mayInterruptIfRunning) {
-            synchronized (operation) {
-                if (!operation.cancellationState.compareAndSet(
-                        CancellationState.CANCELLABLE,
-                        CancellationState.CANCELLATION_REQUESTED)) {
-                    return false;
-                }
-                boolean cancelled = super.cancel(mayInterruptIfRunning);
-                if (cancelled) {
-                    SerializedBackupCoordinator.this.cancel(operation, mayInterruptIfRunning);
-                } else {
-                    operation.cancellationState.compareAndSet(
-                            CancellationState.CANCELLATION_REQUESTED,
-                            CancellationState.CANCELLABLE);
-                }
-                return cancelled;
+        /** A listener or an invalid event never affects the backup. */
+        private void report(OperationPhase phase, long completed, long total, String message) {
+            if (!silenced) {
+                Observers.safely(() -> listener.onProgress(new OperationProgress(
+                        operationId,
+                        worldId,
+                        Optional.of(backupId),
+                        BackupOperation.CREATE,
+                        phase,
+                        completed,
+                        total,
+                        message)));
             }
         }
     }
 
+    /** One backup from its capture to its catalog record. Mutable fields are guarded by the lane. */
+    private final class Operation {
+        private final CreateBackupRequest request;
+
+        private final Progress progress;
+
+        private final List<BackupBackend> backends;
+
+        private final Lane lane;
+
+        private final OperationFuture result = new OperationFuture(this);
+
+        private final List<InterruptibleFuture<DestinationResult>> destinations = new ArrayList<>();
+
+        private Stage stage = Stage.CAPTURING;
+
+        private boolean cancelRequested;
+
+        private InterruptibleFuture<?> worker;
+
+        private CapturedBackup capture;
+
+        private WorldOperationGate.Permit permit;
+
+        private Operation(CreateBackupRequest request, Progress progress, List<BackupBackend> backends) {
+            this.request = request;
+            this.progress = progress;
+            this.backends = backends;
+            this.lane = lane(request.worldId());
+        }
+
+        /** Accepts a cancel unless the operation is recording or done; from here on it reports nothing. */
+        private boolean acceptCancel() {
+            synchronized (lane) {
+                if (stage == Stage.COMMITTING || stage == Stage.DONE) {
+                    return false;
+                }
+                cancelRequested = true;
+                progress.silenced = true;
+                return true;
+            }
+        }
+
+        /**
+         * Interrupts the running work. The worker or commit path then ends the operation; only a
+         * waiting operation, which no path would reach again, is taken out of the queue and ended
+         * on a worker, because ending it deletes its capture and a cancel may come from the render
+         * thread.
+         */
+        private void stopWork() {
+            List<InterruptibleFuture<?>> running = new ArrayList<>();
+            boolean dequeued;
+            synchronized (lane) {
+                dequeued = stage == Stage.WAITING && lane.waiting.remove(this);
+                if (worker != null) {
+                    running.add(worker);
+                }
+                running.addAll(destinations);
+            }
+            running.forEach(task -> task.stop(true));
+            if (dequeued) {
+                try {
+                    executor.execute(() -> finish(this, null, cancellation()));
+                } catch (RejectedExecutionException exception) {
+                    finish(this, null, cancellation());
+                }
+            }
+        }
+
+        private void attach(InterruptibleFuture<?> task) {
+            boolean stop;
+            synchronized (lane) {
+                worker = task;
+                stop = cancelRequested;
+            }
+            if (stop) {
+                task.stop(true);
+            }
+        }
+
+        private void addDestination(InterruptibleFuture<DestinationResult> write) {
+            boolean stop;
+            synchronized (lane) {
+                destinations.add(write);
+                stop = cancelRequested;
+            }
+            if (stop) {
+                write.stop(true);
+            }
+        }
+
+        /** Takes the world permit; null when the backup was cancelled while it waited for it. */
+        private BackupCapture admit(WorldOperationGate.Permit worldPermit) {
+            synchronized (lane) {
+                permit = worldPermit;
+                return cancelRequested ? null : capture.capture();
+            }
+        }
+
+        /** The point of no return; true when a cancel arrived before it. */
+        private boolean beginCommit() {
+            synchronized (lane) {
+                stage = Stage.COMMITTING;
+                return cancelRequested;
+            }
+        }
+
+        private BackupCapture capture() {
+            synchronized (lane) {
+                return capture.capture();
+            }
+        }
+    }
+
+    /** The stage handed to callers; cancelling it cancels the operation. */
+    private static final class OperationFuture extends CompletableFuture<BackupResult> {
+        private final Operation operation;
+
+        private OperationFuture(Operation operation) {
+            this.operation = operation;
+        }
+
+        /**
+         * Refused once the backup is recording. The stage completes as cancelled before the work is
+         * stopped, so an interrupted worker cannot complete it with its own failure first. Running
+         * work is interrupted whatever the flag says.
+         */
+        @Override
+        public boolean cancel(boolean mayInterruptIfRunning) {
+            if (!operation.acceptCancel()) {
+                return false;
+            }
+            boolean cancelled = super.cancel(mayInterruptIfRunning);
+            operation.stopWork();
+            return cancelled;
+        }
+    }
 }

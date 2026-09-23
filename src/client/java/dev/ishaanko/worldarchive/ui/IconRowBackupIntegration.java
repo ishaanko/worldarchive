@@ -5,13 +5,10 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Predicate;
-import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
 import net.fabricmc.fabric.api.client.screen.v1.Screens;
-import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.AbstractWidget;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.FriendsButton;
@@ -27,46 +24,39 @@ import net.minecraft.client.gui.screens.TitleScreen;
 public final class IconRowBackupIntegration {
     private static final int GAP = 4;
 
-    private static final AtomicBoolean REGISTERED = new AtomicBoolean();
-
-    private static volatile Supplier<? extends BackupClientFacade> facadeSupplier;
-
-    private static volatile Predicate<Screen> openLiveWorldBackups;
-
     private IconRowBackupIntegration() {
     }
 
     /**
-     * Registers the global Fabric screen hook. Repeated calls update the actions.
+     * Registers the title and pause screen hook; the client initializer calls this once.
      *
-     * @param facade supplies the facade the world list needs
+     * @param facade what the world list needs
      * @param openLiveWorld opens the browser for the loaded world over the given screen and
      *     reports whether it did
      */
     public static void register(
-            Supplier<? extends BackupClientFacade> facade,
+            BackupClientFacade facade,
             Predicate<Screen> openLiveWorld) {
-        facadeSupplier = Objects.requireNonNull(facade, "facade");
-        openLiveWorldBackups = Objects.requireNonNull(openLiveWorld, "openLiveWorld");
-        if (REGISTERED.compareAndSet(false, true)) {
-            ScreenEvents.AFTER_INIT.register(IconRowBackupIntegration::afterInit);
-        }
+        Objects.requireNonNull(facade, "facade");
+        Objects.requireNonNull(openLiveWorld, "openLiveWorld");
+        ScreenEvents.AFTER_INIT.register((minecraft, screen, width, height) -> {
+            Button.OnPress action;
+            if (screen instanceof TitleScreen) {
+                action = ignored -> minecraft.setScreenAndShow(new BackupWorldsScreen(screen, facade));
+            } else if (screen instanceof PauseScreen && minecraft.hasSingleplayerServer()) {
+                action = ignored -> {
+                    if (!openLiveWorld.test(screen)) {
+                        minecraft.setScreenAndShow(new BackupWorldsScreen(screen, facade));
+                    }
+                };
+            } else {
+                return;
+            }
+            install(screen, width, action);
+        });
     }
 
-    private static void afterInit(Minecraft minecraft, Screen screen, int width, int height) {
-        Button.OnPress action;
-        if (screen instanceof TitleScreen) {
-            action = ignored -> minecraft.setScreenAndShow(
-                    new BackupWorldsScreen(screen, currentFacade()));
-        } else if (screen instanceof PauseScreen && minecraft.hasSingleplayerServer()) {
-            action = ignored -> {
-                if (!currentLiveWorldAction().test(screen)) {
-                    minecraft.setScreenAndShow(new BackupWorldsScreen(screen, currentFacade()));
-                }
-            };
-        } else {
-            return;
-        }
+    private static void install(Screen screen, int width, Button.OnPress action) {
         List<Button> iconRow = iconRow(Screens.getWidgets(screen));
         if (iconRow.isEmpty()) {
             // No icon row to join; stay out rather than guess a spot.
@@ -145,21 +135,5 @@ public final class IconRowBackupIntegration {
             button.setPosition(x, y);
             x += button.getWidth() + GAP;
         }
-    }
-
-    private static BackupClientFacade currentFacade() {
-        Supplier<? extends BackupClientFacade> supplier = facadeSupplier;
-        if (supplier == null) {
-            throw new IllegalStateException("WorldArchive client facade has not been registered");
-        }
-        return Objects.requireNonNull(supplier.get(), "facadeSupplier result");
-    }
-
-    private static Predicate<Screen> currentLiveWorldAction() {
-        Predicate<Screen> action = openLiveWorldBackups;
-        if (action == null) {
-            throw new IllegalStateException("WorldArchive backup action has not been registered");
-        }
-        return action;
     }
 }

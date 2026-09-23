@@ -1,6 +1,5 @@
 package dev.ishaanko.worldarchive.config;
 
-import dev.ishaanko.worldarchive.model.SensitiveDataRedactor;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URLDecoder;
@@ -9,21 +8,24 @@ import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.util.Locale;
 import java.util.Objects;
-import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** Strictly whitelists credential-free URL, SCP, and absolute local Git remote forms. */
+/**
+ * Accepts the Git remote forms WorldArchive can use without storing a secret: an https, ssh or
+ * file URL, the SCP form {@code [user@]host:path}, and an absolute local path. Credentials
+ * belong in Git's credential helper, so a URL that carries a password, a query, a fragment or
+ * an access token is refused. The checks are structural: text that only looks like a secret,
+ * such as a folder named "Basic Training", is fine.
+ */
 public final class RemoteUrlPolicy {
-    static final String WORLD_ID_PLACEHOLDER = "{worldId}";
+    private static final int MAXIMUM_LENGTH = 2_048;
 
-    private static final UUID VALIDATION_WORLD_ID = UUID.fromString(
-            "00000000-0000-0000-0000-000000000000");
-
-    private static final int MAXIMUM_DECODE_ROUNDS = 4;
+    /** A URL decoded this many times without settling hides something on purpose. */
+    private static final int MAXIMUM_DECODE_ROUNDS = 3;
 
     private static final Pattern SCP_REMOTE = Pattern.compile(
-            "(?<user>[A-Za-z0-9._-]{1,64})@"
+            "(?:[A-Za-z0-9._-]{1,64}@)?"
                     + "(?<host>[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?):"
                     + "(?<path>[\\p{L}\\p{N}._~@%+\\-/]{1,1024})");
 
@@ -31,91 +33,133 @@ public final class RemoteUrlPolicy {
     private static final Pattern LOCAL_REMOTE = Pattern.compile(
             "(?:[A-Za-z]:[\\\\/]|\\\\\\\\|/)[^<>\"|?*\\p{Cntrl}]{1,2046}");
 
+    /** Access tokens of the common Git hosts, only where no letter or digit comes before them. */
+    private static final Pattern ACCESS_TOKEN = Pattern.compile(
+            "(?<![A-Za-z0-9])(?:github_pat_|gh[pousr]_|glpat-)[A-Za-z0-9_-]{16,}");
+
     private RemoteUrlPolicy() {
     }
 
-    static String validate(String remoteUrl) {
-        Objects.requireNonNull(remoteUrl, "remoteUrl");
-        int placeholders = countWorldIdPlaceholders(remoteUrl);
-        if (placeholders > 1) {
-            throw new IllegalArgumentException(
-                    "Git remote URL template must contain exactly one {worldId} placeholder");
-        }
-        String validationUrl = placeholders == 1
-                ? remoteUrl.replace(WORLD_ID_PLACEHOLDER, VALIDATION_WORLD_ID.toString())
-                : remoteUrl;
-        validateConcrete(validationUrl, false);
-        return remoteUrl;
-    }
-
-    /** Validates one configured per-world remote without a template. */
+    /**
+     * Checks a world's own remote, which WorldArchive pushes to and fetches from.
+     *
+     * @return the remote, unchanged
+     * @throws IllegalArgumentException saying what is wrong with it
+     */
     public static String validateConfiguredPlain(String remoteUrl) {
-        Objects.requireNonNull(remoteUrl, "remoteUrl");
-        if (countWorldIdPlaceholders(remoteUrl) != 0) {
-            throw new IllegalArgumentException("Git remote URL must not contain {worldId}");
-        }
-        validateConcrete(remoteUrl, false);
+        validate(remoteUrl, false);
         return remoteUrl;
     }
 
-    /** Validates an import source, including the read-only Git transport. */
+    /**
+     * Checks the source of an import, which may also use the read-only {@code git://} protocol.
+     *
+     * @return the remote, unchanged
+     * @throws IllegalArgumentException saying what is wrong with it
+     */
     public static String validatePlain(String remoteUrl) {
-        Objects.requireNonNull(remoteUrl, "remoteUrl");
-        if (countWorldIdPlaceholders(remoteUrl) != 0) {
-            throw new IllegalArgumentException("Git import URL must not contain {worldId}");
-        }
-        validateConcrete(remoteUrl, true);
+        validate(remoteUrl, true);
         return remoteUrl;
     }
 
-    static boolean isWorldIdTemplate(String remoteUrl) {
-        return countWorldIdPlaceholders(Objects.requireNonNull(remoteUrl, "remoteUrl")) == 1;
-    }
-
-    static String resolveWorldId(String remoteUrl, UUID worldId) {
-        String validated = validate(remoteUrl);
-        if (!isWorldIdTemplate(validated)) {
-            throw new IllegalArgumentException("Git remote URL is not a per-world template");
-        }
-        return validated.replace(
-                WORLD_ID_PLACEHOLDER,
-                Objects.requireNonNull(worldId, "worldId").toString());
-    }
-
-    private static int countWorldIdPlaceholders(String remoteUrl) {
-        int count = 0;
-        int offset = 0;
-        while ((offset = remoteUrl.indexOf(WORLD_ID_PLACEHOLDER, offset)) >= 0) {
-            count++;
-            offset += WORLD_ID_PLACEHOLDER.length();
-        }
-        return count;
-    }
-
-    private static void validateConcrete(String remoteUrl, boolean allowReadOnlyGitProtocol) {
+    private static void validate(String remoteUrl, boolean readOnlyGitProtocolAllowed) {
+        Objects.requireNonNull(remoteUrl, "remoteUrl");
         if (remoteUrl.isBlank()
-                || remoteUrl.length() > 2_048
+                || remoteUrl.length() > MAXIMUM_LENGTH
                 || !remoteUrl.equals(remoteUrl.strip())) {
             throw new IllegalArgumentException("Git remote URL is blank, padded, or too long");
         }
-        if (remoteUrl.chars().anyMatch(character -> Character.isISOControl(character))) {
+        if (remoteUrl.chars().anyMatch(Character::isISOControl)) {
             throw new IllegalArgumentException("Git remote URL contains control characters");
         }
-        rejectSensitiveData(remoteUrl);
         if (remoteUrl.contains("://")) {
-            validateUri(remoteUrl, allowReadOnlyGitProtocol);
-            return;
+            validateUrl(remoteUrl, readOnlyGitProtocolAllowed);
+        } else if (LOCAL_REMOTE.matcher(remoteUrl).matches()) {
+            validateLocalPath(remoteUrl);
+        } else {
+            validateScp(remoteUrl);
         }
-        Matcher scp = SCP_REMOTE.matcher(remoteUrl);
-        if (scp.matches()) {
-            if (scp.group("path").startsWith("-")) {
-                throw new IllegalArgumentException("Git SCP remote path must not start with a dash");
+    }
+
+    private static void validateUrl(String remoteUrl, boolean readOnlyGitProtocolAllowed) {
+        URI uri;
+        try {
+            uri = new URI(remoteUrl);
+        } catch (URISyntaxException exception) {
+            throw new IllegalArgumentException("Git remote URL is malformed", exception);
+        }
+        String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(Locale.ROOT);
+        if (!isSupportedScheme(scheme, readOnlyGitProtocolAllowed)) {
+            throw new IllegalArgumentException("Unsupported Git remote URL scheme");
+        }
+        if (uri.getRawQuery() != null || uri.getRawFragment() != null) {
+            throw new IllegalArgumentException("Git remote URL must not contain a query or a fragment");
+        }
+        String userInfo = uri.getRawUserInfo();
+        if (userInfo != null && (!scheme.equals("ssh") || userInfo.contains(":"))) {
+            throw new IllegalArgumentException(
+                    "Git remote URL must not contain a password; only ssh URLs may name a user");
+        }
+        requireRepositoryPath(uri, scheme);
+        rejectAccessTokens(remoteUrl);
+    }
+
+    private static boolean isSupportedScheme(String scheme, boolean readOnlyGitProtocolAllowed) {
+        return switch (scheme) {
+            case "https", "ssh", "file" -> true;
+            case "git" -> readOnlyGitProtocolAllowed;
+            default -> false;
+        };
+    }
+
+    private static void requireRepositoryPath(URI uri, String scheme) {
+        String path = uri.getRawPath();
+        if (scheme.equals("file")) {
+            if (path == null || !path.startsWith("/")) {
+                throw new IllegalArgumentException("File Git remote URL must have an absolute path");
             }
-            return;
+        } else if (uri.getHost() == null || path == null || path.isBlank() || path.equals("/")) {
+            throw new IllegalArgumentException("Network Git remote URL must have a host and repository path");
         }
-        if (!LOCAL_REMOTE.matcher(remoteUrl).matches()) {
-            throw new IllegalArgumentException("Git remote must be an approved URL, SCP form, or absolute local path");
+    }
+
+    /** Looks for a token in the URL as written and in each percent-decoded form of it. */
+    private static void rejectAccessTokens(String remoteUrl) {
+        String current = remoteUrl;
+        for (int round = 0; round <= MAXIMUM_DECODE_ROUNDS; round++) {
+            if (ACCESS_TOKEN.matcher(current).find()) {
+                throw new IllegalArgumentException("Git remote URL must not contain an access token");
+            }
+            String decoded;
+            try {
+                decoded = URLDecoder.decode(current.replace("+", "%2B"), StandardCharsets.UTF_8);
+            } catch (IllegalArgumentException exception) {
+                throw new IllegalArgumentException("Git remote URL contains malformed percent encoding", exception);
+            }
+            if (decoded.equals(current)) {
+                return;
+            }
+            current = decoded;
         }
+        throw new IllegalArgumentException("Git remote URL is percent-encoded too many times");
+    }
+
+    private static void validateScp(String remoteUrl) {
+        Matcher scp = SCP_REMOTE.matcher(remoteUrl);
+        if (!scp.matches()) {
+            throw new IllegalArgumentException(
+                    "Git remote must be an https, ssh or file URL, host:path, or an absolute local path");
+        }
+        if (scp.group("path").startsWith("-")) {
+            throw new IllegalArgumentException("Git SCP remote path must not start with a dash");
+        }
+        if (ACCESS_TOKEN.matcher(remoteUrl).find()) {
+            throw new IllegalArgumentException("Git remote must not contain an access token");
+        }
+    }
+
+    /** A local path is a folder name, not a URL, so it is not percent-decoded. */
+    private static void validateLocalPath(String remoteUrl) {
         try {
             if (!Path.of(remoteUrl).isAbsolute()) {
                 throw new IllegalArgumentException("Local Git remote path must be absolute");
@@ -123,64 +167,5 @@ public final class RemoteUrlPolicy {
         } catch (InvalidPathException exception) {
             throw new IllegalArgumentException("Local Git remote path is malformed", exception);
         }
-    }
-
-    private static void validateUri(String remoteUrl, boolean allowReadOnlyGitProtocol) {
-        try {
-            URI uri = new URI(remoteUrl);
-            if (uri.getRawUserInfo() != null || uri.getRawQuery() != null || uri.getRawFragment() != null) {
-                throw new IllegalArgumentException(
-                        "Git remote URL must not contain user information, a query, or a fragment");
-            }
-            String scheme = uri.getScheme();
-            if (scheme == null || !isSupportedScheme(scheme, allowReadOnlyGitProtocol)) {
-                throw new IllegalArgumentException("Unsupported Git remote URL scheme");
-            }
-            if ("file".equalsIgnoreCase(scheme)) {
-                if (uri.getRawPath() == null || uri.getRawPath().isBlank() || !uri.getRawPath().startsWith("/")) {
-                    throw new IllegalArgumentException("File Git remote URL must have an absolute path");
-                }
-            } else if (uri.getHost() == null
-                    || uri.getRawPath() == null
-                    || uri.getRawPath().isBlank()
-                    || "/".equals(uri.getRawPath())) {
-                throw new IllegalArgumentException("Network Git remote URL must have a host and repository path");
-            }
-        } catch (URISyntaxException exception) {
-            throw new IllegalArgumentException("Git remote URL is malformed", exception);
-        }
-    }
-
-    private static void rejectSensitiveData(String value) {
-        String current = value;
-        for (int round = 0; round <= MAXIMUM_DECODE_ROUNDS; round++) {
-            if (SensitiveDataRedactor.containsSensitiveData(current)) {
-                throw new IllegalArgumentException(
-                        "Git remote must not contain credentials or known token formats");
-            }
-            String decoded;
-            try {
-                decoded = URLDecoder.decode(current, StandardCharsets.UTF_8);
-            } catch (IllegalArgumentException exception) {
-                throw new IllegalArgumentException("Git remote contains malformed percent encoding", exception);
-            }
-            if (decoded.equals(current)) {
-                return;
-            }
-            if (round == MAXIMUM_DECODE_ROUNDS) {
-                throw new IllegalArgumentException("Git remote is excessively percent encoded");
-            }
-            current = decoded;
-        }
-    }
-
-    private static boolean isSupportedScheme(
-            String scheme,
-            boolean allowReadOnlyGitProtocol) {
-        return switch (scheme.toLowerCase(Locale.ROOT)) {
-            case "https", "ssh", "file" -> true;
-            case "git" -> allowReadOnlyGitProtocol;
-            default -> false;
-        };
     }
 }

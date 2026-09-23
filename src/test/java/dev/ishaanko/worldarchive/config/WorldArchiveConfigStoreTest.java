@@ -2,570 +2,247 @@ package dev.ishaanko.worldarchive.config;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import dev.ishaanko.worldarchive.model.WorldId;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
-import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 final class WorldArchiveConfigStoreTest {
+    private static final String WORLD_ID = "12345678-1234-1234-1234-123456789abc";
+
     @TempDir
     Path temporaryDirectory;
 
     @Test
-    void defaultsMatchProductBehavior() throws IOException {
-        WorldArchiveConfig config = new WorldArchiveConfigStore(temporaryDirectory.resolve("missing.json"))
-                .load(java.util.List.of());
-
-        assertTrue(config.triggers().manualEnabled());
-        assertTrue(config.triggers().worldExitEnabled());
-        assertFalse(config.triggers().scheduledEnabled());
-        assertEquals(30, config.triggers().scheduleIntervalMinutes());
-        assertTrue(config.git().enabled());
-        assertTrue(config.zip().enabled());
-        assertEquals(
-                dev.ishaanko.worldarchive.model.DestinationHealthStatus.UNCONFIGURED,
-                config.git().health().status());
-        assertEquals(
-                dev.ishaanko.worldarchive.model.DestinationHealthStatus.UNCONFIGURED,
-                config.zip().health().status());
-    }
-
-    @Test
-    void roundTripsUtf8ConfigurationAtomically() throws IOException {
+    void roundTripsEverySettingAndStaysReadableByOlderVersions() throws IOException {
         Path gitRepository = Files.createDirectory(temporaryDirectory.resolve("git-世界"));
         Path zipDestination = Files.createDirectory(temporaryDirectory.resolve("zip-é"));
-        Path legacyGitRepository = Files.createDirectory(temporaryDirectory.resolve("legacy-git"));
         Path world = Files.createDirectory(temporaryDirectory.resolve("forever-world"));
         Path worldZip = Files.createDirectory(temporaryDirectory.resolve("forever-world-zips"));
-        Path file = temporaryDirectory.resolve("worldarchive.json");
-        WorldArchiveConfigStore store = new WorldArchiveConfigStore(file);
+        WorldArchiveConfigStore store = store();
         WorldArchiveConfig expected = new WorldArchiveConfig(
-                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
                 new TriggerConfig(true, false, true, 45),
-                new GitDestinationConfig(
-                        true,
-                        Optional.of(gitRepository),
-                        "backup-origin",
-                        Optional.empty(),
-                        DestinationTriggerConfig.defaults(),
-                        GitDestinationConfig.DEFAULT_LFS_PATTERNS,
-                        dev.ishaanko.worldarchive.model.DestinationHealth.notChecked(
-                                dev.ishaanko.worldarchive.model.DestinationType.GIT),
-                        Optional.of(legacyGitRepository),
-                        Optional.of("ssh://example.invalid/legacy-backups.git")),
-                new ZipDestinationConfig(true, Optional.of(zipDestination)),
-                java.util.List.of(new WorldConfig(
-                        dev.ishaanko.worldarchive.model.WorldId.create(),
-                        true,
+                new GitDestinationConfig(true, Optional.of(gitRepository), "backup-origin",
+                        new DestinationTriggerConfig(true, false, false), List.of("*.mca", "*.nbt")),
+                new ZipDestinationConfig(false, Optional.of(zipDestination), new DestinationTriggerConfig(false, true, false)),
+                List.of(new WorldConfig(
+                        WorldId.create(),
+                        false,
                         world,
-                        Optional.of("ssh://example.invalid/forever-world.git"),
+                        Optional.of("ssh://git@example.invalid:2222/forever-world.git"),
                         Optional.of(worldZip),
                         new StoragePolicy(16L * 1_024 * 1_024 * 1_024, 5, 3, 9))));
 
-        store.save(expected, java.util.List.of(world));
-        WorldArchiveConfig canonicalExpected = expected.validateDestinations(java.util.List.of(world));
-        assertEquals(canonicalExpected, store.load(java.util.List.of(world)));
-        assertEquals(canonicalExpected, store.load(java.util.List.of(world)));
-        String serialized = Files.readString(file, StandardCharsets.UTF_8);
-        assertTrue(serialized.contains("git-世界"));
-        assertTrue(serialized.contains("\"repositoryRoot\""));
-        assertFalse(serialized.contains("\"remoteUrlTemplate\""));
-        assertTrue(serialized.contains("\"remoteUrl\": \"ssh://example.invalid/forever-world.git\""));
-        assertTrue(serialized.contains("\"zipDestination\": \""));
-        assertTrue(serialized.contains("\"legacySharedRepository\""));
-        assertTrue(serialized.contains("\"legacyRemoteUrl\""));
-        assertTrue(serialized.contains("\"storage\""));
-        assertFalse(serialized.contains("\"repository\":"));
-        assertFalse(serialized.toLowerCase().contains("password"));
+        WorldArchiveConfig saved = store.update(ignored -> expected, List.of(world));
+
+        assertEquals(expected.canonicalize(), saved);
+        assertEquals(saved, store().load());
+        JsonObject destinations = written().getAsJsonObject("destinations");
+        // WorldArchive 0.4 refuses a destination without "health", and replaces unreadable settings.
+        assertTrue(destinations.getAsJsonObject("git").has("health"));
+        assertTrue(destinations.getAsJsonObject("zip").has("health"));
     }
 
     @Test
-    void schemaFourRejectsPlainRemoteUrlTemplate() throws IOException {
-        Path file = temporaryDirectory.resolve("plain-current-remote.json");
-        WorldArchiveConfigStore store = new WorldArchiveConfigStore(file);
-        WorldArchiveConfig defaults = WorldArchiveConfig.defaults();
-        Path world = Files.createDirectory(temporaryDirectory.resolve("schema-four-world"));
-        WorldArchiveConfig current = new WorldArchiveConfig(
-                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
-                defaults.triggers(),
-                defaults.git(),
-                defaults.zip(),
-                java.util.List.of(new WorldConfig(
-                        dev.ishaanko.worldarchive.model.WorldId.create(),
-                        true,
-                        world)));
-        store.save(current, java.util.List.of(world));
-        String invalid = Files.readString(file, StandardCharsets.UTF_8)
-                .replace(
-                        "\"schemaVersion\": " + WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
-                        "\"schemaVersion\": 4")
-                .replace(
-                        "\"remoteName\": \"origin\",",
-                        "\"remoteName\": \"origin\",\n      \"remoteUrlTemplate\": \"https://example.invalid/shared.git\",");
-        Files.writeString(file, invalid, StandardCharsets.UTF_8);
+    void defaultFoldersAreFilledInButNeverStored() throws IOException {
+        WorldArchiveConfig loaded = store().load();
+        Path storageRoot = temporaryDirectory.toRealPath().resolve("worldarchive");
+        assertEquals(Optional.of(storageRoot.resolve("git")), loaded.git().repository());
+        assertEquals(Optional.of(storageRoot.resolve("archives")), loaded.zip().destination());
 
-        ConfigurationException exception = assertThrows(
-                ConfigurationException.class,
-                () -> store.load(java.util.List.of()));
+        store().update(config -> new WorldArchiveConfig(
+                new TriggerConfig(true, true, true, 60), config.git(), config.zip(), config.worlds()), List.of());
 
-        assertTrue(exception.getMessage().contains("{worldId}"));
+        JsonObject destinations = written().getAsJsonObject("destinations");
+        assertFalse(destinations.getAsJsonObject("git").has("repositoryRoot"));
+        assertFalse(destinations.getAsJsonObject("zip").has("destination"));
+        Path copiedGame = Files.createDirectory(temporaryDirectory.resolve("copied-instance"));
+        Path copiedConfig = Files.createDirectory(copiedGame.resolve("config")).resolve("worldarchive.json");
+        Files.copy(configFile(), copiedConfig);
+        WorldArchiveConfig copied = new WorldArchiveConfigStore(
+                copiedConfig, new DefaultDestinations(copiedGame.resolve("worldarchive"))).load();
+        assertEquals(Optional.of(copiedGame.toRealPath().resolve("worldarchive/git")), copied.git().repository());
+    }
+
+    /**
+     * The default folders are links to a USB drive that is not connected. The settings still load
+     * and an unreadable file can still be reset; only a backup to such a folder fails, on its own.
+     */
+    @Test
+    void defaultFoldersLinkedToAnOfflineDriveLeaveTheSettingsReadable() throws IOException {
+        Path drive = Files.createDirectories(temporaryDirectory.resolve("usb-drive"));
+        Path storage = Files.createDirectories(temporaryDirectory.resolve("worldarchive"));
+        link(storage.resolve("git"), Files.createDirectories(drive.resolve("git")));
+        link(storage.resolve("archives"), Files.createDirectories(drive.resolve("archives")));
+        store().load();
+        Files.move(drive, temporaryDirectory.resolve("unplugged"));
+
+        WorldArchiveConfig loaded = store().load();
+        Files.writeString(configFile(), "{\"schemaVersion\": 7,", StandardCharsets.UTF_8);
+        Optional<WorldArchiveConfigStore.Reset> reset = store().reset(config -> config, List.of(), Instant.EPOCH);
+
+        assertEquals(Optional.of(storage.resolve("git")), loaded.git().repository());
+        assertTrue(reset.isPresent());
+        assertEquals(loaded.zip().destination(), store().load().zip().destination());
     }
 
     @Test
-    void migratesSchemaFourKeepingEachWorldZipFolder() throws IOException {
-        Path file = temporaryDirectory.resolve("schema-four-zip.json");
-        Path world = Files.createDirectory(temporaryDirectory.resolve("zip-override-world"));
-        Path override = Files.createDirectory(temporaryDirectory.resolve("world-zips"));
-        WorldArchiveConfig defaults = WorldArchiveConfig.defaults();
-        WorldArchiveConfig current = new WorldArchiveConfig(
-                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
-                defaults.triggers(),
-                defaults.git(),
-                defaults.zip(),
-                java.util.List.of(new WorldConfig(
-                        dev.ishaanko.worldarchive.model.WorldId.create(),
-                        true,
-                        world,
-                        Optional.empty(),
-                        Optional.of(override),
-                        StoragePolicy.defaults())));
-        WorldArchiveConfigStore store = new WorldArchiveConfigStore(file);
-        store.save(current, java.util.List.of(world));
-        Files.writeString(file, Files.readString(file, StandardCharsets.UTF_8).replace(
-                "\"schemaVersion\": " + WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
-                "\"schemaVersion\": 4"), StandardCharsets.UTF_8);
-
-        WorldArchiveConfig migrated = store.load(java.util.List.of(world));
-
-        assertEquals(override.toRealPath(), migrated.worlds().getFirst().zipDestination().orElseThrow());
-    }
-
-    @Test
-    void migratesSchemaFourTemplateToEachExistingWorld() throws IOException {
-        Path file = temporaryDirectory.resolve("schema-four-template.json");
-        Path world = Files.createDirectory(temporaryDirectory.resolve("migrated-world"));
-        dev.ishaanko.worldarchive.model.WorldId worldId =
-                dev.ishaanko.worldarchive.model.WorldId.create();
-        WorldArchiveConfig defaults = WorldArchiveConfig.defaults();
-        WorldArchiveConfig current = new WorldArchiveConfig(
-                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
-                defaults.triggers(),
-                defaults.git(),
-                defaults.zip(),
-                java.util.List.of(new WorldConfig(worldId, true, world)));
-        WorldArchiveConfigStore store = new WorldArchiveConfigStore(file);
-        store.save(current, java.util.List.of(world));
-        String schemaFour = Files.readString(file, StandardCharsets.UTF_8)
-                .replace(
-                        "\"schemaVersion\": " + WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
-                        "\"schemaVersion\": 4")
-                .replace(
-                        "\"remoteName\": \"origin\",",
-                        "\"remoteName\": \"origin\",\n"
-                                + "      \"remoteUrlTemplate\": "
-                                + "\"https://example.invalid/world-{worldId}.git\",");
-        Files.writeString(file, schemaFour, StandardCharsets.UTF_8);
-
-        WorldArchiveConfig migrated = store.load(java.util.List.of(world));
-
-        assertTrue(migrated.git().remoteUrl().isEmpty());
-        assertEquals(
-                "https://example.invalid/world-" + worldId + ".git",
-                migrated.worlds().getFirst().remoteUrl().orElseThrow());
-        String persisted = Files.readString(file, StandardCharsets.UTF_8);
-        assertTrue(persisted.contains(
-                "\"schemaVersion\": " + WorldArchiveConfig.CURRENT_SCHEMA_VERSION));
-        assertFalse(persisted.contains("remoteUrlTemplate"));
-    }
-
-    @Test
-    void migratesSchemaSixWorldsToDefaultStoragePolicy() throws IOException {
-        Path file = temporaryDirectory.resolve("schema-six.json");
-        Path world = Files.createDirectory(temporaryDirectory.resolve("schema-six-world"));
-        WorldArchiveConfig current = new WorldArchiveConfig(
-                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
-                TriggerConfig.defaults(),
-                GitDestinationConfig.defaults(),
-                ZipDestinationConfig.defaults(),
-                java.util.List.of(new WorldConfig(
-                        dev.ishaanko.worldarchive.model.WorldId.create(),
-                        true,
-                        world)));
-        WorldArchiveConfigStore store = new WorldArchiveConfigStore(file);
-        store.save(current, java.util.List.of(world));
-        JsonObject schemaSix = JsonParser.parseString(
-                        Files.readString(file, StandardCharsets.UTF_8))
-                .getAsJsonObject();
-        schemaSix.addProperty("schemaVersion", 6);
-        schemaSix.getAsJsonArray("worlds")
-                .get(0)
-                .getAsJsonObject()
-                .remove("storage");
-        Files.writeString(file, schemaSix + System.lineSeparator(), StandardCharsets.UTF_8);
-
-        WorldArchiveConfig migrated = store.load(java.util.List.of(world));
-
-        assertEquals(
-                StoragePolicy.defaults(),
-                migrated.worlds().getFirst().storagePolicy());
-        JsonObject persisted = JsonParser.parseString(
-                        Files.readString(file, StandardCharsets.UTF_8))
-                .getAsJsonObject();
-        assertEquals(
-                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
-                persisted.get("schemaVersion").getAsInt());
-        assertTrue(persisted.getAsJsonArray("worlds")
-                .get(0)
-                .getAsJsonObject()
-                .has("storage"));
-    }
-
-    @Test
-    void rejectsMissingOrInvalidCurrentStoragePolicy() throws IOException {
-        Path file = temporaryDirectory.resolve("invalid-storage.json");
-        Path world = Files.createDirectory(temporaryDirectory.resolve("invalid-storage-world"));
-        WorldArchiveConfig current = new WorldArchiveConfig(
-                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
-                TriggerConfig.defaults(),
-                GitDestinationConfig.defaults(),
-                ZipDestinationConfig.defaults(),
-                java.util.List.of(new WorldConfig(
-                        dev.ishaanko.worldarchive.model.WorldId.create(),
-                        true,
-                        world)));
-        WorldArchiveConfigStore store = new WorldArchiveConfigStore(file);
-        store.save(current, java.util.List.of(world));
-        JsonObject encoded = JsonParser.parseString(
-                        Files.readString(file, StandardCharsets.UTF_8))
-                .getAsJsonObject();
-        JsonObject encodedWorld = encoded.getAsJsonArray("worlds")
-                .get(0)
-                .getAsJsonObject();
-        JsonObject storage = encodedWorld.remove("storage").getAsJsonObject();
-        Files.writeString(file, encoded + System.lineSeparator(), StandardCharsets.UTF_8);
-        assertThrows(
-                ConfigurationException.class,
-                () -> store.load(java.util.List.of(world)));
-
-        storage.addProperty("budgetBytes", -1);
-        encodedWorld.add("storage", storage);
-        Files.writeString(file, encoded + System.lineSeparator(), StandardCharsets.UTF_8);
-        assertThrows(
-                ConfigurationException.class,
-                () -> store.load(java.util.List.of(world)));
-    }
-
-    @Test
-    void refusesMalformedAndFutureConfiguration() throws IOException {
-        Path file = temporaryDirectory.resolve("worldarchive.json");
-        WorldArchiveConfigStore store = new WorldArchiveConfigStore(file);
-
-        Files.writeString(file, "{not-json", StandardCharsets.UTF_8);
-        assertThrows(ConfigurationException.class, () -> store.load(java.util.List.of()));
-
-        Files.writeString(file, "{}", StandardCharsets.UTF_8);
-        assertThrows(ConfigurationException.class, () -> store.load(java.util.List.of()));
-
-        Files.writeString(file, "{\"schemaVersion\":999}", StandardCharsets.UTF_8);
-        UnsupportedSchemaVersionException exception = assertThrows(
-                UnsupportedSchemaVersionException.class,
-                () -> store.load(java.util.List.of()));
-        assertEquals(999, exception.schemaVersion());
-
-        Files.writeString(file, "{\"schemaVersion\":1.5}", StandardCharsets.UTF_8);
-        assertThrows(ConfigurationException.class, () -> store.load(java.util.List.of()));
-    }
-
-    @Test
-    void migratesLegacyConfigurationAndPersistsCurrentSchema() throws IOException {
-        Path zipDestination = Files.createDirectory(temporaryDirectory.resolve("legacy-zips"));
-        Path file = temporaryDirectory.resolve("worldarchive.json");
-        String legacy = """
+    void upgradesAVersion031FileAndKeepsTheOriginal() throws IOException {
+        Path gameFolder = temporaryDirectory.toRealPath();
+        Path world = Files.createDirectories(gameFolder.resolve("saves/World"));
+        String original = """
                 {
-                  "manualBackups": false,
-                  "exitBackups": true,
-                  "scheduleEnabled": true,
-                  "scheduleMinutes": 60,
-                  "gitEnabled": false,
-                  "zipEnabled": true,
-                  "zipDestination": "%s"
-                }
-                """.formatted(jsonPath(zipDestination));
-        Files.writeString(file, legacy, StandardCharsets.UTF_8);
-
-        WorldArchiveConfig migrated = new WorldArchiveConfigStore(file).load(java.util.List.of());
-
-        assertEquals(WorldArchiveConfig.CURRENT_SCHEMA_VERSION, migrated.schemaVersion());
-        assertFalse(migrated.triggers().manualEnabled());
-        assertEquals(60, migrated.triggers().scheduleIntervalMinutes());
-        assertFalse(migrated.git().enabled());
-        assertEquals(zipDestination.toRealPath(), migrated.zip().destination().orElseThrow());
-        assertTrue(Files.readString(file, StandardCharsets.UTF_8).contains(
-                "\"schemaVersion\": " + WorldArchiveConfig.CURRENT_SCHEMA_VERSION));
-    }
-
-    @Test
-    void migratesSchemaThreeGitStorageWithoutMovingOrDeletingIt() throws IOException {
-        Path legacyGit = Files.createDirectory(temporaryDirectory.resolve("legacy-shared.git"));
-        Path zip = Files.createDirectory(temporaryDirectory.resolve("schema-three-zips"));
-        Path file = temporaryDirectory.resolve("schema-three.json");
-        Files.writeString(file, """
-                {
-                  "schemaVersion": 3,
-                  "triggers": {
-                    "manualEnabled": true,
-                    "worldExitEnabled": true,
-                    "scheduledEnabled": false,
-                    "scheduleIntervalMinutes": 30
-                  },
+                  "schemaVersion": 6,
+                  "triggers": {"manualEnabled": true, "worldExitEnabled": true, "scheduledEnabled": false,
+                    "scheduleIntervalMinutes": 30},
                   "destinations": {
                     "git": {
                       "enabled": true,
-                      "repository": "%s",
+                      "repositoryRoot": "%s",
                       "remoteName": "origin",
-                      "remoteUrl": "https://example.invalid/legacy.git",
-                      "triggers": {
-                        "manualEnabled": true,
-                        "worldExitEnabled": true,
-                        "scheduledEnabled": false
-                      },
-                      "lfsPatterns": ["*.mca"],
-                      "health": {
-                        "status": "HEALTHY",
-                        "message": "legacy repository was ready",
-                        "checkedAt": "2026-07-17T12:00:00Z"
-                      }
+                      "triggers": {"manualEnabled": true, "worldExitEnabled": true, "scheduledEnabled": true},
+                      "lfsPatterns": ["*.mca", "*.mcr", "*.dat", "*.dat_old", "*.nbt", "*.zip"],
+                      "health": {"status": "HEALTHY", "message": "Git git version 2.45.1 | LFS git-lfs/3.5.1",
+                        "checkedAt": "2026-08-01T10:00:00Z"}
                     },
                     "zip": {
                       "enabled": true,
                       "destination": "%s",
-                      "triggers": {
-                        "manualEnabled": true,
-                        "worldExitEnabled": true,
-                        "scheduledEnabled": false
-                      },
-                      "health": {
-                        "status": "HEALTHY",
-                        "message": "ZIP folder is ready",
-                        "checkedAt": "2026-07-17T12:00:00Z"
-                      }
+                      "triggers": {"manualEnabled": true, "worldExitEnabled": true, "scheduledEnabled": true},
+                      "health": {"status": "HEALTHY", "message": "ZIP archive folder is ready",
+                        "checkedAt": "2026-08-01T10:00:00Z"}
                     }
                   },
-                  "worlds": []
+                  "worlds": [
+                    {"worldId": "%s", "enabled": true, "path": "%s", "remoteUrl": "git@github.com:player/world.git"}
+                  ]
                 }
-                """.formatted(jsonPath(legacyGit), jsonPath(zip)), StandardCharsets.UTF_8);
+                """.formatted(
+                        json(gameFolder.resolve("worldarchive/git")),
+                        json(gameFolder.resolve("worldarchive/archives")),
+                        WORLD_ID,
+                        json(world));
+        Files.createDirectories(configFile().getParent());
+        Files.writeString(configFile(), original, StandardCharsets.UTF_8);
 
-        WorldArchiveConfig migrated = new WorldArchiveConfigStore(file).load(java.util.List.of());
+        WorldArchiveConfig upgraded = store().load();
 
-        assertEquals(WorldArchiveConfig.CURRENT_SCHEMA_VERSION, migrated.schemaVersion());
-        assertTrue(migrated.git().repository().isEmpty());
-        assertTrue(migrated.git().remoteUrl().isEmpty());
-        assertEquals(legacyGit.toRealPath(), migrated.git().legacyRepository().orElseThrow());
-        assertEquals(
-                "https://example.invalid/legacy.git",
-                migrated.git().legacyRemoteUrl().orElseThrow());
-        assertEquals(
-                dev.ishaanko.worldarchive.model.DestinationHealth.notChecked(
-                        dev.ishaanko.worldarchive.model.DestinationType.GIT),
-                migrated.git().health());
-        assertTrue(Files.isDirectory(legacyGit));
-        String persisted = Files.readString(file, StandardCharsets.UTF_8);
-        assertTrue(persisted.contains(
-                "\"schemaVersion\": " + WorldArchiveConfig.CURRENT_SCHEMA_VERSION));
-        assertTrue(persisted.contains("\"legacySharedRepository\""));
-        assertFalse(persisted.contains("\"repository\":"));
+        WorldConfig upgradedWorld = upgraded.worlds().getFirst();
+        assertEquals(StoragePolicy.defaults(), upgradedWorld.storagePolicy());
+        assertEquals(Optional.of("git@github.com:player/world.git"), upgradedWorld.remoteUrl());
+        assertEquals(original, Files.readString(backup(6), StandardCharsets.UTF_8));
+        JsonObject written = written();
+        assertEquals(WorldArchiveConfig.CURRENT_SCHEMA_VERSION, written.get("schemaVersion").getAsInt());
+        assertFalse(written.getAsJsonObject("destinations").getAsJsonObject("git").has("repositoryRoot"));
+        assertEquals(upgraded, store().load());
     }
 
     @Test
-    void ignoresOrphanedPartialWriteAndKeepsLastPublishedValue() throws IOException {
-        Path file = temporaryDirectory.resolve("worldarchive.json");
-        WorldArchiveConfigStore store = new WorldArchiveConfigStore(file);
-        store.save(WorldArchiveConfig.defaults(), java.util.List.of());
-        Files.writeString(
-                temporaryDirectory.resolve(".worldarchive.json.interrupted.tmp"),
-                "{\"schemaVersion\":999}",
-                StandardCharsets.UTF_8);
-
-        assertEquals(WorldArchiveConfig.defaults(), store.load(java.util.List.of()));
-    }
-
-    @Test
-    void rejectsCredentialBearingConfiguration() throws IOException {
-        assertThrows(IllegalArgumentException.class, () -> new GitDestinationConfig(
-                true,
-                Optional.empty(),
-                "origin",
-                Optional.of("https://user:password@example.invalid/repository.git")));
-
-        Path file = temporaryDirectory.resolve("worldarchive.json");
-        Files.writeString(
-                file,
-                "{\"schemaVersion\":1,\"accessToken\":\"never\"}",
-                StandardCharsets.UTF_8);
-        assertThrows(
-                ConfigurationException.class,
-                () -> new WorldArchiveConfigStore(file).load(java.util.List.of()));
-
-        Files.writeString(
-                file,
-                "{\"schemaVersion\":2,\"extensions\":[{\"accessToken\":\"never\"}]}",
-                StandardCharsets.UTF_8);
-        assertThrows(
-                ConfigurationException.class,
-                () -> new WorldArchiveConfigStore(file).load(java.util.List.of()));
-    }
-
-    @Test
-    void saveRejectsDestinationInsideKnownWorld() throws IOException {
-        Path world = Files.createDirectory(temporaryDirectory.resolve("world"));
-        WorldArchiveConfig config = new WorldArchiveConfig(
-                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
-                TriggerConfig.defaults(),
-                new GitDestinationConfig(
-                        true,
-                        Optional.of(world.resolve("repository")),
-                        "origin",
-                        Optional.empty()),
-                ZipDestinationConfig.defaults());
-
-        WorldArchiveConfigStore store = new WorldArchiveConfigStore(temporaryDirectory.resolve("worldarchive.json"));
-        assertThrows(IOException.class, () -> store.save(config, java.util.List.of(world)));
-        assertFalse(Files.exists(store.file()));
-    }
-
-    @Test
-    void noUnsafeSaveOverloadExists() {
-        assertFalse(Arrays.stream(WorldArchiveConfigStore.class.getMethods())
-                .anyMatch(method -> method.getName().equals("save") && method.getParameterCount() == 1));
-    }
-
-    @Test
-    void roundTripsPerDestinationAndPerWorldSettings() throws IOException {
-        Path world = Files.createDirectory(temporaryDirectory.resolve("configured-world"));
-        Path git = Files.createDirectory(temporaryDirectory.resolve("configured-git"));
-        Path zip = Files.createDirectory(temporaryDirectory.resolve("configured-zip"));
-        WorldArchiveConfig expected = new WorldArchiveConfig(
-                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
-                TriggerConfig.defaults(),
-                new GitDestinationConfig(
-                        true,
-                        Optional.of(git),
-                        "origin",
-                        Optional.empty(),
-                        new DestinationTriggerConfig(true, false, false),
-                        java.util.List.of("*.mca", "*.nbt"),
-                        new dev.ishaanko.worldarchive.model.DestinationHealth(
-                                dev.ishaanko.worldarchive.model.DestinationType.GIT,
-                                dev.ishaanko.worldarchive.model.DestinationHealthStatus.HEALTHY,
-                                "Git and LFS are ready",
-                                Instant.parse("2026-07-17T12:00:00Z"))),
-                new ZipDestinationConfig(
-                        true,
-                        Optional.of(zip),
-                        new DestinationTriggerConfig(false, true, false),
-                        new dev.ishaanko.worldarchive.model.DestinationHealth(
-                                dev.ishaanko.worldarchive.model.DestinationType.ZIP,
-                                dev.ishaanko.worldarchive.model.DestinationHealthStatus.DEGRADED,
-                                "Desktop sync is paused",
-                                Instant.parse("2026-07-17T12:01:00Z"))),
-                java.util.List.of(new WorldConfig(
-                        dev.ishaanko.worldarchive.model.WorldId.create(),
-                        false,
-                        world)));
-        WorldArchiveConfigStore store = new WorldArchiveConfigStore(temporaryDirectory.resolve("settings.json"));
-
-        store.save(expected, java.util.List.of(world));
-
-        assertEquals(
-                expected.validateDestinations(java.util.List.of(world)),
-                store.load(java.util.List.of(world)));
-    }
-
-    @Test
-    void migratesSchemaTwoWithDefaultHealthForBothDestinations() throws IOException {
-        Path file = temporaryDirectory.resolve("schema-two.json");
-        Files.writeString(file, """
+    void upgradesAVersion013RemoteTemplateToEachWorld() throws IOException {
+        Path world = Files.createDirectories(temporaryDirectory.resolve("saves/World"));
+        Files.createDirectories(configFile().getParent());
+        Files.writeString(configFile(), """
                 {
-                  "schemaVersion": 2,
-                  "triggers": {
-                    "manualEnabled": true,
-                    "worldExitEnabled": true,
-                    "scheduledEnabled": false,
-                    "scheduleIntervalMinutes": 30
-                  },
+                  "schemaVersion": 4,
+                  "triggers": {"manualEnabled": true, "worldExitEnabled": true, "scheduledEnabled": false,
+                    "scheduleIntervalMinutes": 30},
                   "destinations": {
                     "git": {
                       "enabled": true,
                       "remoteName": "origin",
-                      "triggers": {
-                        "manualEnabled": true,
-                        "worldExitEnabled": true,
-                        "scheduledEnabled": true
-                      },
-                      "lfsPatterns": ["*.mca"]
+                      "remoteUrlTemplate": "https://example.invalid/world-{worldId}.git",
+                      "triggers": {"manualEnabled": true, "worldExitEnabled": true, "scheduledEnabled": true},
+                      "lfsPatterns": ["*.mca"],
+                      "health": {"status": "UNCONFIGURED", "message": "Not checked", "checkedAt": "1970-01-01T00:00:00Z"}
                     },
                     "zip": {
                       "enabled": true,
-                      "triggers": {
-                        "manualEnabled": true,
-                        "worldExitEnabled": true,
-                        "scheduledEnabled": true
-                      }
+                      "triggers": {"manualEnabled": true, "worldExitEnabled": true, "scheduledEnabled": true},
+                      "health": {"status": "UNCONFIGURED", "message": "Not checked", "checkedAt": "1970-01-01T00:00:00Z"}
                     }
                   },
-                  "worlds": []
+                  "worlds": [{"worldId": "%s", "enabled": true, "path": "%s"}]
                 }
-                """, StandardCharsets.UTF_8);
+                """.formatted(WORLD_ID, json(world)), StandardCharsets.UTF_8);
 
-        WorldArchiveConfig migrated = new WorldArchiveConfigStore(file).load(java.util.List.of());
+        WorldArchiveConfig upgraded = store().load();
 
-        assertEquals(WorldArchiveConfig.CURRENT_SCHEMA_VERSION, migrated.schemaVersion());
         assertEquals(
-                dev.ishaanko.worldarchive.model.DestinationHealth.notChecked(
-                        dev.ishaanko.worldarchive.model.DestinationType.GIT),
-                migrated.git().health());
-        assertEquals(
-                dev.ishaanko.worldarchive.model.DestinationHealth.notChecked(
-                        dev.ishaanko.worldarchive.model.DestinationType.ZIP),
-                migrated.zip().health());
-        assertTrue(Files.readString(file, StandardCharsets.UTF_8).contains("\"health\""));
+                Optional.of("https://example.invalid/world-" + WORLD_ID + ".git"),
+                upgraded.worlds().getFirst().remoteUrl());
+        assertTrue(Files.isRegularFile(backup(4)));
     }
 
     @Test
-    void concurrentStoreInstancesPublishOnlyCompleteJson() throws Exception {
-        Path file = temporaryDirectory.resolve("concurrent.json");
-        WorldArchiveConfigStore firstStore = new WorldArchiveConfigStore(file);
-        WorldArchiveConfigStore secondStore = new WorldArchiveConfigStore(file);
-        WorldArchiveConfig first = WorldArchiveConfig.defaults();
-        WorldArchiveConfig second = new WorldArchiveConfig(
-                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
-                new TriggerConfig(false, true, false, 30),
-                GitDestinationConfig.defaults(),
-                ZipDestinationConfig.defaults());
+    void refusesFilesItCannotReadAndLeavesThemAsTheyAre() throws IOException {
+        Files.createDirectories(configFile().getParent());
+        List<String> unreadable = List.of(
+                "{not-json",
+                "{}",
+                "{\"schemaVersion\":1.5}",
+                "{\"schemaVersion\":7,\"triggers\":{},\"destinations\":{},\"worlds\":[]}",
+                "{\"schemaVersion\":7,\"accessToken\":\"never\"}",
+                validFileWithoutStoragePolicy(),
+                validFileWithoutStoragePolicy().replace("\"worlds\"", "\"unused\""));
+        for (String text : unreadable) {
+            Files.writeString(configFile(), text, StandardCharsets.UTF_8);
+
+            assertThrows(UnreadableConfigurationException.class, () -> store().load(), text);
+            assertThrows(UnreadableConfigurationException.class, () -> store().update(config -> config, List.of()), text);
+            assertEquals(text, Files.readString(configFile(), StandardCharsets.UTF_8));
+        }
+    }
+
+    @Test
+    void refusesNewerAndPreReleaseSchemasWithoutChangingThem() throws IOException {
+        Files.createDirectories(configFile().getParent());
+        for (int schemaVersion : new int[] {3, 99}) {
+            String text = "{\"schemaVersion\": " + schemaVersion + "}";
+            Files.writeString(configFile(), text, StandardCharsets.UTF_8);
+
+            UnreadableConfigurationException failure = assertThrows(UnreadableConfigurationException.class,
+                    () -> store().load());
+
+            UnsupportedSchemaVersionException schema = assertInstanceOf(
+                    UnsupportedSchemaVersionException.class, failure.getCause());
+            assertEquals(schemaVersion > WorldArchiveConfig.CURRENT_SCHEMA_VERSION, schema.newer());
+            assertEquals(text, Files.readString(configFile(), StandardCharsets.UTF_8));
+            assertFalse(Files.exists(backup(schemaVersion)));
+        }
+    }
+
+    @Test
+    void concurrentStoresPublishOnlyCompleteFilesAndKeepEachChange() throws Exception {
         ExecutorService executor = Executors.newFixedThreadPool(8);
         try {
-            java.util.List<Future<?>> writes = new java.util.ArrayList<>();
-            for (int index = 0; index < 32; index++) {
-                WorldArchiveConfig value = index % 2 == 0 ? first : second;
-                WorldArchiveConfigStore target = index % 2 == 0 ? firstStore : secondStore;
-                writes.add(executor.submit(() -> {
-                    target.save(value, java.util.List.of());
-                    return null;
-                }));
+            List<Future<?>> writes = new ArrayList<>();
+            for (int index = 1; index <= 32; index++) {
+                int minutes = index;
+                writes.add(executor.submit(() -> store().update(
+                        config -> new WorldArchiveConfig(
+                                new TriggerConfig(true, true, true,
+                                        Math.max(config.triggers().scheduleIntervalMinutes(), minutes)),
+                                config.git(),
+                                config.zip(),
+                                config.worlds()),
+                        List.of())));
             }
             for (Future<?> write : writes) {
                 write.get();
@@ -574,26 +251,49 @@ final class WorldArchiveConfigStoreTest {
             executor.shutdownNow();
         }
 
-        WorldArchiveConfig loaded = firstStore.load(java.util.List.of());
-        assertTrue(loaded.equals(first) || loaded.equals(second));
+        assertEquals(32, store().load().triggers().scheduleIntervalMinutes());
     }
 
-    @Test
-    void rejectsSymbolicLinkLockFile() throws IOException {
-        Path file = temporaryDirectory.resolve("locked.json");
-        WorldArchiveConfigStore store = new WorldArchiveConfigStore(file);
-        Path target = Files.createFile(temporaryDirectory.resolve("lock-target"));
-        Path lock = file.resolveSibling(file.getFileName() + ".lock");
+    private static void link(Path link, Path target) throws IOException {
         try {
-            Files.createSymbolicLink(lock, target);
+            Files.createSymbolicLink(link, target);
         } catch (UnsupportedOperationException | IOException exception) {
-            Assumptions.assumeTrue(false, "Symbolic links unavailable: " + exception.getMessage());
+            Assumptions.abort("Symbolic links are unavailable: " + exception.getMessage());
         }
-
-        assertThrows(ConfigurationException.class, () -> store.load(java.util.List.of()));
     }
 
-    private static String jsonPath(Path path) {
+    private WorldArchiveConfigStore store() {
+        return new WorldArchiveConfigStore(configFile(), new DefaultDestinations(temporaryDirectory.resolve("worldarchive")));
+    }
+
+    private Path configFile() {
+        return temporaryDirectory.resolve("config/worldarchive.json");
+    }
+
+    private Path backup(int schemaVersion) {
+        return configFile().resolveSibling("worldarchive.json.schema" + schemaVersion + ".bak");
+    }
+
+    private JsonObject written() throws IOException {
+        return JsonParser.parseString(Files.readString(configFile(), StandardCharsets.UTF_8)).getAsJsonObject();
+    }
+
+    private String validFileWithoutStoragePolicy() {
+        return """
+                {"schemaVersion": 7,
+                 "triggers": {"manualEnabled": true, "worldExitEnabled": true, "scheduledEnabled": false,
+                   "scheduleIntervalMinutes": 30},
+                 "destinations": {
+                   "git": {"enabled": true, "remoteName": "origin",
+                     "triggers": {"manualEnabled": true, "worldExitEnabled": true, "scheduledEnabled": true},
+                     "lfsPatterns": ["*.mca"]},
+                   "zip": {"enabled": true,
+                     "triggers": {"manualEnabled": true, "worldExitEnabled": true, "scheduledEnabled": true}}},
+                 "worlds": [{"worldId": "%s", "enabled": true, "path": "%s"}]}
+                """.formatted(WORLD_ID, json(temporaryDirectory.resolve("saves/World")));
+    }
+
+    private static String json(Path path) {
         return path.toString().replace("\\", "\\\\").replace("\"", "\\\"");
     }
 }

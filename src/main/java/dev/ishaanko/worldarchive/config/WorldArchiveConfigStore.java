@@ -5,375 +5,344 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParseException;
-import com.google.gson.JsonParser;
-import com.google.gson.JsonPrimitive;
-import dev.ishaanko.worldarchive.core.AtomicFiles;
-import dev.ishaanko.worldarchive.model.DestinationHealth;
-import dev.ishaanko.worldarchive.model.DestinationHealthStatus;
-import dev.ishaanko.worldarchive.model.DestinationType;
-import dev.ishaanko.worldarchive.model.SensitiveDataRedactor;
+import dev.ishaanko.worldarchive.model.SafeText;
 import dev.ishaanko.worldarchive.model.WorldId;
+import dev.ishaanko.worldarchive.support.AtomicFiles;
+import dev.ishaanko.worldarchive.support.JsonFields;
+import dev.ishaanko.worldarchive.support.LockedFile;
 import java.io.IOException;
-import java.math.BigDecimal;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.time.Instant;
-import java.time.format.DateTimeParseException;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.function.UnaryOperator;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-/** Atomic UTF-8 JSON persistence and migration for {@link WorldArchiveConfig}. */
+/**
+ * Reads and writes {@link WorldArchiveConfig} as UTF-8 JSON. Each write replaces the file
+ * atomically while a lock shared by threads and game instances is held, and each change is
+ * applied to what the file holds at that moment. Destination folders equal to the defaults
+ * ({@link DefaultDestinations}) are left out of the file and filled in when it is read.
+ *
+ * <p>A file that exists but cannot be read is never written over: every read fails with
+ * {@link UnreadableConfigurationException} until {@link #reset} keeps the file under a new
+ * name. Schemas 4 (WorldArchive 0.1.1) to 7 are read; an older schema is upgraded on load,
+ * after the old file is kept as {@code <name>.schema<N>.bak}.</p>
+ */
 public final class WorldArchiveConfigStore {
+    private static final Logger LOGGER = LoggerFactory.getLogger("WorldArchive");
+
+    /** WorldArchive 0.1.1 wrote schema 4; the schema 3 of 0.1.0 is no longer read. */
+    private static final int OLDEST_SCHEMA_VERSION = 4;
+
+    /** Schema 4 kept one remote URL for every world, with {@code {worldId}} for each world's ID. */
+    private static final int REMOTE_TEMPLATE_SCHEMA_VERSION = 4;
+
+    /** Schema 7 added each world's storage policy. */
+    private static final int STORAGE_POLICY_SCHEMA_VERSION = 7;
+
+    private static final String WORLD_ID_PLACEHOLDER = "{worldId}";
+
     private static final int MAXIMUM_CONFIG_BYTES = 1_048_576;
+
+    private static final int MESSAGE_LIMIT = 512;
+
+    private static final DateTimeFormatter KEPT_COPY_TIME = DateTimeFormatter
+            .ofPattern("uuuuMMdd'T'HHmmss'Z'", Locale.ROOT)
+            .withZone(ZoneOffset.UTC);
 
     private static final Gson GSON = new GsonBuilder()
             .setPrettyPrinting()
             .disableHtmlEscaping()
             .create();
 
+    private static final JsonFields<ConfigurationException> FIELDS =
+            new JsonFields<>(ConfigurationException::new);
+
     private final Path file;
 
-    private final LockedFileStore lockedFileStore;
+    private final LockedFile lock;
 
-    public WorldArchiveConfigStore(Path file) throws IOException {
-        Path normalized = file.toAbsolutePath().normalize();
-        rejectSymlink(normalized, "Configuration file");
-        this.file = PathSafety.canonicalize(normalized);
-        this.lockedFileStore = new LockedFileStore(this.file, ConfigurationException::new);
+    private final DefaultDestinations defaults;
+
+    public WorldArchiveConfigStore(Path file, DefaultDestinations defaults) {
+        this.file = Objects.requireNonNull(file, "file").toAbsolutePath().normalize();
+        this.lock = new LockedFile(this.file);
+        this.defaults = Objects.requireNonNull(defaults, "defaults");
     }
 
-    /** Loads and, when needed, atomically migrates using the complete set of known source worlds. */
-    public WorldArchiveConfig load(Collection<Path> knownWorldPaths) throws IOException {
-        return withLock(() -> loadUnlocked(knownWorldPaths));
+    /**
+     * Reads the settings, with the default folders filled in and every path canonical;
+     * product defaults when the file does not exist.
+     *
+     * @throws UnreadableConfigurationException when the file exists but cannot be read or understood
+     */
+    public WorldArchiveConfig load() throws UnreadableConfigurationException {
+        try {
+            return lock.withLock(() -> {
+                Stored stored = read();
+                WorldArchiveConfig kept = defaults.withoutDefaults(stored.config());
+                if (stored.outdated() || !kept.equals(stored.config())) {
+                    upgradeInPlace(kept, stored);
+                }
+                return defaults.resolve(kept).canonicalize();
+            });
+        } catch (UnreadableConfigurationException exception) {
+            throw exception;
+        } catch (IOException | RuntimeException exception) {
+            throw new UnreadableConfigurationException(file, exception);
+        }
     }
 
-    /** Atomically saves only after checking every destination against all known source worlds. */
-    public void save(WorldArchiveConfig config, Collection<Path> knownWorldPaths) throws IOException {
-        withLock(() -> {
-            writeUnlocked(config.validateDestinations(knownWorldPaths));
-            return null;
+    /**
+     * Applies a change to the settings the file holds now and writes the result, so a change
+     * saved meanwhile by another game instance is kept. The change receives the settings as
+     * {@link #load} returns them. Nothing is written when it returns them unchanged. Before
+     * writing, every destination is checked against the configured worlds and the given world
+     * folders.
+     *
+     * @return the settings as written, in canonical form
+     * @throws UnreadableConfigurationException when the file cannot be read; it is left as it is
+     */
+    public WorldArchiveConfig update(
+            UnaryOperator<WorldArchiveConfig> change,
+            Collection<Path> knownWorldPaths) throws IOException {
+        Objects.requireNonNull(change, "change");
+        List<Path> worlds = List.copyOf(knownWorldPaths);
+        return lock.withLock(() -> {
+            Stored stored = read();
+            WorldArchiveConfig current = defaults.resolve(stored.config()).canonicalize();
+            WorldArchiveConfig changed = Objects.requireNonNull(change.apply(current), "changed settings");
+            if (changed.equals(current)) {
+                return current;
+            }
+            WorldArchiveConfig validated = changed.validateDestinations(worlds);
+            write(defaults.withoutDefaults(validated), stored);
+            return validated;
         });
     }
 
-    public Path file() {
-        return file;
+    /**
+     * Keeps the unreadable file as {@code <name>.unreadable-<UTC time>} and writes new settings
+     * that {@code start} builds from the product defaults. When the new file cannot be written,
+     * the old one is moved back. Settings that read now, as after another game instance fixed the
+     * file, are never replaced: the result is then empty and nothing changes.
+     */
+    public Optional<Reset> reset(
+            UnaryOperator<WorldArchiveConfig> start,
+            Collection<Path> knownWorldPaths,
+            Instant now) throws IOException {
+        Objects.requireNonNull(start, "start");
+        Objects.requireNonNull(now, "now");
+        List<Path> worlds = List.copyOf(knownWorldPaths);
+        return lock.withLock(() -> {
+            if (readable()) {
+                return Optional.empty();
+            }
+            WorldArchiveConfig fresh = start.apply(defaults.resolve(WorldArchiveConfig.defaults()))
+                    .validateDestinations(worlds);
+            Path keptCopy = file.resolveSibling(file.getFileName() + ".unreadable-" + KEPT_COPY_TIME.format(now));
+            Files.move(file, keptCopy);
+            try {
+                AtomicFiles.writeUtf8(file, encode(defaults.withoutDefaults(fresh)), MAXIMUM_CONFIG_BYTES);
+            } catch (IOException | RuntimeException exception) {
+                moveBack(keptCopy, exception);
+                throw exception;
+            }
+            return Optional.of(new Reset(fresh, keptCopy));
+        });
     }
 
-    private WorldArchiveConfig loadUnlocked(Collection<Path> knownWorldPaths) throws IOException {
+    /** Whether the file reads now, or there is none; the caller holds the lock. */
+    private boolean readable() {
+        try {
+            read();
+            return true;
+        } catch (UnreadableConfigurationException unreadable) {
+            return false;
+        }
+    }
+
+    private void moveBack(Path copy, Exception failure) {
+        try {
+            Files.move(copy, file);
+        } catch (IOException | RuntimeException exception) {
+            failure.addSuppressed(exception);
+        }
+    }
+
+    private Stored read() throws UnreadableConfigurationException {
         if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) {
-            return WorldArchiveConfig.defaults();
-        }
-        rejectSymlink(file, "Configuration file");
-        if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
-            throw new ConfigurationException("Configuration path is not a regular file");
-        }
-        if (Files.size(file) > MAXIMUM_CONFIG_BYTES) {
-            throw new ConfigurationException("Configuration file is unexpectedly large");
-        }
-        JsonObject root = parseObject(AtomicFiles.readUtf8(file, MAXIMUM_CONFIG_BYTES));
-        rejectCredentialData(root);
-        int schemaVersion = optionalInteger(root, "schemaVersion").orElse(0);
-        if (schemaVersion > WorldArchiveConfig.CURRENT_SCHEMA_VERSION) {
-            throw new UnsupportedSchemaVersionException(schemaVersion);
-        }
-        if (schemaVersion < 0) {
-            throw new ConfigurationException("Configuration schema version must not be negative");
+            return new Stored(WorldArchiveConfig.defaults(), WorldArchiveConfig.CURRENT_SCHEMA_VERSION, "");
         }
         try {
-            boolean migrated = schemaVersion != WorldArchiveConfig.CURRENT_SCHEMA_VERSION;
-            WorldArchiveConfig parsed = parseSchema(root, schemaVersion);
-            WorldArchiveConfig validated = parsed.validateDestinations(knownWorldPaths);
-            if (migrated) {
-                writeUnlocked(validated);
+            String text = AtomicFiles.readUtf8(file, MAXIMUM_CONFIG_BYTES);
+            JsonObject root = FIELDS.parseObject(text, "WorldArchive settings");
+            rejectCredentialFields(root);
+            int schemaVersion = FIELDS.requiredInt(root, "schemaVersion");
+            return new Stored(parse(root, schemaVersion), schemaVersion, text);
+        } catch (IOException | RuntimeException exception) {
+            throw new UnreadableConfigurationException(file, exception);
+        }
+    }
+
+    /**
+     * Writes an older schema, or default folders an older version stored, in the current form.
+     * A failure is only logged: the settings were read, and the next change writes the file.
+     */
+    private void upgradeInPlace(WorldArchiveConfig config, Stored stored) {
+        try {
+            write(config, stored);
+        } catch (IOException exception) {
+            LOGGER.warn("WorldArchive settings could not be upgraded in place: {}",
+                    SafeText.from(exception, "the file could not be written", MESSAGE_LIMIT));
+        }
+    }
+
+    private void write(WorldArchiveConfig config, Stored replaced) throws IOException {
+        if (replaced.outdated()) {
+            Path backup = file.resolveSibling(file.getFileName() + ".schema" + replaced.schemaVersion() + ".bak");
+            if (!Files.exists(backup, LinkOption.NOFOLLOW_LINKS)) {
+                AtomicFiles.writeUtf8(backup, replaced.text(), MAXIMUM_CONFIG_BYTES);
             }
-            return validated;
-        } catch (IllegalArgumentException exception) {
-            throw new ConfigurationException("WorldArchive configuration is invalid: " + exception.getMessage(), exception);
         }
+        AtomicFiles.writeUtf8(file, encode(config), MAXIMUM_CONFIG_BYTES);
     }
 
-    private WorldArchiveConfig parseCurrent(
-            JsonObject root,
-            boolean storagePolicyPresent) throws IOException {
-        TriggerConfig triggers = parseGlobalTriggers(requiredObject(root, "triggers"));
-        JsonObject destinations = requiredObject(root, "destinations");
-        GitDestinationConfig git = parseCurrentGit(requiredObject(destinations, "git"));
-        ZipDestinationConfig zip = parseCurrentZip(requiredObject(destinations, "zip"));
-        return new WorldArchiveConfig(
-                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
-                triggers,
-                git,
-                zip,
-                parseWorlds(requiredArray(root, "worlds"), storagePolicyPresent));
-    }
-
-    private WorldArchiveConfig migrateVersionOne(JsonObject root) throws IOException {
-        TriggerConfig triggers = parseGlobalTriggers(requiredObject(root, "triggers"));
-        JsonObject destinations = requiredObject(root, "destinations");
-        JsonObject gitObject = requiredObject(destinations, "git");
-        GitDestinationConfig git = migratedGit(
-                requiredBoolean(gitObject, "enabled"),
-                optionalPath(gitObject, "repository"),
-                requiredString(gitObject, "remoteName"),
-                optionalString(gitObject, "remoteUrl"),
-                DestinationTriggerConfig.defaults(),
-                GitDestinationConfig.DEFAULT_LFS_PATTERNS);
-        JsonObject zipObject = requiredObject(destinations, "zip");
-        ZipDestinationConfig zip = new ZipDestinationConfig(
-                requiredBoolean(zipObject, "enabled"),
-                optionalPath(zipObject, "destination"));
-        return new WorldArchiveConfig(WorldArchiveConfig.CURRENT_SCHEMA_VERSION, triggers, git, zip, List.of());
-    }
-
-    private WorldArchiveConfig migrateVersionTwo(JsonObject root) throws IOException {
-        TriggerConfig triggers = parseGlobalTriggers(requiredObject(root, "triggers"));
-        JsonObject destinations = requiredObject(root, "destinations");
-        JsonObject gitObject = requiredObject(destinations, "git");
-        GitDestinationConfig git = migratedGit(
-                requiredBoolean(gitObject, "enabled"),
-                optionalPath(gitObject, "repository"),
-                requiredString(gitObject, "remoteName"),
-                optionalString(gitObject, "remoteUrl"),
-                parseDestinationTriggers(requiredObject(gitObject, "triggers")),
-                requiredStringArray(gitObject, "lfsPatterns"));
-        JsonObject zipObject = requiredObject(destinations, "zip");
-        ZipDestinationConfig zip = new ZipDestinationConfig(
-                requiredBoolean(zipObject, "enabled"),
-                optionalPath(zipObject, "destination"),
-                parseDestinationTriggers(requiredObject(zipObject, "triggers")));
-        return new WorldArchiveConfig(
-                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
-                triggers,
-                git,
-                zip,
-                parseWorlds(requiredArray(root, "worlds")));
-    }
-
-    private WorldArchiveConfig migrateVersionThree(JsonObject root) throws IOException {
-        TriggerConfig triggers = parseGlobalTriggers(requiredObject(root, "triggers"));
-        JsonObject destinations = requiredObject(root, "destinations");
-        JsonObject gitObject = requiredObject(destinations, "git");
-        GitDestinationConfig git = migratedGit(
-                requiredBoolean(gitObject, "enabled"),
-                optionalPath(gitObject, "repository"),
-                requiredString(gitObject, "remoteName"),
-                optionalString(gitObject, "remoteUrl"),
-                parseDestinationTriggers(requiredObject(gitObject, "triggers")),
-                requiredStringArray(gitObject, "lfsPatterns"));
-        ZipDestinationConfig zip = parseCurrentZip(requiredObject(destinations, "zip"));
-        return new WorldArchiveConfig(
-                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
-                triggers,
-                git,
-                zip,
-                parseWorlds(requiredArray(root, "worlds")));
-    }
-
-    /** Moves the schema-4 global URL template onto the worlds that it previously covered. */
-    private WorldArchiveConfig migrateVersionFour(JsonObject root) throws IOException {
-        TriggerConfig triggers = parseGlobalTriggers(requiredObject(root, "triggers"));
-        JsonObject destinations = requiredObject(root, "destinations");
-        JsonObject gitObject = requiredObject(destinations, "git");
-        Optional<String> template = optionalString(gitObject, "remoteUrlTemplate");
-        if (template.isPresent()
-                && !GitDestinationConfig.isPerWorldRemoteTemplate(template.orElseThrow())) {
-            throw new ConfigurationException(
-                    "Git remoteUrlTemplate must include exactly one {worldId} placeholder");
+    private WorldArchiveConfig parse(JsonObject root, int schemaVersion) throws ConfigurationException {
+        if (schemaVersion < OLDEST_SCHEMA_VERSION || schemaVersion > WorldArchiveConfig.CURRENT_SCHEMA_VERSION) {
+            throw new UnsupportedSchemaVersionException(schemaVersion);
         }
-        GitDestinationConfig git = new GitDestinationConfig(
-                requiredBoolean(gitObject, "enabled"),
-                optionalPath(gitObject, "repositoryRoot"),
-                requiredString(gitObject, "remoteName"),
-                Optional.empty(),
-                parseDestinationTriggers(requiredObject(gitObject, "triggers")),
-                requiredStringArray(gitObject, "lfsPatterns"),
-                parseHealth(requiredObject(gitObject, "health"), DestinationType.GIT),
-                optionalPath(gitObject, "legacySharedRepository"),
-                optionalString(gitObject, "legacyRemoteUrl"));
-        List<WorldConfig> worlds = parseWorlds(requiredArray(root, "worlds"), false).stream()
-                .map(world -> new WorldConfig(
-                        world.worldId(),
-                        world.enabled(),
-                        world.path(),
-                        template.map(value -> RemoteUrlPolicy.resolveWorldId(
-                                value,
-                                world.worldId().value())),
-                        world.zipDestination(),
-                        world.storagePolicy()))
-                .toList();
+        JsonObject destinations = FIELDS.requiredObject(root, "destinations");
+        JsonObject git = FIELDS.requiredObject(destinations, "git");
+        Optional<String> remoteTemplate = schemaVersion == REMOTE_TEMPLATE_SCHEMA_VERSION
+                ? FIELDS.optionalString(git, "remoteUrlTemplate")
+                : Optional.empty();
         return new WorldArchiveConfig(
-                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
-                triggers,
-                git,
-                parseCurrentZip(requiredObject(destinations, "zip")),
-                worlds);
+                parseGlobalTriggers(FIELDS.requiredObject(root, "triggers")),
+                parseGit(git),
+                parseZip(FIELDS.requiredObject(destinations, "zip")),
+                parseWorlds(FIELDS.requiredObjects(root, "worlds"), schemaVersion, remoteTemplate));
     }
 
-    /** Migrates the unversioned prototype layout that preceded schema version 1. */
-    private WorldArchiveConfig migrateLegacy(JsonObject root) throws IOException {
-        TriggerConfig triggers = new TriggerConfig(
-                optionalBoolean(root, "manualBackups").orElse(true),
-                optionalBoolean(root, "exitBackups").orElse(true),
-                optionalBoolean(root, "scheduleEnabled").orElse(false),
-                optionalInteger(root, "scheduleMinutes")
-                        .orElse(TriggerConfig.DEFAULT_SCHEDULE_INTERVAL_MINUTES));
-        GitDestinationConfig git = migratedGit(
-                optionalBoolean(root, "gitEnabled").orElse(true),
-                optionalPath(root, "gitRepository"),
-                optionalString(root, "gitRemoteName").orElse(GitDestinationConfig.DEFAULT_REMOTE_NAME),
-                optionalString(root, "gitRemoteUrl"),
-                DestinationTriggerConfig.defaults(),
-                GitDestinationConfig.DEFAULT_LFS_PATTERNS);
-        ZipDestinationConfig zip = new ZipDestinationConfig(
-                optionalBoolean(root, "zipEnabled").orElse(true),
-                optionalPath(root, "zipDestination"));
-        return new WorldArchiveConfig(WorldArchiveConfig.CURRENT_SCHEMA_VERSION, triggers, git, zip, List.of());
-    }
-
-    private TriggerConfig parseGlobalTriggers(JsonObject object) throws ConfigurationException {
+    private static TriggerConfig parseGlobalTriggers(JsonObject object) throws ConfigurationException {
         return new TriggerConfig(
-                requiredBoolean(object, "manualEnabled"),
-                requiredBoolean(object, "worldExitEnabled"),
-                requiredBoolean(object, "scheduledEnabled"),
-                requiredInteger(object, "scheduleIntervalMinutes"));
+                FIELDS.requiredBoolean(object, "manualEnabled"),
+                FIELDS.requiredBoolean(object, "worldExitEnabled"),
+                FIELDS.requiredBoolean(object, "scheduledEnabled"),
+                FIELDS.requiredInt(object, "scheduleIntervalMinutes"));
     }
 
-    private GitDestinationConfig parseCurrentGit(JsonObject object) throws IOException {
+    /** Fields that older versions wrote here (health, the 0.1.0 shared repository) are ignored. */
+    private GitDestinationConfig parseGit(JsonObject object) throws ConfigurationException {
         return new GitDestinationConfig(
-                requiredBoolean(object, "enabled"),
+                FIELDS.requiredBoolean(object, "enabled"),
                 optionalPath(object, "repositoryRoot"),
-                requiredString(object, "remoteName"),
-                Optional.empty(),
-                parseDestinationTriggers(requiredObject(object, "triggers")),
-                requiredStringArray(object, "lfsPatterns"),
-                parseHealth(requiredObject(object, "health"), DestinationType.GIT),
-                optionalPath(object, "legacySharedRepository"),
-                optionalString(object, "legacyRemoteUrl"));
+                FIELDS.requiredString(object, "remoteName"),
+                parseDestinationTriggers(FIELDS.requiredObject(object, "triggers")),
+                FIELDS.requiredStrings(object, "lfsPatterns"));
     }
 
-    private static GitDestinationConfig migratedGit(
-            boolean enabled,
-            Optional<Path> legacyRepository,
-            String remoteName,
-            Optional<String> legacyRemoteUrl,
-            DestinationTriggerConfig triggers,
-            List<String> lfsPatterns) {
-        return new GitDestinationConfig(
-                enabled,
-                Optional.empty(),
-                remoteName,
-                Optional.empty(),
-                triggers,
-                lfsPatterns,
-                DestinationHealth.notChecked(DestinationType.GIT),
-                legacyRepository,
-                legacyRemoteUrl);
-    }
-
-    private ZipDestinationConfig parseCurrentZip(JsonObject object) throws IOException {
+    private ZipDestinationConfig parseZip(JsonObject object) throws ConfigurationException {
         return new ZipDestinationConfig(
-                requiredBoolean(object, "enabled"),
+                FIELDS.requiredBoolean(object, "enabled"),
                 optionalPath(object, "destination"),
-                parseDestinationTriggers(requiredObject(object, "triggers")),
-                parseHealth(requiredObject(object, "health"), DestinationType.ZIP));
+                parseDestinationTriggers(FIELDS.requiredObject(object, "triggers")));
     }
 
     private static DestinationTriggerConfig parseDestinationTriggers(JsonObject object)
             throws ConfigurationException {
         return new DestinationTriggerConfig(
-                requiredBoolean(object, "manualEnabled"),
-                requiredBoolean(object, "worldExitEnabled"),
-                requiredBoolean(object, "scheduledEnabled"));
+                FIELDS.requiredBoolean(object, "manualEnabled"),
+                FIELDS.requiredBoolean(object, "worldExitEnabled"),
+                FIELDS.requiredBoolean(object, "scheduledEnabled"));
     }
 
-    private static DestinationHealth parseHealth(JsonObject object, DestinationType destination)
-            throws ConfigurationException {
-        return new DestinationHealth(
-                destination,
-                requiredEnum(object, "status", DestinationHealthStatus.class),
-                requiredString(object, "message"),
-                requiredInstant(object, "checkedAt"));
-    }
-
-    /** Applies the same credential check as load, so a save never produces a file load rejects. */
-    private WorldArchiveConfig parseSchema(JsonObject root, int schemaVersion) throws IOException {
-        return switch (schemaVersion) {
-            case 0 -> {
-                if (!looksLikeLegacyConfiguration(root)) {
-                    throw new ConfigurationException(
-                            "Configuration has no schema version and does not match the legacy layout");
-                }
-                yield migrateLegacy(root);
-            }
-            case 1 -> migrateVersionOne(root);
-            case 2 -> migrateVersionTwo(root);
-            case 3 -> migrateVersionThree(root);
-            case 4 -> migrateVersionFour(root);
-            case 5, 6 -> parseCurrent(root, false);
-            case WorldArchiveConfig.CURRENT_SCHEMA_VERSION -> parseCurrent(root, true);
-            default -> throw new UnsupportedSchemaVersionException(schemaVersion);
-        };
-    }
-
-    private void writeUnlocked(WorldArchiveConfig config) throws IOException {
-        rejectSymlink(file, "Configuration file");
-        JsonObject encoded = encode(config);
-        rejectCredentialData(encoded);
-        AtomicFiles.writeUtf8(file, GSON.toJson(encoded) + "\n", MAXIMUM_CONFIG_BYTES);
-    }
-
-    private static JsonObject encode(WorldArchiveConfig config) {
-        JsonObject root = new JsonObject();
-        root.addProperty("schemaVersion", config.schemaVersion());
-        root.add("triggers", encodeGlobalTriggers(config.triggers()));
-
-        JsonObject destinations = new JsonObject();
-        JsonObject git = new JsonObject();
-        git.addProperty("enabled", config.git().enabled());
-        config.git().repository().ifPresent(path -> git.addProperty("repositoryRoot", path.toString()));
-        git.addProperty("remoteName", config.git().remoteName());
-        config.git().legacyRepository()
-                .ifPresent(path -> git.addProperty("legacySharedRepository", path.toString()));
-        config.git().legacyRemoteUrl().ifPresent(url -> git.addProperty("legacyRemoteUrl", url));
-        git.add("triggers", encodeDestinationTriggers(config.git().triggers()));
-        JsonArray lfsPatterns = new JsonArray();
-        config.git().lfsPatterns().forEach(lfsPatterns::add);
-        git.add("lfsPatterns", lfsPatterns);
-        git.add("health", encodeHealth(config.git().health()));
-        destinations.add("git", git);
-
-        JsonObject zip = new JsonObject();
-        zip.addProperty("enabled", config.zip().enabled());
-        config.zip().destination().ifPresent(path -> zip.addProperty("destination", path.toString()));
-        zip.add("triggers", encodeDestinationTriggers(config.zip().triggers()));
-        zip.add("health", encodeHealth(config.zip().health()));
-        destinations.add("zip", zip);
-        root.add("destinations", destinations);
-
-        JsonArray worlds = new JsonArray();
-        for (WorldConfig worldConfig : config.worlds()) {
-            JsonObject world = new JsonObject();
-            world.addProperty("worldId", worldConfig.worldId().toString());
-            world.addProperty("enabled", worldConfig.enabled());
-            world.addProperty("path", worldConfig.path().toString());
-            worldConfig.remoteUrl().ifPresent(url -> world.addProperty("remoteUrl", url));
-            worldConfig.zipDestination()
-                    .ifPresent(path -> world.addProperty("zipDestination", path.toString()));
-            JsonObject storage = new JsonObject();
-            storage.addProperty("budgetBytes", worldConfig.storagePolicy().budgetBytes());
-            storage.addProperty("dailyCopies", worldConfig.storagePolicy().dailyCopies());
-            storage.addProperty("weeklyCopies", worldConfig.storagePolicy().weeklyCopies());
-            storage.addProperty("monthlyCopies", worldConfig.storagePolicy().monthlyCopies());
-            world.add("storage", storage);
-            worlds.add(world);
+    private List<WorldConfig> parseWorlds(
+            List<JsonObject> encodedWorlds,
+            int schemaVersion,
+            Optional<String> remoteTemplate) throws ConfigurationException {
+        List<WorldConfig> worlds = new ArrayList<>(encodedWorlds.size());
+        for (JsonObject world : encodedWorlds) {
+            WorldId worldId = WorldId.parse(FIELDS.requiredString(world, "worldId"));
+            Optional<String> remoteUrl = remoteTemplate.isPresent()
+                    ? Optional.of(remoteFromTemplate(remoteTemplate.get(), worldId))
+                    : FIELDS.optionalString(world, "remoteUrl");
+            StoragePolicy storagePolicy = schemaVersion >= STORAGE_POLICY_SCHEMA_VERSION
+                    ? parseStoragePolicy(FIELDS.requiredObject(world, "storage"))
+                    : StoragePolicy.defaults();
+            worlds.add(new WorldConfig(
+                    worldId,
+                    FIELDS.requiredBoolean(world, "enabled"),
+                    requiredPath(world, "path"),
+                    remoteUrl,
+                    optionalPath(world, "zipDestination"),
+                    storagePolicy));
         }
+        return worlds;
+    }
+
+    private static String remoteFromTemplate(String template, WorldId worldId) throws ConfigurationException {
+        int first = template.indexOf(WORLD_ID_PLACEHOLDER);
+        if (first < 0 || template.indexOf(WORLD_ID_PLACEHOLDER, first + 1) >= 0) {
+            throw new ConfigurationException(
+                    "Git remoteUrlTemplate must include exactly one {worldId} placeholder");
+        }
+        return template.replace(WORLD_ID_PLACEHOLDER, worldId.toString());
+    }
+
+    private static StoragePolicy parseStoragePolicy(JsonObject object) throws ConfigurationException {
+        return new StoragePolicy(
+                FIELDS.requiredLong(object, "budgetBytes"),
+                FIELDS.requiredInt(object, "dailyCopies"),
+                FIELDS.requiredInt(object, "weeklyCopies"),
+                FIELDS.requiredInt(object, "monthlyCopies"));
+    }
+
+    private Path requiredPath(JsonObject object, String name) throws ConfigurationException {
+        return optionalPath(object, name)
+                .orElseThrow(() -> new ConfigurationException("Required filesystem path is missing: " + name));
+    }
+
+    /** A relative path is read from the folder that holds the settings file. */
+    private Optional<Path> optionalPath(JsonObject object, String name) throws ConfigurationException {
+        Optional<String> path = FIELDS.optionalString(object, name);
+        if (path.isEmpty()) {
+            return Optional.empty();
+        }
+        if (path.get().isBlank()) {
+            throw new ConfigurationException("Filesystem path must not be blank: " + name);
+        }
+        try {
+            return Optional.of(file.resolveSibling(path.get()).normalize());
+        } catch (InvalidPathException exception) {
+            throw new ConfigurationException("Invalid filesystem path in " + name, exception);
+        }
+    }
+
+    private static String encode(WorldArchiveConfig config) {
+        JsonObject root = new JsonObject();
+        root.addProperty("schemaVersion", WorldArchiveConfig.CURRENT_SCHEMA_VERSION);
+        root.add("triggers", encodeGlobalTriggers(config.triggers()));
+        JsonObject destinations = new JsonObject();
+        destinations.add("git", encodeGit(config.git()));
+        destinations.add("zip", encodeZip(config.zip()));
+        root.add("destinations", destinations);
+        JsonArray worlds = new JsonArray();
+        config.worlds().forEach(world -> worlds.add(encodeWorld(world)));
         root.add("worlds", worlds);
-        return root;
+        return GSON.toJson(root) + "\n";
     }
 
     private static JsonObject encodeGlobalTriggers(TriggerConfig config) {
@@ -385,12 +354,39 @@ public final class WorldArchiveConfigStore {
         return triggers;
     }
 
-    private static JsonObject encodeHealth(DestinationHealth health) {
-        JsonObject encoded = new JsonObject();
-        encoded.addProperty("status", health.status().name());
-        encoded.addProperty("message", health.message());
-        encoded.addProperty("checkedAt", health.checkedAt().toString());
-        return encoded;
+    private static JsonObject encodeGit(GitDestinationConfig config) {
+        JsonObject git = new JsonObject();
+        git.addProperty("enabled", config.enabled());
+        config.repository().ifPresent(path -> git.addProperty("repositoryRoot", path.toString()));
+        git.addProperty("remoteName", config.remoteName());
+        git.add("triggers", encodeDestinationTriggers(config.triggers()));
+        JsonArray lfsPatterns = new JsonArray();
+        config.lfsPatterns().forEach(lfsPatterns::add);
+        git.add("lfsPatterns", lfsPatterns);
+        git.add("health", healthPlaceholder());
+        return git;
+    }
+
+    private static JsonObject encodeZip(ZipDestinationConfig config) {
+        JsonObject zip = new JsonObject();
+        zip.addProperty("enabled", config.enabled());
+        config.destination().ifPresent(path -> zip.addProperty("destination", path.toString()));
+        zip.add("triggers", encodeDestinationTriggers(config.triggers()));
+        zip.add("health", healthPlaceholder());
+        return zip;
+    }
+
+    /**
+     * WorldArchive 0.4 and older refuse a destination without this object, and a version that
+     * cannot read its settings replaces them with defaults. Writing it keeps a downgrade from
+     * losing the settings; it is ignored when read.
+     */
+    private static JsonObject healthPlaceholder() {
+        JsonObject health = new JsonObject();
+        health.addProperty("status", "UNCONFIGURED");
+        health.addProperty("message", "Not checked");
+        health.addProperty("checkedAt", Instant.EPOCH.toString());
+        return health;
     }
 
     private static JsonObject encodeDestinationTriggers(DestinationTriggerConfig config) {
@@ -401,255 +397,61 @@ public final class WorldArchiveConfigStore {
         return triggers;
     }
 
-    private <T> T withLock(LockedFileStore.IoSupplier<T> operation) throws IOException {
-        Path parent = file.getParent();
-        if (parent == null) {
-            throw new ConfigurationException("Configuration path has no parent directory");
-        }
-        Files.createDirectories(parent);
-        return lockedFileStore.withLock(operation);
+    private static JsonObject encodeWorld(WorldConfig config) {
+        JsonObject world = new JsonObject();
+        world.addProperty("worldId", config.worldId().toString());
+        world.addProperty("enabled", config.enabled());
+        world.addProperty("path", config.path().toString());
+        config.remoteUrl().ifPresent(url -> world.addProperty("remoteUrl", url));
+        config.zipDestination().ifPresent(path -> world.addProperty("zipDestination", path.toString()));
+        JsonObject storage = new JsonObject();
+        storage.addProperty("budgetBytes", config.storagePolicy().budgetBytes());
+        storage.addProperty("dailyCopies", config.storagePolicy().dailyCopies());
+        storage.addProperty("weeklyCopies", config.storagePolicy().weeklyCopies());
+        storage.addProperty("monthlyCopies", config.storagePolicy().monthlyCopies());
+        world.add("storage", storage);
+        return world;
     }
 
-    private static JsonObject parseObject(String json) throws ConfigurationException {
-        try {
-            JsonElement element = JsonParser.parseString(json);
-            if (!element.isJsonObject()) {
-                throw new ConfigurationException("WorldArchive configuration root must be a JSON object");
-            }
-            return element.getAsJsonObject();
-        } catch (JsonParseException exception) {
-            throw new ConfigurationException("WorldArchive configuration is malformed JSON", exception);
-        }
-    }
-
-    private static JsonObject requiredObject(JsonObject object, String name) throws ConfigurationException {
-        JsonElement element = object.get(name);
-        if (element == null || !element.isJsonObject()) {
-            throw new ConfigurationException("Required object is missing or invalid: " + name);
-        }
-        return element.getAsJsonObject();
-    }
-
-    private static JsonArray requiredArray(JsonObject object, String name) throws ConfigurationException {
-        JsonElement element = object.get(name);
-        if (element == null || !element.isJsonArray()) {
-            throw new ConfigurationException("Required array is missing or invalid: " + name);
-        }
-        return element.getAsJsonArray();
-    }
-
-    private static boolean requiredBoolean(JsonObject object, String name) throws ConfigurationException {
-        return optionalBoolean(object, name)
-                .orElseThrow(() -> new ConfigurationException("Required boolean is missing: " + name));
-    }
-
-    private static Optional<Boolean> optionalBoolean(JsonObject object, String name)
-            throws ConfigurationException {
-        JsonElement element = object.get(name);
-        if (element == null || element.isJsonNull()) {
-            return Optional.empty();
-        }
-        if (!element.isJsonPrimitive() || !element.getAsJsonPrimitive().isBoolean()) {
-            throw new ConfigurationException("Expected a boolean: " + name);
-        }
-        return Optional.of(element.getAsBoolean());
-    }
-
-    private static int requiredInteger(JsonObject object, String name) throws ConfigurationException {
-        return optionalInteger(object, name)
-                .orElseThrow(() -> new ConfigurationException("Required integer is missing: " + name));
-    }
-
-    private static long requiredLong(JsonObject object, String name)
-            throws ConfigurationException {
-        JsonElement element = object.get(name);
-        if (element == null
-                || !element.isJsonPrimitive()
-                || !element.getAsJsonPrimitive().isNumber()) {
-            throw new ConfigurationException("Required long is missing or invalid: " + name);
-        }
-        try {
-            return new BigDecimal(element.getAsString()).longValueExact();
-        } catch (ArithmeticException | NumberFormatException exception) {
-            throw new ConfigurationException("Expected a long: " + name, exception);
-        }
-    }
-
-    private static Optional<Integer> optionalInteger(JsonObject object, String name)
-            throws ConfigurationException {
-        JsonElement element = object.get(name);
-        if (element == null || element.isJsonNull()) {
-            return Optional.empty();
-        }
-        if (!element.isJsonPrimitive()) {
-            throw new ConfigurationException("Expected an integer: " + name);
-        }
-        JsonPrimitive primitive = element.getAsJsonPrimitive();
-        if (!primitive.isNumber()) {
-            throw new ConfigurationException("Expected an integer: " + name);
-        }
-        try {
-            return Optional.of(new BigDecimal(primitive.getAsString()).intValueExact());
-        } catch (ArithmeticException | NumberFormatException exception) {
-            throw new ConfigurationException("Expected an integer: " + name, exception);
-        }
-    }
-
-    private static String requiredString(JsonObject object, String name) throws ConfigurationException {
-        return optionalString(object, name)
-                .orElseThrow(() -> new ConfigurationException("Required string is missing: " + name));
-    }
-
-    private static Optional<String> optionalString(JsonObject object, String name)
-            throws ConfigurationException {
-        JsonElement element = object.get(name);
-        if (element == null || element.isJsonNull()) {
-            return Optional.empty();
-        }
-        if (!element.isJsonPrimitive() || !element.getAsJsonPrimitive().isString()) {
-            throw new ConfigurationException("Expected a string: " + name);
-        }
-        return Optional.of(element.getAsString());
-    }
-
-    private static List<String> requiredStringArray(JsonObject object, String name)
-            throws ConfigurationException {
-        JsonArray array = requiredArray(object, name);
-        List<String> values = new ArrayList<>(array.size());
-        for (JsonElement element : array) {
-            if (!element.isJsonPrimitive() || !element.getAsJsonPrimitive().isString()) {
-                throw new ConfigurationException("Expected an array of strings: " + name);
-            }
-            values.add(element.getAsString());
-        }
-        return values;
-    }
-
-    private static Instant requiredInstant(JsonObject object, String name) throws ConfigurationException {
-        try {
-            return Instant.parse(requiredString(object, name));
-        } catch (DateTimeParseException exception) {
-            throw new ConfigurationException("Expected an ISO-8601 instant: " + name, exception);
-        }
-    }
-
-    private static <E extends Enum<E>> E requiredEnum(
-            JsonObject object,
-            String name,
-            Class<E> enumType) throws ConfigurationException {
-        try {
-            return Enum.valueOf(enumType, requiredString(object, name));
-        } catch (IllegalArgumentException exception) {
-            throw new ConfigurationException("Enum value is invalid: " + name, exception);
-        }
-    }
-
-    private List<WorldConfig> parseWorlds(JsonArray worldsArray) throws IOException {
-        return parseWorlds(worldsArray, false);
-    }
-
-    private List<WorldConfig> parseWorlds(
-            JsonArray worldsArray,
-            boolean storagePolicyPresent) throws IOException {
-        List<WorldConfig> worlds = new ArrayList<>(worldsArray.size());
-        for (JsonElement element : worldsArray) {
-            if (!element.isJsonObject()) {
-                throw new ConfigurationException("Per-world configuration must be an object");
-            }
-            JsonObject world = element.getAsJsonObject();
-            StoragePolicy storagePolicy = storagePolicyPresent
-                    ? parseStoragePolicy(requiredObject(world, "storage"))
-                    : StoragePolicy.defaults();
-            worlds.add(new WorldConfig(
-                    WorldId.parse(requiredString(world, "worldId")),
-                    requiredBoolean(world, "enabled"),
-                    requiredPath(world, "path"),
-                    optionalString(world, "remoteUrl"),
-                    optionalPath(world, "zipDestination"),
-                    storagePolicy));
-        }
-        return worlds;
-    }
-
-    private static StoragePolicy parseStoragePolicy(JsonObject object)
-            throws ConfigurationException {
-        return new StoragePolicy(
-                requiredLong(object, "budgetBytes"),
-                requiredInteger(object, "dailyCopies"),
-                requiredInteger(object, "weeklyCopies"),
-                requiredInteger(object, "monthlyCopies"));
-    }
-
-    private Path requiredPath(JsonObject object, String name) throws IOException {
-        return optionalPath(object, name)
-                .orElseThrow(() -> new ConfigurationException("Required filesystem path is missing: " + name));
-    }
-
-    private Optional<Path> optionalPath(JsonObject object, String name) throws IOException {
-        Optional<String> path = optionalString(object, name);
-        if (path.isEmpty()) {
-            return Optional.empty();
-        }
-        if (path.get().isBlank()) {
-            throw new ConfigurationException("Filesystem path must not be blank: " + name);
-        }
-        try {
-            Path parsed = Path.of(path.get());
-            if (!parsed.isAbsolute()) {
-                Path parent = file.getParent();
-                if (parent == null) {
-                    throw new ConfigurationException("Configuration path has no parent directory");
-                }
-                parsed = parent.resolve(parsed);
-            }
-            return Optional.of(PathSafety.canonicalize(parsed));
-        } catch (RuntimeException exception) {
-            throw new ConfigurationException("Invalid filesystem path in " + name, exception);
-        }
-    }
-
-    private static boolean looksLikeLegacyConfiguration(JsonObject root) {
-        return root.has("manualBackups")
-                || root.has("exitBackups")
-                || root.has("scheduleEnabled")
-                || root.has("scheduleMinutes")
-                || root.has("gitEnabled")
-                || root.has("gitRepository")
-                || root.has("gitRemoteName")
-                || root.has("gitRemoteUrl")
-                || root.has("zipEnabled")
-                || root.has("zipDestination");
-    }
-
-    private static void rejectCredentialData(JsonElement element) throws ConfigurationException {
+    /** Refuses a hand-written file that keeps a password or token under its own key; WorldArchive never writes one. */
+    private static void rejectCredentialFields(JsonElement element) throws ConfigurationException {
         if (element.isJsonObject()) {
-            JsonObject object = element.getAsJsonObject();
-            for (String name : object.keySet()) {
-                String normalized = name.toLowerCase(Locale.ROOT).replace("_", "").replace("-", "");
-                if (normalized.contains("password")
-                        || normalized.contains("passwd")
-                        || normalized.contains("token")
-                        || normalized.contains("secret")
-                        || normalized.contains("credential")
-                        || normalized.contains("apikey")) {
+            for (Map.Entry<String, JsonElement> field : element.getAsJsonObject().entrySet()) {
+                if (isCredentialName(field.getKey())) {
                     throw new ConfigurationException(
                             "Credential fields are not permitted in WorldArchive configuration");
                 }
-                rejectCredentialData(object.get(name));
+                rejectCredentialFields(field.getValue());
             }
         } else if (element.isJsonArray()) {
             for (JsonElement value : element.getAsJsonArray()) {
-                rejectCredentialData(value);
+                rejectCredentialFields(value);
             }
-        } else if (element.isJsonPrimitive() && element.getAsJsonPrimitive().isString()
-                && SensitiveDataRedactor.containsSensitiveData(element.getAsString())) {
-            throw new ConfigurationException("Sensitive values are not permitted in WorldArchive configuration");
         }
     }
 
-    private static void rejectSymlink(Path path, String description) throws ConfigurationException {
-        if (Files.isSymbolicLink(path)) {
-            throw new ConfigurationException(description + " must not be a symbolic link");
+    private static boolean isCredentialName(String name) {
+        String normalized = name.toLowerCase(Locale.ROOT).replace("_", "").replace("-", "");
+        return normalized.contains("password")
+                || normalized.contains("passwd")
+                || normalized.contains("token")
+                || normalized.contains("secret")
+                || normalized.contains("credential")
+                || normalized.contains("apikey");
+    }
+
+    /** The settings written by {@link #reset}, and where the unreadable file was kept. */
+    public record Reset(WorldArchiveConfig config, Path keptCopy) {
+        public Reset {
+            Objects.requireNonNull(config, "config");
+            Objects.requireNonNull(keptCopy, "keptCopy");
+        }
+    }
+
+    /** What the file held: the settings as written in it, its schema version, and its text. */
+    private record Stored(WorldArchiveConfig config, int schemaVersion, String text) {
+        boolean outdated() {
+            return schemaVersion < WorldArchiveConfig.CURRENT_SCHEMA_VERSION;
         }
     }
 }

@@ -1,18 +1,22 @@
 package dev.ishaanko.worldarchive.storage.git;
 
-import dev.ishaanko.worldarchive.core.AsyncTasks;
+import dev.ishaanko.worldarchive.config.FolderOrigin;
+import dev.ishaanko.worldarchive.config.RemoteUrlPolicy;
+import dev.ishaanko.worldarchive.core.BackupBackend;
 import dev.ishaanko.worldarchive.core.BackupCapture;
-import dev.ishaanko.worldarchive.core.ProgressListener;
 import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.BackupManifest;
 import dev.ishaanko.worldarchive.model.DestinationResult;
 import dev.ishaanko.worldarchive.model.DestinationType;
+import dev.ishaanko.worldarchive.model.ProgressListener;
 import dev.ishaanko.worldarchive.model.WorldId;
+import dev.ishaanko.worldarchive.support.AsyncTasks;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -22,125 +26,53 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
-import java.util.function.Function;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-/** Routes every world to an isolated bare repository while retaining a legacy read fallback. */
-public final class WorldGitSnapshotStore implements GitSnapshotStore {
-    private static final String WORLD_REPOSITORY_SUFFIX = ".git";
+/**
+ * Git storage for every world: each world has its own bare repository,
+ * {@code <world id>.git} in the configured folder, and optionally its own remote. This is the
+ * entry point for Git backups; each operation runs on the executor, and cancelling its future
+ * with interruption stops the Git processes it started.
+ */
+public final class WorldGitSnapshotStore implements BackupBackend {
+    private static final String REPOSITORY_SUFFIX = ".git";
 
-    private static final String LEGACY_CHILD_ROOT_SUFFIX = ".worlds";
-
-    private final GitBackendSettings currentSettings;
-
-    private final Path repositoryRoot;
-
-    private final Optional<GitBackendSettings> legacySettings;
-
-    private final Optional<GitBackupBackend> legacyBackend;
+    private final GitBackendSettings settings;
 
     private final Map<WorldId, String> worldRemoteUrls;
-
-    private final GitBackupBackend probeBackend;
 
     private final GitCommandRunner runner;
 
     private final ExecutorService executor;
 
-    private final boolean ownsExecutor;
+    private final ConcurrentMap<WorldId, GitWorldRepository> worlds = new ConcurrentHashMap<>();
 
-    private final ConcurrentMap<WorldId, GitBackupBackend> children = new ConcurrentHashMap<>();
+    /** Set by the first check that finds both tools, so later backups skip the check. */
+    private final AtomicReference<GitToolHealth> workingTools = new AtomicReference<>();
 
-    public WorldGitSnapshotStore(GitBackendSettings currentSettings) {
-        this(
-                currentSettings,
-                Optional.empty(),
-                Map.of(),
-                new SystemGitCommandRunner(),
-                Executors.newThreadPerTaskExecutor(
-                        Thread.ofVirtual().name("worldarchive-world-git-", 0).factory()),
-                true);
-    }
-
+    /**
+     * @param settings the folder that holds the world repositories, and shared Git settings; it
+     *        has no remote, because each world's remote is given in {@code worldRemoteUrls}
+     * @param executor runs the store's work; it belongs to the caller, who also stops it
+     */
     public WorldGitSnapshotStore(
-            GitBackendSettings currentSettings,
-            Optional<GitBackendSettings> legacySettings,
-            GitCommandRunner runner,
-            ExecutorService executor) {
-        this(currentSettings, legacySettings, Map.of(), runner, executor, false);
-    }
-
-    public WorldGitSnapshotStore(
-            GitBackendSettings currentSettings,
-            Optional<GitBackendSettings> legacySettings,
+            GitBackendSettings settings,
             Map<WorldId, String> worldRemoteUrls,
             GitCommandRunner runner,
             ExecutorService executor) {
-        this(currentSettings, legacySettings, worldRemoteUrls, runner, executor, false);
-    }
-
-    private WorldGitSnapshotStore(
-            GitBackendSettings configuredSettings,
-            Optional<GitBackendSettings> configuredLegacySettings,
-            Map<WorldId, String> configuredWorldRemoteUrls,
-            GitCommandRunner runner,
-            ExecutorService executor,
-            boolean ownsExecutor) {
-        GitBackendSettings supplied = Objects.requireNonNull(configuredSettings, "currentSettings");
+        this.settings = Objects.requireNonNull(settings, "settings");
+        if (settings.remoteUrl().isPresent()) {
+            throw new IllegalArgumentException("Each world's Git remote is passed with the world, not in the settings");
+        }
+        this.worldRemoteUrls = Map.copyOf(Objects.requireNonNull(worldRemoteUrls, "worldRemoteUrls"));
         this.runner = Objects.requireNonNull(runner, "runner");
         this.executor = Objects.requireNonNull(executor, "executor");
-        this.ownsExecutor = ownsExecutor;
-        this.worldRemoteUrls = Map.copyOf(Objects.requireNonNull(
-                configuredWorldRemoteUrls,
-                "worldRemoteUrls"));
-
-        Optional<String> suppliedRemote = supplied.remoteUrl();
-        Optional<String> currentTemplate = suppliedRemote
-                .filter(GitBackendSettings::isWorldRemoteTemplate);
-        Optional<String> plainSuppliedRemote = suppliedRemote
-                .filter(remote -> !GitBackendSettings.isWorldRemoteTemplate(remote));
-        Optional<GitBackendSettings> explicitLegacy = Objects.requireNonNull(
-                configuredLegacySettings, "legacySettings");
-        explicitLegacy.ifPresent(settings -> {
-            if (settings.isolatedWorldId().isPresent()) {
-                throw new IllegalArgumentException("Legacy Git settings must not be world-isolated");
-            }
-        });
-
-        Path configuredRoot = supplied.repository();
-        boolean configuredPathIsLegacy = explicitLegacy.isEmpty() && looksLikeBareRepository(configuredRoot);
-        Path selectedRoot = configuredPathIsLegacy
-                ? legacyChildRoot(configuredRoot)
-                : configuredRoot;
-        Optional<GitBackendSettings> selectedLegacy = explicitLegacy;
-        if (configuredPathIsLegacy) {
-            selectedLegacy = Optional.of(supplied.forLegacyRepository(
-                    configuredRoot,
-                    plainSuppliedRemote));
-        }
-        if (selectedLegacy.isPresent()
-                && selectedLegacy.orElseThrow().repository().equals(selectedRoot)) {
-            selectedRoot = legacyChildRoot(selectedRoot);
-        }
-
-        this.repositoryRoot = selectedRoot.toAbsolutePath().normalize();
-        this.currentSettings = supplied.forLegacyRepository(repositoryRoot, currentTemplate);
-        this.legacySettings = selectedLegacy;
-        this.legacyBackend = selectedLegacy.map(settings -> new GitBackupBackend(
-                settings,
-                runner,
-                executor));
-        this.probeBackend = new GitBackupBackend(
-                supplied.withoutRemote(repositoryRoot.resolve(".worldarchive-probe.git")),
-                runner,
-                executor);
     }
 
     @Override
@@ -148,521 +80,256 @@ public final class WorldGitSnapshotStore implements GitSnapshotStore {
         return DestinationType.GIT;
     }
 
-    @Override
     public CompletionStage<GitToolHealth> probeTools() {
-        return probeBackend.probeTools();
+        return submit(this::checkTools);
     }
 
+    /**
+     * Writes the snapshot on the calling thread. When the upload is cut short, the local
+     * snapshot is still returned as pending sync.
+     */
     @Override
-    public CompletionStage<DestinationResult> createBackup(
-            BackupCapture capture,
-            ProgressListener progressListener) {
+    public DestinationResult createBackup(BackupCapture capture, ProgressListener progressListener)
+            throws InterruptedException {
         Objects.requireNonNull(capture, "capture");
         Objects.requireNonNull(progressListener, "progressListener");
-        WorldId worldId = capture.manifest().worldId();
-        BackupId backupId = capture.manifest().backupId();
-        // One interruptible worker runs the whole write, so a cancellation reaches the
-        // Git thread directly and the coordinator still receives the snapshot it produced.
-        return AsyncTasks.supplyInterruptible(executor, () -> {
-            if (locateLocalBlocking(worldId, backupId) != SnapshotLocation.NONE) {
-                return DestinationResult.failed(
-                        DestinationType.GIT,
-                        "The exact Git snapshot already exists in managed storage");
-            }
-            return child(worldId).createBackupBlocking(capture, progressListener);
-        });
+        if (!settings.enabled()) {
+            return DestinationResult.skipped(DestinationType.GIT, "Git backups are turned off");
+        }
+        GitToolHealth tools = workingTools.get() != null ? workingTools.get() : checkTools();
+        if (!tools.available()) {
+            return DestinationResult.failed(DestinationType.GIT, tools.summary());
+        }
+        return world(capture.manifest().worldId()).createBackup(capture, progressListener);
     }
 
-    @Override
+    /** Every snapshot of one world, or of all worlds, newest first; one {@code for-each-ref} per world. */
     public CompletionStage<List<GitSnapshot>> listSnapshots(Optional<WorldId> worldId) {
         Objects.requireNonNull(worldId, "worldId");
-        if (worldId.isPresent()) {
-            WorldId selected = worldId.orElseThrow();
-            return child(selected).listSnapshots(worldId).thenCombine(
-                    legacySnapshots(worldId),
-                    WorldGitSnapshotStore::combineSnapshots);
-        }
-        List<CompletionStage<List<GitSnapshot>>> listings = new ArrayList<>();
-        try {
-            for (WorldId discovered : discoverWorlds()) {
-                listings.add(child(discovered).listSnapshots(Optional.of(discovered)));
+        return submit(() -> {
+            List<GitSnapshot> snapshots = new ArrayList<>();
+            for (WorldId world : worldId.isPresent() ? Set.of(worldId.get()) : discoverWorlds()) {
+                snapshots.addAll(world(world).snapshots());
             }
-        } catch (IOException exception) {
-            return CompletableFuture.failedFuture(exception);
-        }
-        legacyBackend.ifPresent(backend -> listings.add(backend.listSnapshots(Optional.empty())));
-        if (listings.isEmpty()) {
-            return CompletableFuture.completedFuture(List.of());
-        }
-        CompletableFuture<?>[] futures = listings.stream()
-                .map(CompletionStage::toCompletableFuture)
-                .toArray(CompletableFuture[]::new);
-        return CompletableFuture.allOf(futures).thenApply(ignored -> {
-            List<GitSnapshot> combined = new ArrayList<>();
-            for (CompletionStage<List<GitSnapshot>> listing : listings) {
-                combined = new ArrayList<>(combineSnapshots(
-                        combined,
-                        listing.toCompletableFuture().join()));
-            }
-            return List.copyOf(combined);
+            snapshots.sort(Comparator.comparing(GitSnapshot::committedAt).reversed());
+            return List.copyOf(snapshots);
         });
     }
 
-    /** Lists only the current isolated repository, excluding read-compatible legacy storage. */
-    public CompletionStage<List<GitSnapshot>> listCurrentSnapshots(WorldId worldId) {
-        Objects.requireNonNull(worldId, "worldId");
-        return child(worldId).listSnapshots(Optional.of(worldId));
+    /**
+     * The manifests of several snapshots of one world, read with one Git process. A snapshot whose
+     * manifest is missing or does not match its commit is left out of the result.
+     */
+    public CompletionStage<Map<BackupId, BackupManifest>> readManifests(WorldId worldId, Collection<GitSnapshot> snapshots) {
+        List<GitSnapshot> requested = List.copyOf(Objects.requireNonNull(snapshots, "snapshots"));
+        return submit(() -> world(worldId).manifests(requested));
     }
 
-    @Override
-    public CompletionStage<GitVerification> verifySnapshot(WorldId worldId, BackupId backupId) {
-        return withLocatedLocal(
-                worldId,
-                backupId,
-                backend -> backend.verifySnapshot(worldId, backupId));
-    }
-
-    @Override
-    public CompletionStage<BackupManifest> readManifest(WorldId worldId, BackupId backupId) {
-        return withLocatedLocal(
-                worldId,
-                backupId,
-                backend -> backend.readManifest(worldId, backupId));
-    }
-
-    @Override
+    /**
+     * Checks the copy a restore would use and fails when there is none. A missing or damaged
+     * local copy is replaced by the remote's when the world has a remote.
+     */
     public CompletionStage<GitVerification> verifyRestorableSnapshot(
             WorldId worldId,
             BackupId backupId,
             BackupManifest expectedManifest) {
-        Objects.requireNonNull(expectedManifest, "expectedManifest");
-        return withRestorableLocation(
-                worldId,
-                backupId,
-                backend -> backend.verifyRestorableSnapshot(
-                        worldId,
-                        backupId,
-                        expectedManifest));
+        if (!names(expectedManifest, worldId, backupId)) {
+            return mismatch();
+        }
+        return submit(() -> world(worldId).verifyRestorable(backupId, expectedManifest));
     }
 
-    @Override
-    public CompletionStage<Path> restoreSnapshot(
-            WorldId worldId,
-            BackupId backupId,
-            Path emptyStaging) {
-        Objects.requireNonNull(emptyStaging, "emptyStaging");
-        return withRestorableLocation(
-                worldId,
-                backupId,
-                backend -> backend.restoreSnapshot(worldId, backupId, emptyStaging));
+    /** Fully checks this computer's copy; a damaged copy gives an invalid verification. */
+    public CompletionStage<GitVerification> verifyCurrentSnapshot(WorldId worldId, BackupId backupId) {
+        Objects.requireNonNull(backupId, "backupId");
+        return submit(() -> world(worldId).verifyLocal(backupId));
     }
 
-    @Override
+    /**
+     * Restores a backup into an empty staging folder that the caller created and owns; each file
+     * is hashed as it is written and the whole must match the manifest. The folder is the result.
+     */
     public CompletionStage<Path> restoreSnapshot(
             WorldId worldId,
             BackupId backupId,
             BackupManifest expectedManifest,
             Path emptyStaging) {
-        Objects.requireNonNull(expectedManifest, "expectedManifest");
-        Objects.requireNonNull(emptyStaging, "emptyStaging");
-        return withRestorableLocation(
-                worldId,
-                backupId,
-                backend -> backend.restoreSnapshot(
-                        worldId,
-                        backupId,
-                        expectedManifest,
-                        emptyStaging));
+        Path staging = Objects.requireNonNull(emptyStaging, "emptyStaging").toAbsolutePath().normalize();
+        if (!names(expectedManifest, worldId, backupId)) {
+            return mismatch();
+        }
+        if (staging.startsWith(settings.repository()) || settings.repository().startsWith(staging)) {
+            return CompletableFuture.failedFuture(
+                    new GitStorageException("A restore folder must be outside the Git storage folder"));
+        }
+        return submit(() -> {
+            world(worldId).restore(backupId, expectedManifest, staging);
+            return staging;
+        });
     }
 
-    @Override
-    public CompletionStage<GitBackupBackend.RestoreResult> restoreSnapshotForRecovery(
-            WorldId worldId,
-            BackupId backupId,
-            BackupManifest expectedManifest,
-            Path emptyStaging) {
-        Objects.requireNonNull(expectedManifest, "expectedManifest");
-        Objects.requireNonNull(emptyStaging, "emptyStaging");
-        return withRestorableLocation(
-                worldId,
-                backupId,
-                backend -> backend.restoreSnapshotForRecovery(
-                        worldId,
-                        backupId,
-                        expectedManifest,
-                        emptyStaging));
+    /**
+     * Deletes several backups of one world everywhere they exist. With a remote this is one
+     * listing, one atomic push per 100 backups (a refused push changes no remote branch), and
+     * one local ref transaction; afterwards the space the backups used here is freed.
+     */
+    public CompletionStage<Map<BackupId, GitDeletion>> deleteSnapshots(WorldId worldId, Set<BackupId> backupIds) {
+        Set<BackupId> requested = Set.copyOf(Objects.requireNonNull(backupIds, "backupIds"));
+        return submit(() -> world(worldId).delete(requested));
     }
 
-    @Override
-    public CompletionStage<Boolean> deleteSnapshot(WorldId worldId, BackupId backupId) {
-        return withRestorableLocation(
-                worldId,
-                backupId,
-                backend -> backend.deleteSnapshot(worldId, backupId));
-    }
-
-    @Override
+    /** Deletes only this computer's copy and never contacts the remote. */
     public CompletionStage<Boolean> deleteLocalSnapshot(WorldId worldId, BackupId backupId) {
-        return withLocatedLocal(
-                worldId,
-                backupId,
-                backend -> backend.deleteLocalSnapshot(worldId, backupId));
-    }
-
-    /** Deletes only the current isolated local ref and never contacts a configured remote. */
-    public CompletionStage<Boolean> deleteCurrentLocalSnapshot(
-            WorldId worldId,
-            BackupId backupId) {
-        Objects.requireNonNull(worldId, "worldId");
         Objects.requireNonNull(backupId, "backupId");
-        return child(worldId).deleteLocalSnapshot(worldId, backupId);
+        return submit(() -> world(worldId).deleteLocal(backupId));
     }
 
-    /** Proves that this world's current configured remote has the exact local commit. */
-    public CompletionStage<Boolean> currentRemoteContainsSnapshot(
-            WorldId worldId,
-            BackupId backupId) {
-        Objects.requireNonNull(worldId, "worldId");
-        Objects.requireNonNull(backupId, "backupId");
-        return child(worldId).currentRemoteContainsSnapshot(worldId, backupId);
+    /** Each backup's commit on the world's remote, from one {@code ls-remote}; empty without a remote. */
+    public CompletionStage<Map<BackupId, String>> remoteSnapshotCommits(WorldId worldId) {
+        return submit(() -> world(worldId).remoteCommits());
     }
 
+    /** Frees the space that deleted snapshots of the world used. */
     public CompletionStage<Void> compactCurrentStorage(WorldId worldId) {
-        Objects.requireNonNull(worldId, "worldId");
-        return child(worldId).compactStorage(worldId);
+        return submit(() -> {
+            world(worldId).compact();
+            return null;
+        });
     }
 
-    public CompletionStage<GitVerification> verifyCurrentSnapshot(
-            WorldId worldId,
-            BackupId backupId) {
-        Objects.requireNonNull(worldId, "worldId");
-        Objects.requireNonNull(backupId, "backupId");
-        return child(worldId).verifySnapshot(worldId, backupId);
-    }
-
-    @Override
+    /**
+     * Downloads the LFS objects of an imported snapshot from the repository it came from, and
+     * checks it fully; the snapshot ref must still point at the imported commit.
+     */
     public CompletionStage<GitVerification> hydrateExternalSnapshot(
             WorldId worldId,
             BackupId backupId,
             BackupManifest expectedManifest,
             String expectedCommit,
             String remoteUrl) {
-        return withLocatedLocal(
-                worldId,
-                backupId,
-                backend -> backend.hydrateExternalSnapshot(
-                        worldId, backupId, expectedManifest, expectedCommit, remoteUrl));
+        if (!names(expectedManifest, worldId, backupId)
+                || expectedCommit == null
+                || !GitRepository.isObjectId(expectedCommit)) {
+            return mismatch();
+        }
+        String source;
+        try {
+            source = RemoteUrlPolicy.validatePlain(remoteUrl);
+        } catch (IllegalArgumentException exception) {
+            return CompletableFuture.failedFuture(exception);
+        }
+        return submit(() -> world(worldId).hydrate(backupId, expectedManifest, expectedCommit, source));
     }
 
-    @Override
+    /** Uploads this computer's copy to the world's remote; a remote problem leaves it pending sync. */
     public CompletionStage<DestinationResult> syncSnapshot(WorldId worldId, BackupId backupId) {
-        return withLocatedLocal(
-                worldId,
-                backupId,
-                backend -> backend.syncSnapshot(worldId, backupId));
+        Objects.requireNonNull(backupId, "backupId");
+        return submit(() -> world(worldId).sync(backupId));
     }
 
-    /** Returns the stable isolated repository path without creating it. */
+    /** The world's repository folder; nothing is created. */
     public Path repositoryFor(WorldId worldId) {
         Objects.requireNonNull(worldId, "worldId");
-        return repositoryRoot.resolve(worldId + WORLD_REPOSITORY_SUFFIX).normalize();
+        return settings.repository().resolve(worldId + REPOSITORY_SUFFIX).normalize();
     }
 
+    /** The folder that holds every world's repository. */
     public Path repositoryRoot() {
-        return repositoryRoot;
+        return settings.repository();
     }
 
+    /** Whether a listing of the repositories' folder sees every backup (see {@link FolderOrigin#listable}). */
+    public boolean rootListable() {
+        return settings.folderOrigin().listable(settings.repository());
+    }
+
+    /** Whether the world has a remote of its own. */
     public boolean remoteConfigured(WorldId worldId) {
-        Objects.requireNonNull(worldId, "worldId");
-        return currentRemote(worldId).isPresent()
-                || legacySettings.flatMap(GitBackendSettings::remoteUrl).isPresent();
+        return worldRemoteUrls.containsKey(Objects.requireNonNull(worldId, "worldId"));
     }
 
-    /** Fetches remote refs into a private repository without installing or downloading LFS data. */
+    /** Fetches a repository's WorldArchive branches into a private folder and lists its backups. */
     public CompletionStage<GitPreparedImport> prepareImport(String remoteUrl) {
-        return AsyncTasks.supply(executor, () -> {
-            try {
-                return new GitHistoryImporter(currentSettings, runner).prepare(remoteUrl);
-            } catch (IOException | InterruptedException | GitStorageException exception) {
-                if (exception instanceof InterruptedException) {
-                    Thread.currentThread().interrupt();
-                }
-                throw new CompletionException(exception);
-            }
-        });
+        return submit(() -> new GitImporter(settings, runner).prepare(remoteUrl));
     }
 
-    /** Installs only the exact commits retained by a prepared preview. */
+    /**
+     * Installs chosen backups of a preview. Every snapshot is checked fully; the good ones are
+     * installed and a failed one is reported as {@link GitImportInstallStatus#FAILED}.
+     */
     public CompletionStage<Map<BackupId, GitImportInstallStatus>> installImport(
             GitPreparedImport prepared,
-            boolean fullDownload) {
-        return installImport(prepared, prepared.candidates(), fullDownload);
-    }
-
-    /** Installs a chosen subset of the commits retained by a prepared preview. */
-    public CompletionStage<Map<BackupId, GitImportInstallStatus>> installImport(
-            GitPreparedImport prepared,
-            List<GitImportCandidate> candidates,
-            boolean fullDownload) {
+            List<GitImportCandidate> candidates) {
         Objects.requireNonNull(prepared, "prepared");
-        List<GitImportCandidate> selected = List.copyOf(
-                Objects.requireNonNull(candidates, "candidates"));
+        List<GitImportCandidate> selected = List.copyOf(Objects.requireNonNull(candidates, "candidates"));
         if (!prepared.candidates().containsAll(selected)) {
             return CompletableFuture.failedFuture(
                     new IllegalArgumentException("Selected Git imports are not part of this preview"));
         }
         Map<WorldId, List<GitImportCandidate>> byWorld = selected.stream()
-                .collect(java.util.stream.Collectors.groupingBy(
-                        candidate -> candidate.manifest().worldId()));
-        Map<WorldId, Set<BackupId>> completeWorlds = prepared.candidates().stream()
-                .collect(java.util.stream.Collectors.groupingBy(
-                        candidate -> candidate.manifest().worldId(),
-                        java.util.stream.Collectors.mapping(
-                                candidate -> candidate.manifest().backupId(),
-                                java.util.stream.Collectors.toSet())));
-        List<CompletionStage<Map<BackupId, GitImportInstallStatus>>> installations = byWorld
-                .entrySet().stream()
-                .map(entry -> child(entry.getKey()).installImportedSnapshots(
-                        prepared.repository(),
-                        entry.getValue(),
-                        prepared.remote(),
-                        fullDownload,
-                        entry.getValue().stream()
-                                .map(candidate -> candidate.manifest().backupId())
-                                .collect(java.util.stream.Collectors.toSet())
-                                .equals(completeWorlds.get(entry.getKey()))))
-                .toList();
-        CompletableFuture<?>[] futures = installations.stream()
-                .map(CompletionStage::toCompletableFuture)
-                .toArray(CompletableFuture[]::new);
-        return CompletableFuture.allOf(futures).thenApply(ignored -> {
-            Map<BackupId, GitImportInstallStatus> results = new HashMap<>();
-            installations.forEach(stage -> results.putAll(stage.toCompletableFuture().join()));
-            return Map.copyOf(results);
+                .collect(Collectors.groupingBy(candidate -> candidate.manifest().worldId()));
+        return submit(() -> {
+            Map<BackupId, GitImportInstallStatus> statuses = new HashMap<>();
+            GitImporter importer = new GitImporter(settings, runner);
+            for (Map.Entry<WorldId, List<GitImportCandidate>> world : byWorld.entrySet()) {
+                statuses.putAll(importer.install(
+                        world(world.getKey()), prepared.repository(), world.getValue(), prepared.remote()));
+            }
+            return Map.copyOf(statuses);
         });
     }
 
-    /** Recreates missing durable snapshot refs from local managed history refs only. */
-    public CompletionStage<Integer> rebuildSnapshotRefs() {
-        List<CompletionStage<Integer>> rebuilds = new ArrayList<>();
-        try {
-            for (WorldId worldId : discoverWorlds()) {
-                rebuilds.add(child(worldId).rebuildSnapshotRefs());
-            }
-        } catch (IOException exception) {
-            return CompletableFuture.failedFuture(exception);
+    private GitToolHealth checkTools() throws InterruptedException {
+        GitToolHealth health = new GitToolProbe(settings, runner).probe();
+        if (health.available()) {
+            workingTools.set(health);
         }
-        legacyBackend.ifPresent(backend -> rebuilds.add(backend.rebuildSnapshotRefs()));
-        CompletableFuture<?>[] futures = rebuilds.stream()
-                .map(CompletionStage::toCompletableFuture)
-                .toArray(CompletableFuture[]::new);
-        return CompletableFuture.allOf(futures).thenApply(ignored -> rebuilds.stream()
-                .mapToInt(stage -> stage.toCompletableFuture().join())
-                .sum());
+        return health;
     }
 
-    @Override
-    public void close() {
-        children.values().forEach(GitBackupBackend::close);
-        children.clear();
-        legacyBackend.ifPresent(GitBackupBackend::close);
-        probeBackend.close();
-        if (ownsExecutor) {
-            executor.shutdown();
-            boolean interrupted = false;
-            try {
-                if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
-                    executor.shutdownNow();
-                }
-            } catch (InterruptedException exception) {
-                interrupted = true;
-                executor.shutdownNow();
-            } finally {
-                if (interrupted) {
-                    Thread.currentThread().interrupt();
-                }
-            }
-        }
+    private GitWorldRepository world(WorldId worldId) {
+        return worlds.computeIfAbsent(Objects.requireNonNull(worldId, "worldId"), world -> new GitWorldRepository(
+                world,
+                settings.withRepository(repositoryFor(world), Optional.ofNullable(worldRemoteUrls.get(world))),
+                runner));
     }
 
-    private GitBackupBackend child(WorldId worldId) {
-        return children.computeIfAbsent(
-                Objects.requireNonNull(worldId, "worldId"),
-                selected -> new GitBackupBackend(
-                        currentSettings.forWorld(
-                                repositoryFor(selected),
-                                selected,
-                                currentRemote(selected)),
-                        runner,
-                        executor));
-    }
-
-    private CompletionStage<List<GitSnapshot>> legacySnapshots(Optional<WorldId> worldId) {
-        return legacyBackend
-                .<CompletionStage<List<GitSnapshot>>>map(backend -> backend.listSnapshots(worldId))
-                .orElseGet(() -> CompletableFuture.completedFuture(List.of()));
-    }
-
-    private CompletionStage<SnapshotLocation> locateLocal(WorldId worldId, BackupId backupId) {
-        Objects.requireNonNull(worldId, "worldId");
-        Objects.requireNonNull(backupId, "backupId");
-        return child(worldId).listSnapshots(Optional.of(worldId)).thenCombine(
-                legacySnapshots(Optional.of(worldId)),
-                (childSnapshots, legacySnapshots) -> {
-                    try {
-                        return locate(childSnapshots, legacySnapshots, backupId);
-                    } catch (GitStorageException exception) {
-                        throw new CompletionException(exception);
-                    }
-                });
-    }
-
-    private SnapshotLocation locateLocalBlocking(WorldId worldId, BackupId backupId)
-            throws IOException, InterruptedException, GitStorageException {
-        List<GitSnapshot> childSnapshots = child(worldId).listSnapshotsBlocking(Optional.of(worldId));
-        List<GitSnapshot> legacySnapshots = legacyBackend.isPresent()
-                ? legacyBackend.orElseThrow().listSnapshotsBlocking(Optional.of(worldId))
-                : List.of();
-        return locate(childSnapshots, legacySnapshots, backupId);
-    }
-
-    private static SnapshotLocation locate(
-            List<GitSnapshot> childSnapshots,
-            List<GitSnapshot> legacySnapshots,
-            BackupId backupId) throws GitStorageException {
-        boolean childContains = contains(childSnapshots, backupId);
-        boolean legacyContains = contains(legacySnapshots, backupId);
-        if (childContains && legacyContains) {
-            throw new GitStorageException(
-                    "Git snapshot exists in both isolated and legacy repositories");
-        }
-        if (childContains) {
-            return SnapshotLocation.CHILD;
-        }
-        return legacyContains ? SnapshotLocation.LEGACY : SnapshotLocation.NONE;
-    }
-
-    /** Shared CHILD/LEGACY dispatch; the NONE case is delegated to the caller's strategy. */
-    private <T> CompletionStage<T> withLocation(
-            WorldId worldId,
-            BackupId backupId,
-            Function<GitBackupBackend, CompletionStage<T>> operation,
-            Function<WorldId, CompletionStage<T>> onNone) {
-        Objects.requireNonNull(operation, "operation");
-        Objects.requireNonNull(onNone, "onNone");
-        return locateLocal(worldId, backupId).thenCompose(location -> switch (location) {
-            case CHILD -> operation.apply(child(worldId));
-            case LEGACY -> operation.apply(legacyBackend.orElseThrow());
-            case NONE -> onNone.apply(worldId);
-        });
-    }
-
-    private <T> CompletionStage<T> withLocatedLocal(
-            WorldId worldId,
-            BackupId backupId,
-            Function<GitBackupBackend, CompletionStage<T>> operation) {
-        return withLocation(worldId, backupId, operation, w -> operation.apply(child(w)));
-    }
-
-    private <T> CompletionStage<T> withRestorableLocation(
-            WorldId worldId,
-            BackupId backupId,
-            Function<GitBackupBackend, CompletionStage<T>> operation) {
-        return withLocation(worldId, backupId, operation, w -> resolveAmbiguousRemote(w, operation));
-    }
-
-    private <T> CompletionStage<T> resolveAmbiguousRemote(
-            WorldId worldId,
-            Function<GitBackupBackend, CompletionStage<T>> operation) {
-        boolean childRemote = currentRemote(worldId).isPresent();
-        boolean legacyRemote = legacySettings.flatMap(GitBackendSettings::remoteUrl).isPresent();
-        if (childRemote && legacyRemote) {
-            return CompletableFuture.failedFuture(new GitStorageException(
-                    "Git snapshot location is ambiguous across configured remotes"));
-        }
-        if (legacyRemote) {
-            return operation.apply(legacyBackend.orElseThrow());
-        }
-        return operation.apply(child(worldId));
-    }
-
-    private Optional<String> currentRemote(WorldId worldId) {
-        String configured = worldRemoteUrls.get(Objects.requireNonNull(worldId, "worldId"));
-        if (configured != null) {
-            return Optional.of(configured);
-        }
-        return currentSettings.remoteUrl().map(template ->
-                GitBackendSettings.resolveWorldRemote(template, worldId));
-    }
-
+    /** The worlds that have a repository folder, and the worlds this store already used. */
     private Set<WorldId> discoverWorlds() throws IOException {
-        Set<WorldId> worlds = new HashSet<>(children.keySet());
-        if (!Files.isDirectory(repositoryRoot, LinkOption.NOFOLLOW_LINKS)) {
-            return Set.copyOf(worlds);
+        Set<WorldId> discovered = new HashSet<>(worlds.keySet());
+        if (!Files.isDirectory(settings.repository(), LinkOption.NOFOLLOW_LINKS)) {
+            return discovered;
         }
-        try (Stream<Path> paths = Files.list(repositoryRoot)) {
-            for (Path path : paths.toList()) {
-                if (!Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) {
-                    continue;
-                }
-                String name = path.getFileName().toString();
-                if (!name.endsWith(WORLD_REPOSITORY_SUFFIX)) {
-                    continue;
-                }
-                String identity = name.substring(0, name.length() - WORLD_REPOSITORY_SUFFIX.length());
-                try {
-                    worlds.add(WorldId.parse(identity));
-                } catch (IllegalArgumentException ignored) {
-                    // Unmanaged directories under the configured root are never opened.
+        try (Stream<Path> folders = Files.list(settings.repository())) {
+            for (Path folder : folders.filter(path -> Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)).toList()) {
+                String name = folder.getFileName().toString();
+                if (name.endsWith(REPOSITORY_SUFFIX)) {
+                    parseWorld(name.substring(0, name.length() - REPOSITORY_SUFFIX.length())).ifPresent(discovered::add);
                 }
             }
         }
-        return Set.copyOf(worlds);
+        return discovered;
     }
 
-    private static List<GitSnapshot> combineSnapshots(
-            List<GitSnapshot> first,
-            List<GitSnapshot> second) {
-        Map<String, GitSnapshot> byRef = new HashMap<>();
-        for (GitSnapshot snapshot : first) {
-            byRef.put(snapshot.refName(), snapshot);
+    private static Optional<WorldId> parseWorld(String name) {
+        try {
+            return Optional.of(WorldId.parse(name));
+        } catch (IllegalArgumentException exception) {
+            return Optional.empty();
         }
-        for (GitSnapshot snapshot : second) {
-            GitSnapshot duplicate = byRef.putIfAbsent(snapshot.refName(), snapshot);
-            if (duplicate != null) {
-                throw new CompletionException(new GitStorageException(
-                        "Git snapshot exists in both isolated and legacy repositories"));
-            }
-        }
-        return byRef.values().stream()
-                .sorted(Comparator.comparing(GitSnapshot::committedAt).reversed())
-                .toList();
     }
 
-    private static boolean contains(List<GitSnapshot> snapshots, BackupId backupId) {
-        return snapshots.stream().anyMatch(snapshot -> snapshot.backupId().equals(backupId));
+    private static boolean names(BackupManifest manifest, WorldId worldId, BackupId backupId) {
+        return Objects.requireNonNull(manifest, "expectedManifest").worldId().equals(worldId)
+                && manifest.backupId().equals(backupId);
     }
 
-    private static boolean looksLikeBareRepository(Path path) {
-        Path normalized = Objects.requireNonNull(path, "path").toAbsolutePath().normalize();
-        return Files.isDirectory(normalized, LinkOption.NOFOLLOW_LINKS)
-                && Files.isRegularFile(normalized.resolve("HEAD"), LinkOption.NOFOLLOW_LINKS)
-                && Files.isDirectory(normalized.resolve("objects"), LinkOption.NOFOLLOW_LINKS)
-                && Files.isDirectory(normalized.resolve("refs"), LinkOption.NOFOLLOW_LINKS);
+    private static <T> CompletionStage<T> mismatch() {
+        return CompletableFuture.failedFuture(
+                new IllegalArgumentException("The expected Git manifest or commit does not match the snapshot"));
     }
 
-    private static Path legacyChildRoot(Path legacyRepository) {
-        Path parent = legacyRepository.getParent();
-        Path fileName = legacyRepository.getFileName();
-        if (parent == null || fileName == null) {
-            throw new IllegalArgumentException("Legacy Git repository must have a parent and name");
-        }
-        return parent.resolve(fileName + LEGACY_CHILD_ROOT_SUFFIX).toAbsolutePath().normalize();
-    }
-
-    private enum SnapshotLocation {
-        NONE,
-        CHILD,
-        LEGACY
+    private <T> CompletionStage<T> submit(AsyncTasks.InterruptibleOperation<T> operation) {
+        return AsyncTasks.supplyInterruptible(executor, operation);
     }
 }

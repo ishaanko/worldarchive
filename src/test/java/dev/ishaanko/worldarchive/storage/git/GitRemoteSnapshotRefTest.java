@@ -7,6 +7,7 @@ import dev.ishaanko.worldarchive.model.WorldId;
 import java.time.Instant;
 import org.junit.jupiter.api.Test;
 
+/** Remote backup branch names never change, because remote backups depend on them. */
 class GitRemoteSnapshotRefTest {
     @Test
     void leadsWithReadableUtcDateAndOmitsWorldUuid() {

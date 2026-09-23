@@ -1,5 +1,6 @@
 package dev.ishaanko.worldarchive.runtime;
 
+import dev.ishaanko.worldarchive.model.OperationProgress;
 import java.util.List;
 import java.util.Objects;
 import java.util.OptionalDouble;
@@ -14,12 +15,12 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.util.FormattedCharSequence;
 
 /**
- * Backup toast that stays visible with a live progress bar while an unattended
- * backup runs, then shows the color-coded outcome briefly and hides. While the
- * backup can still be cancelled the toast draws a Cancel button. Toasts receive
- * no input of their own, so the monitor forwards screen clicks to
- * {@link #mouseClicked}. Progress arrives from worker threads; rendering reads
- * one immutable state snapshot.
+ * Backup toast that stays visible with a live progress bar while an unattended backup runs, then
+ * shows the color-coded outcome briefly and hides. While the backup can still be cancelled the
+ * toast draws a Cancel button. Toasts receive no input of their own, so the monitor forwards
+ * screen clicks to {@link #mouseClicked}, and only while the toast manager still shows this toast;
+ * {@link #getToken} is the toast itself for that check. Progress arrives from worker threads;
+ * rendering reads one immutable state snapshot.
  */
 final class BackupProgressToast implements Toast {
     private static final Component TITLE =
@@ -27,6 +28,9 @@ final class BackupProgressToast implements Toast {
 
     private static final Component CANCEL_LABEL =
             Component.translatable("screen.worldarchive.backup_toast.cancel");
+
+    private static final Component CANCELLING =
+            Component.translatable("screen.worldarchive.backup_toast.cancelling");
 
     private static final int WIDTH = 200;
 
@@ -82,33 +86,35 @@ final class BackupProgressToast implements Toast {
 
     private final int buttonWidth;
 
-    // Where the toast manager last placed this toast, in GUI coordinates. Written
-    // and read on the render thread only.
+    // Where the toast manager last placed this toast, in GUI coordinates, and whether it has
+    // placed it at all. Written and read on the render thread only.
     private float left;
 
     private float top;
+
+    private boolean placed;
 
     private long hideAtVisibleMs = Long.MAX_VALUE;
 
     private Toast.Visibility visibility = Toast.Visibility.SHOW;
 
-    private String renderedMessage;
+    private Component renderedMessage;
 
     private List<FormattedCharSequence> renderedLines = List.of();
 
     /** A toast that only shows an outcome; it has no Cancel button. */
-    BackupProgressToast(Minecraft minecraft, String message) {
+    BackupProgressToast(Minecraft minecraft, Component message) {
         this(minecraft, message, () -> { }, false);
     }
 
     /** A toast for a running backup; {@code cancel} asks that backup to stop. */
-    BackupProgressToast(Minecraft minecraft, String message, Runnable cancel) {
+    BackupProgressToast(Minecraft minecraft, Component message, Runnable cancel) {
         this(minecraft, message, cancel, true);
     }
 
     private BackupProgressToast(
             Minecraft minecraft,
-            String message,
+            Component message,
             Runnable cancel,
             boolean cancellable) {
         this.minecraft = Objects.requireNonNull(minecraft, "minecraft");
@@ -120,17 +126,17 @@ final class BackupProgressToast implements Toast {
         this.buttonLeft = WIDTH - BUTTON_RIGHT_MARGIN - buttonWidth;
     }
 
-    /** Updates the live phase text and completed fraction; ignored once finished or cancelling. */
-    void progress(String message, OptionalDouble fraction) {
-        Objects.requireNonNull(message, "message");
-        OptionalDouble clamped = clampFraction(fraction);
+    /** Shows the backup's current phase and completed fraction; ignored once finished or cancelling. */
+    void progress(OperationProgress progress) {
+        Component message = Component.literal(progress.message());
+        OptionalDouble fraction = clampFraction(progress.fraction());
         state.updateAndGet(current -> current.finished() || current.cancelling()
                 ? current
-                : new State(message, RUNNING_COLOR, clamped, false, current.cancellable(), false));
+                : new State(message, RUNNING_COLOR, fraction, false, current.cancellable(), false));
     }
 
     /** Switches to the outcome message; the toast hides a few seconds later. */
-    void finish(String message, BackgroundBackupWarnings.NoticeSeverity severity) {
+    void finish(Component message, Notice.Severity severity) {
         int color = switch (severity) {
             case SUCCESS -> SUCCESS_COLOR;
             case WARNING -> WARNING_COLOR;
@@ -145,14 +151,14 @@ final class BackupProgressToast implements Toast {
      */
     boolean mouseClicked(double mouseX, double mouseY) {
         State current = state.get();
-        if (!current.cancellable() || !overButton(mouseX, mouseY)) {
+        if (!placed || !current.cancellable() || !overButton(mouseX, mouseY)) {
             return false;
         }
         cancel.run();
         state.updateAndGet(latest -> latest.finished()
                 ? latest
                 : new State(
-                        "Cancelling backup...",
+                        CANCELLING,
                         RUNNING_COLOR,
                         latest.fraction(),
                         false,
@@ -162,8 +168,14 @@ final class BackupProgressToast implements Toast {
     }
 
     @Override
+    public Object getToken() {
+        return this;
+    }
+
+    @Override
     public float xPos(int screenWidth, float visiblePortion) {
         left = Toast.super.xPos(screenWidth, visiblePortion);
+        placed = true;
         return left;
     }
 
@@ -279,11 +291,9 @@ final class BackupProgressToast implements Toast {
         return HEIGHT;
     }
 
-    private List<FormattedCharSequence> linesFor(String message) {
+    private List<FormattedCharSequence> linesFor(Component message) {
         if (!message.equals(renderedMessage)) {
-            List<FormattedCharSequence> split = font.split(
-                    Component.literal(message),
-                    WIDTH - TEXT_X * 2);
+            List<FormattedCharSequence> split = font.split(message, WIDTH - TEXT_X * 2);
             renderedLines = split.subList(0, Math.min(MAX_ROWS, split.size()));
             renderedMessage = message;
         }
@@ -302,7 +312,7 @@ final class BackupProgressToast implements Toast {
      * the "Cancelling" text until the outcome arrives.
      */
     private record State(
-            String message,
+            Component message,
             int color,
             OptionalDouble fraction,
             boolean finished,

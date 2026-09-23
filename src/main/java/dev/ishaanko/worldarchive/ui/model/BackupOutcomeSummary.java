@@ -1,81 +1,117 @@
 package dev.ishaanko.worldarchive.ui.model;
 
-import dev.ishaanko.worldarchive.core.BackupOperation;
-import dev.ishaanko.worldarchive.model.BackupId;
+import dev.ishaanko.worldarchive.model.BackupOperation;
 import dev.ishaanko.worldarchive.model.BackupResult;
 import dev.ishaanko.worldarchive.model.BackupStatus;
 import dev.ishaanko.worldarchive.model.DestinationResult;
 import dev.ishaanko.worldarchive.model.DestinationStatus;
 import dev.ishaanko.worldarchive.model.DestinationType;
+import dev.ishaanko.worldarchive.model.SafeText;
 import dev.ishaanko.worldarchive.model.SyncStatus;
 import dev.ishaanko.worldarchive.model.VerificationStatus;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Function;
 
-/** Aggregate presentation summary that preserves partial destination failures. */
+/**
+ * What a create, sync or verify of one backup did, for the operation screen: the overall status,
+ * a headline, and one line per copy that the operation touched. Restores and deletes have their
+ * own summaries: the restore screen names the new world, and {@link DeleteBatchSummary} counts
+ * deleted backups.
+ */
 public record BackupOutcomeSummary(
-        BackupOperation operation,
-        BackupId backupId,
         BackupStatus status,
         String headline,
-        List<DestinationOutcomeView> destinations) {
+        List<String> lines) {
+    /** Keeps one long destination message from pushing the other lines off the screen. */
+    private static final int MAXIMUM_DETAIL_LENGTH = 160;
+
     public BackupOutcomeSummary {
-        Objects.requireNonNull(operation, "operation");
-        Objects.requireNonNull(backupId, "backupId");
         Objects.requireNonNull(status, "status");
         Objects.requireNonNull(headline, "headline");
-        destinations = List.copyOf(destinations);
+        lines = List.copyOf(lines);
     }
 
-    public static BackupOutcomeSummary from(BackupResult result) {
-        return from(BackupOperation.CREATE, result);
-    }
-
-    public static BackupOutcomeSummary from(
-            BackupOperation operation,
-            BackupResult result) {
-        Objects.requireNonNull(operation, "operation");
-        Objects.requireNonNull(result, "result");
-        List<DestinationResult> applicable = applicableDestinations(
-                operation,
-                result.destinations());
-        List<DestinationOutcomeView> destinations = applicable.stream()
-                .map(BackupOutcomeSummary::destination)
-                .toList();
-        BackupStatus status = operationStatus(operation, result.status(), applicable);
-        return new BackupOutcomeSummary(
-                operation,
-                result.backupId(),
-                status,
-                headline(operation, status),
-                destinations);
-    }
-
-    public boolean partialFailure() {
-        return status == BackupStatus.PARTIAL_SUCCESS;
-    }
-
-    /** Returns an operation-aware status phrase for one destination line. */
-    public String destinationStatus(DestinationOutcomeView destination) {
-        Objects.requireNonNull(destination, "destination");
+    /**
+     * Summarizes the result of a create, sync or verify.
+     *
+     * @throws IllegalArgumentException for a restore or a delete
+     */
+    public static BackupOutcomeSummary from(BackupOperation operation, BackupResult result) {
         return switch (operation) {
-            case DELETE -> deletionStatus(destination.status());
-            case SYNC -> synchronizationStatus(destination.syncStatus());
-            case VERIFY -> verificationStatus(destination.verificationStatus());
-            default -> creationStatus(destination.status());
+            case CREATE -> creation(result);
+            case SYNC -> synchronization(result);
+            case VERIFY -> verification(result);
+            case RESTORE, DELETE -> throw new IllegalArgumentException(operation + " has its own summary");
         };
     }
 
-    private static String deletionStatus(DestinationStatus status) {
+    private static BackupOutcomeSummary creation(BackupResult result) {
+        String headline = switch (result.status()) {
+            case SUCCESS -> "Backup completed";
+            case PARTIAL_SUCCESS -> "Backup completed with destination issues";
+            case FAILED -> "Backup failed";
+            case SKIPPED -> "Backup skipped";
+        };
+        return new BackupOutcomeSummary(result.status(), headline,
+                lines(result.destinations(), destination -> creationPhrase(destination.status())));
+    }
+
+    private static BackupOutcomeSummary synchronization(BackupResult result) {
+        List<DestinationResult> git = result.destinations().stream()
+                .filter(destination -> destination.destination() == DestinationType.GIT)
+                .filter(DestinationResult::isDurable)
+                .toList();
+        BackupStatus status = synchronizationStatus(git);
+        String headline = switch (status) {
+            case SUCCESS -> "Backup synchronized";
+            case PARTIAL_SUCCESS -> "Backup synchronization pending";
+            case FAILED -> "Backup synchronization failed";
+            case SKIPPED -> "Backup synchronization skipped";
+        };
+        return new BackupOutcomeSummary(status, headline,
+                lines(git, destination -> synchronizationPhrase(destination.syncStatus())));
+    }
+
+    private static BackupOutcomeSummary verification(BackupResult result) {
+        List<DestinationResult> copies = result.destinations().stream()
+                .filter(DestinationResult::isDurable)
+                .toList();
+        BackupStatus status = verificationStatus(copies);
+        String headline = switch (status) {
+            case SUCCESS -> "Backup verified";
+            case PARTIAL_SUCCESS -> "Backup verification incomplete";
+            case FAILED -> "Backup verification failed";
+            case SKIPPED -> "Backup verification skipped";
+        };
+        return new BackupOutcomeSummary(status, headline,
+                lines(copies, destination -> verificationPhrase(destination.verificationStatus())));
+    }
+
+    /** One line per destination, such as {@code GIT: sync failed · The remote refused}. */
+    private static List<String> lines(
+            List<DestinationResult> destinations, Function<DestinationResult, String> phrase) {
+        return destinations.stream()
+                .map(destination -> destination.destination() + ": " + phrase.apply(destination) + detail(destination))
+                .toList();
+    }
+
+    private static String detail(DestinationResult destination) {
+        return destination.message()
+                .map(message -> BackupText.SEPARATOR + SafeText.clean(message, MAXIMUM_DETAIL_LENGTH))
+                .orElse("");
+    }
+
+    private static String creationPhrase(DestinationStatus status) {
         return switch (status) {
-            case SUCCESS -> "deleted";
-            case PENDING_SYNC -> "deletion pending";
-            case FAILED -> "not deleted";
-            case SKIPPED -> "not present";
+            case SUCCESS -> "success";
+            case PENDING_SYNC -> "pending sync";
+            case FAILED -> "failed";
+            case SKIPPED -> "skipped";
         };
     }
 
-    private static String synchronizationStatus(SyncStatus status) {
+    private static String synchronizationPhrase(SyncStatus status) {
         return switch (status) {
             case SYNCED -> "synced";
             case NOT_CONFIGURED -> "not configured";
@@ -85,7 +121,7 @@ public record BackupOutcomeSummary(
         };
     }
 
-    private static String verificationStatus(VerificationStatus status) {
+    private static String verificationPhrase(VerificationStatus status) {
         return switch (status) {
             case VERIFIED -> "verified";
             case FAILED -> "verification failed";
@@ -94,64 +130,11 @@ public record BackupOutcomeSummary(
         };
     }
 
-    private static String creationStatus(DestinationStatus status) {
-        return switch (status) {
-            case SUCCESS -> "success";
-            case PENDING_SYNC -> "pending sync";
-            case FAILED -> "failed";
-            case SKIPPED -> "skipped";
-        };
-    }
-
-    private static DestinationOutcomeView destination(DestinationResult result) {
-        return new DestinationOutcomeView(
-                result.destination(),
-                result.status(),
-                result.verificationStatus(),
-                result.syncStatus(),
-                result.message());
-    }
-
-    private static List<DestinationResult> applicableDestinations(
-            BackupOperation operation,
-            List<DestinationResult> destinations) {
-        if (operation == BackupOperation.SYNC) {
-            return destinations.stream()
-                    .filter(destination -> destination.destination() == DestinationType.GIT)
-                    .filter(BackupOutcomeSummary::durable)
-                    .toList();
-        }
-        if (operation == BackupOperation.VERIFY) {
-            return destinations.stream()
-                    .filter(BackupOutcomeSummary::durable)
-                    .toList();
-        }
-        return List.copyOf(destinations);
-    }
-
-    private static boolean durable(DestinationResult destination) {
-        return destination.artifactId().isPresent()
-                && (destination.status() == DestinationStatus.SUCCESS
-                        || destination.status() == DestinationStatus.PENDING_SYNC);
-    }
-
-    private static BackupStatus operationStatus(
-            BackupOperation operation,
-            BackupStatus backupStatus,
-            List<DestinationResult> destinations) {
-        return switch (operation) {
-            case SYNC -> synchronizationStatus(destinations);
-            case VERIFY -> verificationStatus(destinations);
-            default -> backupStatus;
-        };
-    }
-
-    private static BackupStatus synchronizationStatus(List<DestinationResult> destinations) {
-        if (destinations.isEmpty()) {
+    private static BackupStatus synchronizationStatus(List<DestinationResult> git) {
+        if (git.isEmpty()) {
             return BackupStatus.SKIPPED;
         }
-        SyncStatus sync = destinations.getFirst().syncStatus();
-        return switch (sync) {
+        return switch (git.getFirst().syncStatus()) {
             case SYNCED -> BackupStatus.SUCCESS;
             case NOT_SYNCED, PENDING -> BackupStatus.PARTIAL_SUCCESS;
             case FAILED -> BackupStatus.FAILED;
@@ -159,65 +142,15 @@ public record BackupOutcomeSummary(
         };
     }
 
-    private static BackupStatus verificationStatus(List<DestinationResult> destinations) {
-        if (destinations.isEmpty()) {
+    private static BackupStatus verificationStatus(List<DestinationResult> copies) {
+        if (copies.isEmpty()) {
             return BackupStatus.SKIPPED;
         }
-        if (destinations.stream()
-                .anyMatch(destination ->
-                        destination.verificationStatus() == VerificationStatus.FAILED)) {
+        if (copies.stream().anyMatch(copy -> copy.verificationStatus() == VerificationStatus.FAILED)) {
             return BackupStatus.FAILED;
         }
-        if (destinations.stream()
-                .allMatch(destination ->
-                        destination.verificationStatus() == VerificationStatus.VERIFIED)) {
-            return BackupStatus.SUCCESS;
-        }
-        return BackupStatus.PARTIAL_SUCCESS;
-    }
-
-    private static String headline(BackupOperation operation, BackupStatus status) {
-        return switch (operation) {
-            case DELETE -> deletionHeadline(status);
-            case SYNC -> synchronizationHeadline(status);
-            case VERIFY -> verificationHeadline(status);
-            default -> creationHeadline(status);
-        };
-    }
-
-    private static String deletionHeadline(BackupStatus status) {
-        return switch (status) {
-            case SUCCESS -> "Backup deleted";
-            case PARTIAL_SUCCESS -> "Backup deleted from some destinations";
-            case FAILED -> "Backup could not be deleted";
-            case SKIPPED -> "Backup removed";
-        };
-    }
-
-    private static String synchronizationHeadline(BackupStatus status) {
-        return switch (status) {
-            case SUCCESS -> "Backup synchronized";
-            case PARTIAL_SUCCESS -> "Backup synchronization pending";
-            case FAILED -> "Backup synchronization failed";
-            case SKIPPED -> "Backup synchronization skipped";
-        };
-    }
-
-    private static String verificationHeadline(BackupStatus status) {
-        return switch (status) {
-            case SUCCESS -> "Backup verified";
-            case PARTIAL_SUCCESS -> "Backup verification incomplete";
-            case FAILED -> "Backup verification failed";
-            case SKIPPED -> "Backup verification skipped";
-        };
-    }
-
-    private static String creationHeadline(BackupStatus status) {
-        return switch (status) {
-            case SUCCESS -> "Backup completed";
-            case PARTIAL_SUCCESS -> "Backup completed with destination issues";
-            case FAILED -> "Backup failed";
-            case SKIPPED -> "Backup skipped";
-        };
+        return copies.stream().allMatch(copy -> copy.verificationStatus() == VerificationStatus.VERIFIED)
+                ? BackupStatus.SUCCESS
+                : BackupStatus.PARTIAL_SUCCESS;
     }
 }

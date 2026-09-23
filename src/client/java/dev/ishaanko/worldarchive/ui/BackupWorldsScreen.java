@@ -1,10 +1,14 @@
 package dev.ishaanko.worldarchive.ui;
 
-import dev.ishaanko.worldarchive.settings.ClientSettingsAccess;
+import dev.ishaanko.worldarchive.model.WorldId;
+import dev.ishaanko.worldarchive.ui.model.BackupWorldContext;
+import dev.ishaanko.worldarchive.ui.model.BackupWorldEntry;
+import dev.ishaanko.worldarchive.ui.model.Paging;
 import dev.ishaanko.worldarchive.ui.model.ScreenGeometry;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
-import java.util.HashSet;
 import java.util.Set;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.components.Button;
@@ -13,7 +17,10 @@ import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 
-/** Recovery-aware chooser containing both live saves and catalog-only archived worlds. */
+/**
+ * The worlds that have backups: live saves, and archived worlds whose save is gone. A world whose
+ * backups use too much space is marked for a storage review.
+ */
 public final class BackupWorldsScreen extends Screen {
     private static final int ROW_HEIGHT = 24;
 
@@ -23,22 +30,29 @@ public final class BackupWorldsScreen extends Screen {
 
     private static final int CONTENT_MARGIN = 20;
 
+    private static final int MAXIMUM_FOOTER_BUTTON_WIDTH = 82;
+
     private final Screen parent;
 
     private final BackupClientFacade facade;
 
-    private List<BackupWorldEntry> worlds = List.of();
+    private final ScreenCalls loads = new ScreenCalls(this);
 
-    private final Set<dev.ishaanko.worldarchive.model.WorldId> storageReviews =
-            new HashSet<>();
+    private final ScreenCalls notices = new ScreenCalls(this);
+
+    /**
+     * Worlds whose storage notice this screen has claimed. A claim scans the world's storage, so
+     * the screen claims each world once, not on every return from another screen.
+     */
+    private final Set<WorldId> claimed = new HashSet<>();
+
+    private final Set<WorldId> storageReviews = new HashSet<>();
+
+    private List<BackupWorldEntry> worlds = List.of();
 
     private Component status = Component.literal("Loading worlds...").withStyle(ChatFormatting.GRAY);
 
     private boolean loading = true;
-
-    private boolean active;
-
-    private long lifecycle;
 
     private int page;
 
@@ -51,16 +65,15 @@ public final class BackupWorldsScreen extends Screen {
     @Override
     public void added() {
         super.added();
-        active = true;
-        lifecycle++;
-        loadWorlds();
-    }
-
-    @Override
-    public void removed() {
-        active = false;
-        lifecycle++;
-        super.removed();
+        loading = true;
+        loads.dropPending();
+        loads.start(facade::backupWorlds, this::showWorlds, failure -> {
+            // Unreadable settings, for one, say why and that Settings can fix or reset them.
+            loading = false;
+            worlds = List.of();
+            status = FailureMessages.status(failure);
+            rebuildWidgets();
+        });
     }
 
     @Override
@@ -68,131 +81,94 @@ public final class BackupWorldsScreen extends Screen {
         int contentWidth = ScreenGeometry.contentWidth(width, CONTENT_MIN, CONTENT_MAX, CONTENT_MARGIN);
         int x = ScreenGeometry.centerX(width, contentWidth);
         addRenderableOnly(Widgets.title(font, x, 12, contentWidth, 20, title));
-        int pageSize = Math.max(1, Math.min(8, (height - 116) / ROW_HEIGHT));
-        int pageCount = Math.max(1, (worlds.size() + pageSize - 1) / pageSize);
-        page = Math.min(page, pageCount - 1);
+        Paging paging = Paging.of(worlds.size(), Math.min(8, (height - 116) / ROW_HEIGHT), page);
+        page = paging.pageIndex();
         if (worlds.isEmpty()) {
             addRenderableOnly(new MultiLineTextWidget(x, 54, status, font)
                     .setMaxWidth(contentWidth)
                     .setMaxRows(4));
-        } else {
-            addWorldButtons(pageSize, x, contentWidth);
         }
-        addFooter(x, contentWidth, pageCount);
-    }
-
-    private void loadWorlds() {
-        long token = lifecycle;
-        loading = true;
-        facade.backupWorlds().whenComplete((loaded, throwable) -> minecraft.execute(() -> {
-            if (!active || token != lifecycle) {
-                return;
-            }
-            loading = false;
-            if (throwable != null || loaded == null) {
-                worlds = List.of();
-                status = Component.literal("Backup worlds could not be loaded")
-                        .withStyle(ChatFormatting.RED);
-            } else {
-                worlds = List.copyOf(loaded);
-                status = worlds.isEmpty()
-                        ? Component.literal("No live or archived backup worlds were found")
-                                .withStyle(ChatFormatting.GRAY)
-                        : Component.empty();
-            }
-            page = 0;
-            rebuildWidgets();
-            loadStorageNotices(token);
-        }));
-    }
-
-    private void loadStorageNotices(long token) {
-        storageReviews.clear();
-        for (BackupWorldEntry entry : worlds) {
-            facade.claimStorageReviewNotice(entry.context().worldId())
-                    .whenComplete((recommended, throwable) -> minecraft.execute(() -> {
-                        if (!active || token != lifecycle) {
-                            return;
-                        }
-                        if (throwable == null && Boolean.TRUE.equals(recommended)) {
-                            storageReviews.add(entry.context().worldId());
-                            rebuildWidgets();
-                        }
-                    }));
-        }
-    }
-
-    private void addWorldButtons(int pageSize, int x, int contentWidth) {
-        int first = page * pageSize;
-        int limit = Math.min(worlds.size(), first + pageSize);
         int y = 38;
-        for (int index = first; index < limit; index++) {
-            BackupWorldEntry entry = worlds.get(index);
-            String prefix = entry.recoveryOnly() ? "Archived: " : "";
-            String label = prefix + entry.context().displayName() + "  ["
-                    + entry.context().worldId().displayCode() + "]  "
-                    + entry.backupCount() + " backup(s)"
-                    + (storageReviews.contains(entry.context().worldId())
-                            ? "  · Storage review"
-                            : "");
-            Button open = Button.builder(
-                            Component.literal(label),
-                            ignored -> minecraft.setScreenAndShow(new BackupBrowserScreen(
-                                    this, entry.context(), facade)))
-                    .bounds(x, y, contentWidth, 20)
-                    .build();
-            String tooltip = entry.recoveryOnly()
-                    ? "The original save is missing. Restore and delete remain available."
-                    : entry.context().worldDirectory().toString();
-            if (storageReviews.contains(entry.context().worldId())) {
-                tooltip += "\nManaged storage is near or above this world's budget.";
-            }
-            open.setTooltip(Tooltip.create(Component.literal(tooltip)));
-            addRenderableWidget(open);
+        for (BackupWorldEntry entry : paging.slice(worlds)) {
+            addRenderableWidget(worldButton(entry, x, y, contentWidth));
             y += ROW_HEIGHT;
         }
+        addFooter(x, contentWidth, paging);
     }
 
-    private void addFooter(int x, int contentWidth, int pageCount) {
-        int y = height - 28;
-        int buttonWidth = Math.min(82, (contentWidth - 16) / 5);
-        int totalWidth = buttonWidth * 5 + 16;
-        int buttonX = x + (contentWidth - totalWidth) / 2;
-        Button previous = Button.builder(Component.literal("<"), ignored -> {
-                    page--;
-                    rebuildWidgets();
-                })
-                .bounds(buttonX, y, buttonWidth, 20)
+    private void showWorlds(List<BackupWorldEntry> loaded) {
+        loading = false;
+        worlds = List.copyOf(loaded);
+        status = worlds.isEmpty()
+                ? Component.literal("No live or archived backup worlds were found").withStyle(ChatFormatting.GRAY)
+                : Component.empty();
+        page = 0;
+        rebuildWidgets();
+        for (BackupWorldEntry entry : worlds) {
+            WorldId worldId = entry.context().worldId();
+            if (claimed.add(worldId)) {
+                // A notice that arrives while another screen is open is kept for the next showing.
+                notices.start(
+                        () -> facade.claimStorageReviewNotice(worldId),
+                        recommended -> {
+                            if (keepNotice(worldId, recommended)) {
+                                rebuildWidgets();
+                            }
+                        },
+                        ignored -> {
+                        },
+                        recommended -> keepNotice(worldId, recommended));
+            }
+        }
+    }
+
+    /** Records a recommended storage review; true when the world was not marked before. */
+    private boolean keepNotice(WorldId worldId, boolean recommended) {
+        return recommended && storageReviews.add(worldId);
+    }
+
+    private Button worldButton(BackupWorldEntry entry, int x, int y, int contentWidth) {
+        BackupWorldContext world = entry.context();
+        boolean review = storageReviews.contains(world.worldId());
+        String label = (entry.recoveryOnly() ? "Archived: " : "")
+                + world.displayName() + "  [" + world.worldId().displayCode() + "]  "
+                + entry.backupCount() + " backup(s)"
+                + (review ? "  · Storage review" : "");
+        String tooltip = entry.recoveryOnly()
+                ? "The original save is missing. Restore and delete remain available."
+                : world.worldDirectory().toString();
+        if (review) {
+            tooltip += "\nManaged storage is near or above this world's budget.";
+        }
+        Button open = Button.builder(
+                        Component.literal(label),
+                        ignored -> minecraft.setScreenAndShow(new BackupBrowserScreen(this, world, facade)))
+                .bounds(x, y, contentWidth, 20)
                 .build();
-        previous.active = page > 0 && !loading;
-        addRenderableWidget(previous);
-        Button next = Button.builder(Component.literal(">"), ignored -> {
-                    page++;
-                    rebuildWidgets();
-                })
-                .bounds(buttonX + buttonWidth + 4, y, buttonWidth, 20)
-                .build();
-        next.active = page + 1 < pageCount && !loading;
-        addRenderableWidget(next);
-        addRenderableWidget(Button.builder(
+        open.setTooltip(Tooltip.create(Component.literal(tooltip)));
+        return open;
+    }
+
+    private void addFooter(int x, int contentWidth, Paging paging) {
+        List<Button> buttons = new ArrayList<>(Widgets.pageButtons(paging, index -> {
+            page = index;
+            rebuildWidgets();
+        }));
+        buttons.forEach(button -> button.active &= !loading);
+        buttons.add(Button.builder(
                         Component.literal("Import"),
-                        ignored -> openImport())
-                .bounds(buttonX + (buttonWidth + 4) * 2, y, buttonWidth, 20)
+                        ignored -> minecraft.setScreenAndShow(new BackupImportScreen(this, facade)))
                 .build());
-        addRenderableWidget(Button.builder(
+        buttons.add(Button.builder(
                         Component.translatable("screen.worldarchive.worlds.settings"),
-                        ignored -> minecraft.setScreenAndShow(ClientSettingsAccess.createScreen(this)))
-                .bounds(buttonX + (buttonWidth + 4) * 3, y, buttonWidth, 20)
+                        ignored -> facade.openSettings(this))
                 .build());
-        addRenderableWidget(Button.builder(
-                        Component.translatable("screen.worldarchive.worlds.done"),
-                        ignored -> onClose())
-                .bounds(buttonX + (buttonWidth + 4) * 4, y, buttonWidth, 20)
+        buttons.add(Button.builder(Component.translatable("screen.worldarchive.worlds.done"), ignored -> onClose())
                 .build());
-    }
-
-    private void openImport() {
-        minecraft.setScreenAndShow(new BackupImportScreen(this, facade));
+        int buttonWidth = Math.min(MAXIMUM_FOOTER_BUTTON_WIDTH, (contentWidth - Widgets.GAP * 4) / 5);
+        int rowWidth = buttonWidth * 5 + Widgets.GAP * 4;
+        Widgets.row(x + (contentWidth - rowWidth) / 2, height - 28, rowWidth, buttons);
+        buttons.forEach(this::addRenderableWidget);
     }
 
     @Override

@@ -1,81 +1,34 @@
 package dev.ishaanko.worldarchive.recovery;
 
+import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.BackupRecord;
-import dev.ishaanko.worldarchive.model.DestinationHealth;
 import dev.ishaanko.worldarchive.model.DestinationResult;
 import dev.ishaanko.worldarchive.model.DestinationType;
 import dev.ishaanko.worldarchive.model.WorldId;
 import java.nio.file.Path;
-import java.nio.file.attribute.FileTime;
-import java.util.Objects;
-import java.util.Optional;
+import java.util.List;
+import java.util.Map;
 
-/** Blocking worker-thread adapter for the independent destination implementations. */
+/**
+ * One kind of copy, Git or ZIP, as the recovery operations use it. Every method blocks on the
+ * calling worker thread; the copy passed in is the record's durable destination of this kind.
+ */
 interface RecoveryDestination {
-    DestinationType destinationType();
+    DestinationType type();
 
-    VerificationOutcome verify(BackupRecord record, DestinationResult destination) throws Exception;
+    /** Checks the copy in full; damage is a failed outcome, a copy that cannot be read throws. */
+    VerificationOutcome verify(BackupRecord record, DestinationResult copy) throws Exception;
 
-    default VerificationOutcome verifyForRestore(
-            BackupRecord record,
-            DestinationResult destination) throws Exception {
-        return verify(record, destination);
-    }
+    /**
+     * Writes the backup's world into an empty staging folder, checking every file against the
+     * record's manifest; throws, with a reason the player can read, when this copy cannot.
+     */
+    void restore(BackupRecord record, DestinationResult copy, Path emptyStaging) throws Exception;
 
-    Materialization materialize(
-            BackupRecord record,
-            DestinationResult destination,
-            Path emptyTarget)
-            throws Exception;
-
-    /** Returns true when the exact artifact was removed or its exact absence was confirmed. */
-    boolean delete(BackupRecord record, DestinationResult destination) throws Exception;
-
-    DestinationResult sync(BackupRecord record, DestinationResult destination) throws Exception;
-
-    DestinationHealth health(Optional<WorldId> worldId) throws Exception;
-
-    record Materialization(
-            Path path,
-            boolean preservesDirectoryIdentity,
-            Object fileKey,
-            FileTime creationTime,
-            Optional<String> directoryIdentityMarker,
-            Optional<String> postMaterializationProblem) {
-        public Materialization {
-            path = Objects.requireNonNull(path, "path").toAbsolutePath().normalize();
-            postMaterializationProblem = Objects.requireNonNull(
-                    postMaterializationProblem, "postMaterializationProblem");
-            directoryIdentityMarker = Objects.requireNonNull(
-                    directoryIdentityMarker, "directoryIdentityMarker");
-            if (!preservesDirectoryIdentity) {
-                Objects.requireNonNull(creationTime, "creationTime");
-            }
-        }
-
-        static Materialization preserved(Path path) {
-            return new Materialization(
-                    path,
-                    true,
-                    null,
-                    null,
-                    Optional.empty(),
-                    Optional.empty());
-        }
-
-        static Materialization replaced(
-                Path path,
-                Object fileKey,
-                FileTime creationTime,
-                Optional<String> directoryIdentityMarker,
-                Optional<String> postMaterializationProblem) {
-            return new Materialization(
-                    path,
-                    false,
-                    fileKey,
-                    creationTime,
-                    directoryIdentityMarker,
-                    postMaterializationProblem);
-        }
-    }
+    /**
+     * Deletes the copies of several backups of one world, together where the storage allows. Each
+     * backup gets a result: SUCCESS when its copy is gone, FAILED with the reason when it was kept.
+     * An interrupt does not stop the delete; the results always say what happened.
+     */
+    Map<BackupId, DestinationResult> delete(WorldId worldId, List<BackupRecord> records);
 }

@@ -7,95 +7,69 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.util.stream.Stream;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-/** Bounded, no-follow cleanup for WorldArchive-owned temporary trees. */
+/**
+ * Deletes WorldArchive's own temporary trees without following links: a link or a Windows
+ * junction inside is removed itself, never its target.
+ */
 final class GitTemporaryFiles {
-    private static final int MAXIMUM_ENTRIES = GitInventory.MAXIMUM_FILES * 2;
+    private static final Logger LOGGER = LoggerFactory.getLogger("WorldArchive");
 
     private GitTemporaryFiles() {
     }
 
-    /** Best-effort removal of a private tree this process created; its Git child has exited. */
+    /** Deletes a tree; a failure is logged and the rest stays for the next sweep. */
     static void deleteTree(Path root) {
+        try {
+            delete(root);
+        } catch (IOException exception) {
+            LOGGER.warn("WorldArchive could not remove temporary files in {}: {}", root, exception.toString());
+        }
+    }
+
+    /** Deletes everything inside a folder and keeps the folder, creating it when missing. */
+    static void deleteContents(Path folder) throws IOException {
+        Files.createDirectories(folder);
+        try (Stream<Path> children = Files.list(folder)) {
+            for (Path child : children.toList()) {
+                delete(child);
+            }
+        }
+    }
+
+    /** Deletes a file or a tree, bottom up. */
+    static void delete(Path root) throws IOException {
         if (!Files.exists(root, LinkOption.NOFOLLOW_LINKS)) {
             return;
         }
-        try {
-            SafetyScan scan = new SafetyScan();
-            Files.walkFileTree(root, scan);
-            Files.walkFileTree(root, new DeletingVisitor());
-        } catch (IOException | RuntimeException ignored) {
-            // Private temporary data remains for operating-system or user recovery.
-        }
-    }
-
-    private static final class SafetyScan extends SimpleFileVisitor<Path> {
-        private int entries;
-
-        @Override
-        public FileVisitResult preVisitDirectory(Path directory, BasicFileAttributes attributes)
-                throws IOException {
-            count();
-            requireSafe(attributes);
-            return FileVisitResult.CONTINUE;
-        }
-
-        @Override
-        public FileVisitResult visitFile(Path file, BasicFileAttributes attributes) throws IOException {
-            count();
-            if (!attributes.isRegularFile() || attributes.isSymbolicLink() || attributes.isOther()) {
-                throw new IOException("Temporary Git tree contains an unsafe entry");
+        Files.walkFileTree(root, new SimpleFileVisitor<>() {
+            @Override
+            public FileVisitResult preVisitDirectory(Path directory, BasicFileAttributes attributes)
+                    throws IOException {
+                if (attributes.isOther() || attributes.isSymbolicLink()) {
+                    Files.delete(directory);
+                    return FileVisitResult.SKIP_SUBTREE;
+                }
+                return FileVisitResult.CONTINUE;
             }
-            return FileVisitResult.CONTINUE;
-        }
 
-        private void count() throws IOException {
-            if (++entries > MAXIMUM_ENTRIES) {
-                throw new IOException("Temporary Git tree exceeds its cleanup limit");
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attributes) throws IOException {
+                Files.delete(file);
+                return FileVisitResult.CONTINUE;
             }
-        }
 
-        private static void requireSafe(BasicFileAttributes attributes) throws IOException {
-            if (!attributes.isDirectory() || attributes.isSymbolicLink() || attributes.isOther()) {
-                throw new IOException("Temporary Git tree contains an unsafe directory");
+            @Override
+            public FileVisitResult postVisitDirectory(Path directory, IOException failure) throws IOException {
+                if (failure != null) {
+                    throw failure;
+                }
+                Files.delete(directory);
+                return FileVisitResult.CONTINUE;
             }
-        }
-    }
-
-    private static final class DeletingVisitor extends SimpleFileVisitor<Path> {
-        private int entries;
-
-        @Override
-        public FileVisitResult preVisitDirectory(Path directory, BasicFileAttributes attributes)
-                throws IOException {
-            count();
-            SafetyScan.requireSafe(attributes);
-            return FileVisitResult.CONTINUE;
-        }
-
-        @Override
-        public FileVisitResult visitFile(Path file, BasicFileAttributes attributes) throws IOException {
-            count();
-            if (!attributes.isRegularFile() || attributes.isSymbolicLink() || attributes.isOther()) {
-                throw new IOException("Temporary Git tree changed during cleanup");
-            }
-            Files.delete(file);
-            return FileVisitResult.CONTINUE;
-        }
-
-        @Override
-        public FileVisitResult postVisitDirectory(Path directory, IOException exception) throws IOException {
-            if (exception != null) {
-                throw exception;
-            }
-            Files.delete(directory);
-            return FileVisitResult.CONTINUE;
-        }
-
-        private void count() throws IOException {
-            if (++entries > MAXIMUM_ENTRIES) {
-                throw new IOException("Temporary Git tree exceeds its cleanup limit");
-            }
-        }
+        });
     }
 }

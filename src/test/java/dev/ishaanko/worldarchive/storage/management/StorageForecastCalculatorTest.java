@@ -58,7 +58,6 @@ final class StorageForecastCalculatorTest {
 
         assertEquals(StorageForecast.State.ESTIMATED, forecast.state());
         assertEquals(5, forecast.daysRemaining().orElseThrow());
-        assertEquals(60, forecast.bytesPerDay(), 0.001);
     }
 
     @Test
@@ -73,7 +72,7 @@ final class StorageForecastCalculatorTest {
                         sample(NOW, 400)));
 
         assertEquals(StorageForecast.State.STABLE, forecast.state());
-        assertEquals(0, forecast.bytesPerDay());
+        assertTrue(forecast.daysRemaining().isEmpty());
     }
 
     @Test

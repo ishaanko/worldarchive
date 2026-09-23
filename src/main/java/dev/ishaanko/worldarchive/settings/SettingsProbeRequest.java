@@ -4,21 +4,15 @@ import java.nio.file.Path;
 import java.util.Objects;
 import java.util.Optional;
 
-/** Credential-free input for asynchronous settings health probing. */
+/** What the settings footer checks: the destinations that are switched on, and their folders. */
 public record SettingsProbeRequest(
         boolean gitEnabled,
-        String gitExecutable,
         Optional<Path> gitRepository,
-        boolean remoteConfigured,
         boolean zipEnabled,
-        Optional<Path> zipDirectory) {
+        Optional<Path> zipFolder) {
     public SettingsProbeRequest {
-        gitExecutable = Objects.requireNonNull(gitExecutable, "gitExecutable");
-        if (gitExecutable.isBlank() || gitExecutable.chars().anyMatch(Character::isISOControl)) {
-            throw new IllegalArgumentException("Git executable is invalid");
-        }
         gitRepository = normalize(gitRepository, "gitRepository");
-        zipDirectory = normalize(zipDirectory, "zipDirectory");
+        zipFolder = normalize(zipFolder, "zipFolder");
     }
 
     private static Optional<Path> normalize(Optional<Path> path, String name) {

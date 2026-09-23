@@ -1,8 +1,10 @@
 package dev.ishaanko.worldarchive.settings;
 
-/** Responsive screen geometry decisions that can be tested without Minecraft. */
+/**
+ * Geometry of the settings screen: where rows go, and when a short or narrow screen splits the
+ * Git and ZIP tabs into sections.
+ */
 public record SettingsLayout(
-        boolean compact,
         boolean paged,
         int statusY,
         int buttonsY,
@@ -61,10 +63,6 @@ public record SettingsLayout(
 
     private static final int BUTTONS_BOTTOM_OFFSET = 28;
 
-    public static SettingsLayout forHeight(int height) {
-        return forScreen(height, FULL_CONTENT_WIDTH);
-    }
-
     /**
      * Geometry for a screen of the given height and content width. The git/zip pages fall back to
      * their paged layout when the screen is either too short or too narrow for the single page.
@@ -73,12 +71,10 @@ public record SettingsLayout(
         if (height < MINIMUM_HEIGHT) {
             throw new IllegalArgumentException("Settings screen height is too small");
         }
-        boolean compact = height < COMPACT_HEIGHT_THRESHOLD;
-        boolean paged = compact || contentWidth < FULL_CONTENT_WIDTH;
+        boolean paged = height < COMPACT_HEIGHT_THRESHOLD || contentWidth < FULL_CONTENT_WIDTH;
         int pageSize = Math.max(1, Math.min(MAXIMUM_WORLD_PAGE_SIZE,
                 (height - WORLD_LIST_CHROME_HEIGHT) / WORLD_ROW_HEIGHT));
         return new SettingsLayout(
-                compact,
                 paged,
                 height - STATUS_BOTTOM_OFFSET,
                 height - BUTTONS_BOTTOM_OFFSET,

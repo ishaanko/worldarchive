@@ -1,22 +1,25 @@
 package dev.ishaanko.worldarchive.storage.management;
 
 import dev.ishaanko.worldarchive.model.BackupId;
-import dev.ishaanko.worldarchive.model.WorldId;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 
-/** Per-item cleanup outcomes plus the actual post-operation measurement. */
+/**
+ * What a cleanup did: the storage used before and after, why each backup that kept its copies
+ * kept them, and a warning about work that failed after every delete, such as freeing Git space.
+ */
 public record CleanupResult(
-        WorldId worldId,
         long bytesBefore,
         long bytesAfter,
-        Map<BackupId, String> failures) {
+        Map<BackupId, String> failures,
+        Optional<String> warning) {
     public CleanupResult {
-        Objects.requireNonNull(worldId, "worldId");
         if (bytesBefore < 0 || bytesAfter < 0) {
             throw new IllegalArgumentException("Cleanup result sizes must not be negative");
         }
         failures = Map.copyOf(Objects.requireNonNull(failures, "failures"));
+        Objects.requireNonNull(warning, "warning");
     }
 
     public long reclaimedBytes() {

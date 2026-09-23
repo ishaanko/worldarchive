@@ -1,49 +1,30 @@
 package dev.ishaanko.worldarchive.storage.zip;
 
-import dev.ishaanko.worldarchive.core.AsyncTasks;
 import dev.ishaanko.worldarchive.core.BackupBackend;
 import dev.ishaanko.worldarchive.core.BackupCapture;
-import dev.ishaanko.worldarchive.core.BackupOperation;
-import dev.ishaanko.worldarchive.core.OperationId;
-import dev.ishaanko.worldarchive.core.OperationPhase;
-import dev.ishaanko.worldarchive.core.Observers;
-import dev.ishaanko.worldarchive.core.OperationProgress;
-import dev.ishaanko.worldarchive.core.ProgressListener;
+import dev.ishaanko.worldarchive.model.BackupOperation;
 import dev.ishaanko.worldarchive.model.DestinationResult;
 import dev.ishaanko.worldarchive.model.DestinationType;
+import dev.ishaanko.worldarchive.model.OperationId;
+import dev.ishaanko.worldarchive.model.OperationPhase;
+import dev.ishaanko.worldarchive.model.OperationProgress;
+import dev.ishaanko.worldarchive.model.ProgressListener;
 import dev.ishaanko.worldarchive.model.VerificationStatus;
+import dev.ishaanko.worldarchive.support.Observers;
 import java.io.IOException;
-import java.nio.file.AccessDeniedException;
-import java.nio.file.FileSystemException;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.concurrent.CompletionStage;
-import java.util.concurrent.Executor;
 
-/** Asynchronous ZIP destination adapter over the synchronous, worker-safe store. */
+/**
+ * The ZIP destination of a backup: writes the archive on the calling thread into the store of
+ * the backup's world. The archive is read back before it is published, so a success is recorded
+ * as verified.
+ */
 public final class ZipBackupBackend implements BackupBackend {
     private final ZipBackupStoreResolver stores;
 
-    private final Executor executor;
-
-    public ZipBackupBackend(ZipBackupStore store, Executor executor) {
-        this((ZipBackupStoreResolver) store, executor);
-    }
-
-    public ZipBackupBackend(ZipBackupStoreResolver stores, Executor executor) {
+    public ZipBackupBackend(ZipBackupStoreResolver stores) {
         this.stores = Objects.requireNonNull(stores, "stores");
-        this.executor = Objects.requireNonNull(executor, "executor");
-    }
-
-    public ZipBackupBackend(java.nio.file.Path root, Executor executor) {
-        this(new ZipBackupStore(root), executor);
-    }
-
-    public ZipBackupStore store() {
-        if (stores instanceof ZipBackupStore store) {
-            return store;
-        }
-        throw new IllegalStateException("This ZIP backend uses per-world stores");
     }
 
     @Override
@@ -51,79 +32,73 @@ public final class ZipBackupBackend implements BackupBackend {
         return DestinationType.ZIP;
     }
 
+    /** An interrupt stops the write; the store removes the partial archive and this throws. */
     @Override
-    public CompletionStage<DestinationResult> createBackup(
-            BackupCapture capture,
-            ProgressListener progressListener) {
-        Objects.requireNonNull(capture, "capture");
-        Objects.requireNonNull(progressListener, "progressListener");
-        OperationId operationId = OperationId.create();
-        long totalBytes = capture.manifest().sourceByteCount();
-        // Stopping the stage interrupts the write; the store discards the partial archive.
-        return AsyncTasks.supplyInterruptible(executor, () -> {
-            report(progressListener, progress(
-                    operationId, capture, OperationPhase.PREPARING, 0, totalBytes,
-                    "Preparing ZIP backup"));
-            try {
-                ZipBackupStore store = stores.store(capture.manifest().worldId());
-                ZipBackupArtifact artifact = store.create(capture, completed -> report(
-                        progressListener,
-                        progress(operationId, capture, OperationPhase.WRITING,
-                                boundedProgress(completed, totalBytes), totalBytes,
-                                "Writing ZIP backup")));
-                report(progressListener, progress(
-                        operationId, capture, OperationPhase.COMPLETE, totalBytes, totalBytes,
-                        "ZIP backup complete"));
-                return DestinationResult.success(DestinationType.ZIP, artifact.artifactId())
-                        .withVerification(VerificationStatus.VERIFIED);
-            } catch (IOException | SecurityException exception) {
-                report(progressListener, progress(
-                        operationId, capture, OperationPhase.FAILED, 0, totalBytes,
-                        "ZIP backup failed"));
-                return DestinationResult.failed(DestinationType.ZIP, safeFailure(exception));
+    public DestinationResult createBackup(BackupCapture capture, ProgressListener progressListener)
+            throws InterruptedException {
+        Progress progress = new Progress(capture, Objects.requireNonNull(progressListener, "progressListener"));
+        progress.report(OperationPhase.PREPARING, 0, "Preparing ZIP backup");
+        try {
+            ZipBackupArtifact artifact = stores.store(capture.manifest().worldId()).create(capture, progress::writing);
+            progress.report(OperationPhase.COMPLETE, progress.total, "ZIP backup complete");
+            return DestinationResult.success(DestinationType.ZIP, artifact.artifactId())
+                    .withVerification(VerificationStatus.VERIFIED);
+        } catch (IOException exception) {
+            if (Thread.interrupted()) {
+                InterruptedException cancelled = new InterruptedException("The ZIP backup was cancelled");
+                cancelled.initCause(exception);
+                throw cancelled;
             }
-        });
-    }
-
-    private static OperationProgress progress(
-            OperationId operationId,
-            BackupCapture capture,
-            OperationPhase phase,
-            long completed,
-            long total,
-            String message) {
-        return new OperationProgress(
-                operationId,
-                capture.manifest().worldId(),
-                Optional.of(capture.manifest().backupId()),
-                BackupOperation.CREATE,
-                phase,
-                completed,
-                total,
-                message);
-    }
-
-    private static void report(ProgressListener listener, OperationProgress progress) {
-        Observers.safely(() -> listener.onProgress(progress));
-    }
-
-    private static long boundedProgress(long completed, long total) {
-        if (total == 0) {
-            return completed;
+            progress.report(OperationPhase.FAILED, 0, "ZIP backup failed");
+            return DestinationResult.failed(DestinationType.ZIP, failureMessage(exception));
         }
-        return Math.min(completed, total);
     }
 
-    private static String safeFailure(Exception exception) {
+    private static String failureMessage(IOException exception) {
         if (exception instanceof ZipBackupException) {
             return exception.getMessage();
         }
-        if (exception instanceof AccessDeniedException) {
-            return "ZIP destination denied filesystem access";
+        return "The ZIP backup could not be written (" + ZipBackupException.reason(exception) + ").";
+    }
+
+    /** Reports the progress of one write, once per whole percent. */
+    private static final class Progress {
+        private final BackupCapture capture;
+
+        private final ProgressListener listener;
+
+        private final OperationId operationId = OperationId.create();
+
+        private final long total;
+
+        private long reportedPercent = -1;
+
+        private Progress(BackupCapture capture, ProgressListener listener) {
+            this.capture = capture;
+            this.listener = listener;
+            this.total = capture.manifest().sourceByteCount();
         }
-        if (exception instanceof FileSystemException) {
-            return "ZIP destination filesystem operation failed";
+
+        private void writing(long completed) {
+            long done = Math.min(completed, total);
+            long percent = total == 0 ? 100 : done * 100 / total;
+            if (percent != reportedPercent) {
+                reportedPercent = percent;
+                report(OperationPhase.WRITING, done, "Writing ZIP backup");
+            }
         }
-        return "ZIP backup could not be completed";
+
+        private void report(OperationPhase phase, long completed, String message) {
+            OperationProgress progress = new OperationProgress(
+                    operationId,
+                    capture.manifest().worldId(),
+                    Optional.of(capture.manifest().backupId()),
+                    BackupOperation.CREATE,
+                    phase,
+                    completed,
+                    total,
+                    message);
+            Observers.safely(() -> listener.onProgress(progress));
+        }
     }
 }

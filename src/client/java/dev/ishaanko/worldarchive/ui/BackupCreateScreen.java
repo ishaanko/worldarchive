@@ -1,5 +1,6 @@
 package dev.ishaanko.worldarchive.ui;
 
+import dev.ishaanko.worldarchive.model.BackupManifest;
 import dev.ishaanko.worldarchive.ui.model.ScreenGeometry;
 import java.util.Objects;
 import java.util.Optional;
@@ -56,7 +57,7 @@ final class BackupCreateScreen extends Screen {
                 contentWidth,
                 20,
                 Component.literal("Optional backup label"));
-        labelBox.setMaxLength(128);
+        labelBox.setMaxLength(BackupManifest.MAXIMUM_LABEL_LENGTH);
         labelBox.setValue(label);
         labelBox.setHint(Component.literal("Optional backup label"));
         labelBox.setResponder(value -> label = value);
@@ -74,12 +75,11 @@ final class BackupCreateScreen extends Screen {
     }
 
     private void confirm() {
-        if (consumed) {
-            return;
+        if (!consumed) {
+            consumed = true;
+            String value = label.strip();
+            confirmed.accept(value.isEmpty() ? Optional.empty() : Optional.of(value));
         }
-        consumed = true;
-        String value = label.strip();
-        confirmed.accept(value.isEmpty() ? Optional.empty() : Optional.of(value));
     }
 
     @Override

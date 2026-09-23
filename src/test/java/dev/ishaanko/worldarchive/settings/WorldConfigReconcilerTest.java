@@ -1,12 +1,10 @@
 package dev.ishaanko.worldarchive.settings;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.ishaanko.worldarchive.config.StoragePolicy;
 import dev.ishaanko.worldarchive.config.WorldConfig;
-import dev.ishaanko.worldarchive.model.SensitiveDataRedactor;
 import dev.ishaanko.worldarchive.model.WorldId;
 import java.nio.file.Path;
 import java.util.List;
@@ -14,80 +12,62 @@ import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 class WorldConfigReconcilerTest {
+    private static final Path SAVES = Path.of("saves").toAbsolutePath();
+
     @Test
-    void preservesEnablementWhenStableWorldMoves() {
+    void aMovedWorldKeepsItsSettings() {
         WorldId worldId = WorldId.create();
-        WorldConfig existing = new WorldConfig(
-                worldId,
-                false,
-                Path.of("old-save"),
-                Optional.of("https://example.invalid/forever-world.git"));
-        Path moved = Path.of("moved-save");
+        WorldConfig stored = WorldConfig.defaults(worldId, SAVES.resolve("old-name"))
+                .withEnabled(false)
+                .withRemoteUrl(Optional.of("https://example.invalid/forever-world.git"));
+        Path moved = SAVES.resolve("new-name");
 
         WorldReconciliation reconciliation = WorldConfigReconciler.reconcile(
-                List.of(existing),
-                List.of(DiscoveredWorld.success(moved, worldId)));
+                List.of(stored),
+                List.of(new DiscoveredWorld(moved, worldId)));
 
-        assertTrue(reconciliation.errors().isEmpty());
-        assertEquals(1, reconciliation.worlds().size());
-        assertEquals(moved.toAbsolutePath().normalize(), reconciliation.worlds().getFirst().path());
-        assertFalse(reconciliation.worlds().getFirst().enabled());
-        assertEquals(existing.remoteUrl(), reconciliation.worlds().getFirst().remoteUrl());
+        assertEquals(List.of(stored.withPath(moved)), reconciliation.worlds());
+        assertTrue(reconciliation.notices().isEmpty());
     }
 
     @Test
-    void rejectsTwoIdentitiesDiscoveredAtTheSamePath() {
-        Path path = Path.of("same-save");
-
-        WorldReconciliation reconciliation = WorldConfigReconciler.reconcile(
-                List.of(),
-                List.of(
-                        DiscoveredWorld.success(path, WorldId.create()),
-                        DiscoveredWorld.success(path, WorldId.create())));
-
-        assertEquals(1, reconciliation.worlds().size());
-        assertEquals(1, reconciliation.errors().size());
-        assertTrue(reconciliation.errors().getFirst().contains("same save folder"));
-    }
-
-    @Test
-    void doesNotCopySettingsToAReplacementIdentityAtTheSamePath() {
-        Path path = Path.of("replaced-save");
-        StoragePolicy customPolicy = new StoragePolicy(16_000, 2, 3, 4);
-        WorldConfig existing = new WorldConfig(
+    void aReplacedFolderDoesNotInheritTheOldSettings() {
+        Path path = SAVES.resolve("replaced");
+        WorldConfig stored = new WorldConfig(
                 WorldId.create(),
                 false,
                 path,
                 Optional.of("https://example.invalid/old-world.git"),
                 Optional.of(Path.of("old-zip-destination")),
-                customPolicy);
+                new StoragePolicy(16_000, 2, 3, 4));
         WorldId replacementId = WorldId.create();
 
         WorldReconciliation reconciliation = WorldConfigReconciler.reconcile(
-                List.of(existing),
-                List.of(DiscoveredWorld.success(path, replacementId)));
+                List.of(stored),
+                List.of(new DiscoveredWorld(path, replacementId)));
 
-        assertEquals(1, reconciliation.errors().size());
-        WorldConfig replacement = reconciliation.worlds().getFirst();
-        assertEquals(replacementId, replacement.worldId());
-        assertTrue(replacement.enabled());
-        assertEquals(Optional.empty(), replacement.remoteUrl());
-        assertEquals(Optional.empty(), replacement.zipDestination());
-        assertEquals(StoragePolicy.defaults(), replacement.storagePolicy());
+        assertEquals(List.of(WorldConfig.defaults(replacementId, path)), reconciliation.worlds());
+        assertEquals(List.of(new WorldNotice.IdentityReplaced(path)), reconciliation.notices());
     }
 
     @Test
-    void discoveryFailuresAreRedactedBeforeReconciliation() {
-        DiscoveredWorld failure = DiscoveredWorld.failure(
-                Path.of("failed-save"),
-                "Could not read https://user:password@example.com/world.json");
-
-        WorldReconciliation reconciliation = WorldConfigReconciler.reconcile(
-                List.of(),
-                List.of(failure));
+    void aCopiedFolderNeverTakesTheOriginalsSettings() {
+        WorldId worldId = WorldId.create();
+        Path original = SAVES.resolve("World");
+        Path copy = SAVES.resolve("A copy of World");
+        WorldConfig stored = WorldConfig.defaults(worldId, original)
+                .withRemoteUrl(Optional.of("https://example.invalid/w.git"));
+        List<DiscoveredWorld> found = List.of(new DiscoveredWorld(copy, worldId), new DiscoveredWorld(original, worldId));
 
         assertEquals(
-                "Could not read https://" + SensitiveDataRedactor.REDACTED + "@example.com/world.json",
-                reconciliation.errors().getFirst());
+                List.of(new WorldConfigReconciler.Copy(copy, worldId, original)),
+                WorldConfigReconciler.copies(List.of(stored), found));
+        WorldReconciliation reconciliation = WorldConfigReconciler.reconcile(List.of(stored), found);
+        assertEquals(List.of(stored), reconciliation.worlds());
+
+        WorldReconciliation unknownOriginal = WorldConfigReconciler.reconcile(List.of(), found);
+        assertTrue(WorldConfigReconciler.copies(List.of(), found).isEmpty());
+        assertTrue(unknownOriginal.worlds().isEmpty());
+        assertEquals(List.of(new WorldNotice.SharedIdentity(List.of(copy, original))), unknownOriginal.notices());
     }
 }

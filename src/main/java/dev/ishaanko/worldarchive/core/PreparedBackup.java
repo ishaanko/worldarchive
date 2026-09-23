@@ -1,128 +1,70 @@
 package dev.ishaanko.worldarchive.core;
 
-import dev.ishaanko.worldarchive.model.BackupId;
+import dev.ishaanko.worldarchive.model.OperationId;
 import java.io.IOException;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
 
-/** Owned synchronous capture awaiting transfer to the destination queue. */
+/**
+ * A world capture made by {@link SerializedBackupCoordinator#prepareCapture}. The caller hands it
+ * to {@link SerializedBackupCoordinator#createPreparedBackup}, which takes it over, or closes it,
+ * which deletes the capture. Until then the world counts as busy.
+ */
 public final class PreparedBackup implements AutoCloseable {
-    private final CreateBackupRequest request;
+    private final SerializedBackupCoordinator owner;
 
-    private final BackupId backupId;
+    private final CreateBackupRequest request;
 
     private final OperationId operationId;
 
-    private final boolean previousInventoryPresent;
+    private final AtomicReference<CapturedBackup> capture;
 
-    private final AtomicReference<Resources> ownership;
-
-    private final AtomicReference<Runnable> releaseObserver;
+    private final Runnable onClose;
 
     PreparedBackup(
+            SerializedBackupCoordinator owner,
             CreateBackupRequest request,
-            CapturedBackup capturedBackup,
-            boolean previousInventoryPresent,
             OperationId operationId,
-            Runnable releaseObserver) {
+            CapturedBackup capture,
+            Runnable onClose) {
+        this.owner = Objects.requireNonNull(owner, "owner");
         this.request = Objects.requireNonNull(request, "request");
-        CapturedBackup captured = Objects.requireNonNull(capturedBackup, "capturedBackup");
-        this.backupId = captured.capture().manifest().backupId();
         this.operationId = Objects.requireNonNull(operationId, "operationId");
-        this.previousInventoryPresent = previousInventoryPresent;
-        this.ownership = new AtomicReference<>(new Resources(captured));
-        this.releaseObserver = new AtomicReference<>(Objects.requireNonNull(
-                releaseObserver,
-                "releaseObserver"));
+        this.capture = new AtomicReference<>(Objects.requireNonNull(capture, "capture"));
+        this.onClose = Objects.requireNonNull(onClose, "onClose");
     }
 
     public CreateBackupRequest request() {
         return request;
     }
 
-    public BackupId backupId() {
-        return backupId;
-    }
-
-    boolean previousInventoryPresent() {
-        return previousInventoryPresent;
+    SerializedBackupCoordinator owner() {
+        return owner;
     }
 
     OperationId operationId() {
         return operationId;
     }
 
-    /** Adds an observer that runs once when this capture is claimed or closed. */
-    public void addReleaseObserver(Runnable observer) {
-        Runnable additional = Objects.requireNonNull(observer, "observer");
-        while (true) {
-            Runnable current = releaseObserver.get();
-            if (current == null) {
-                safeNotify(additional);
-                return;
-            }
-            Runnable chained = () -> {
-                try {
-                    current.run();
-                } finally {
-                    additional.run();
-                }
-            };
-            if (releaseObserver.compareAndSet(current, chained)) {
-                return;
-            }
+    /** Takes the capture over; the new owner also ends the world's busy state. */
+    CapturedBackup claim() {
+        CapturedBackup claimed = capture.getAndSet(null);
+        if (claimed == null) {
+            throw new IllegalStateException("The prepared capture was already used or closed");
         }
+        return claimed;
     }
 
-    Resources claim() {
-        Resources resources = ownership.getAndSet(null);
-        if (resources == null) {
-            throw new IllegalStateException("Prepared backup ownership was already transferred or closed");
-        }
-        try {
-            notifyReleased();
-        } catch (Error failure) {
-            try {
-                resources.close();
-            } catch (IOException closeFailure) {
-                failure.addSuppressed(closeFailure);
-            }
-            throw failure;
-        }
-        return resources;
-    }
-
+    /** Deletes the capture unless it was handed on; closing again does nothing. */
     @Override
     public void close() throws IOException {
-        Resources resources = ownership.getAndSet(null);
-        if (resources != null) {
+        CapturedBackup unclaimed = capture.getAndSet(null);
+        if (unclaimed != null) {
             try {
-                resources.close();
+                unclaimed.close();
             } finally {
-                notifyReleased();
+                onClose.run();
             }
-        }
-    }
-
-    private void notifyReleased() {
-        Runnable observer = releaseObserver.getAndSet(null);
-        if (observer != null) {
-            safeNotify(observer);
-        }
-    }
-
-    private static void safeNotify(Runnable observer) {
-        Observers.safely(observer);
-    }
-
-    record Resources(CapturedBackup capturedBackup) implements AutoCloseable {
-        Resources {
-            Objects.requireNonNull(capturedBackup, "capturedBackup");
-        }
-
-        @Override
-        public void close() throws IOException {
-            capturedBackup.close();
         }
     }
 }
