@@ -1,33 +1,30 @@
 package dev.ishaanko.worldarchive.ui;
 
-import dev.ishaanko.worldarchive.core.BackupOperation;
 import dev.ishaanko.worldarchive.core.BackupService;
 import dev.ishaanko.worldarchive.core.DeleteBackupRequest;
-import dev.ishaanko.worldarchive.core.DeletePreparation;
 import dev.ishaanko.worldarchive.model.BackupId;
-import dev.ishaanko.worldarchive.model.BackupRecord;
+import dev.ishaanko.worldarchive.model.BackupOperation;
 import dev.ishaanko.worldarchive.model.BackupResult;
 import dev.ishaanko.worldarchive.ui.model.ActionDisabledReason;
 import dev.ishaanko.worldarchive.ui.model.BackupAction;
-import dev.ishaanko.worldarchive.ui.model.BackupActionAvailability;
 import dev.ishaanko.worldarchive.ui.model.BackupActionPolicy;
 import dev.ishaanko.worldarchive.ui.model.BackupBrowserCapabilities;
-import dev.ishaanko.worldarchive.ui.model.BackupBrowserPage;
-import dev.ishaanko.worldarchive.ui.model.BackupBrowserQuery;
+import dev.ishaanko.worldarchive.ui.model.BackupFilter;
 import dev.ishaanko.worldarchive.ui.model.BackupRow;
+import dev.ishaanko.worldarchive.ui.model.BackupSelection;
 import dev.ishaanko.worldarchive.ui.model.BackupSort;
-import dev.ishaanko.worldarchive.ui.model.ConfirmationKind;
-import dev.ishaanko.worldarchive.ui.model.ConfirmationState;
+import dev.ishaanko.worldarchive.ui.model.BackupWorldContext;
+import dev.ishaanko.worldarchive.ui.model.DeletePrompt;
+import dev.ishaanko.worldarchive.ui.model.Paging;
 import dev.ishaanko.worldarchive.ui.model.ScreenGeometry;
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.EditBox;
@@ -35,22 +32,29 @@ import net.minecraft.client.gui.components.StringWidget;
 import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.input.InputWithModifiers;
+import net.minecraft.network.chat.CommonComponents;
 import net.minecraft.network.chat.Component;
 
 /**
- * Native backup browser scoped to one persistent world identity.
+ * The backups of one world, with a filter, a sort order and pages, and the actions that act on
+ * the selected backups.
  *
- * <p>Rows support multi-selection: a plain click selects one row, Ctrl or Cmd click toggles a
- * row, Shift click extends from the last clicked row, and "Select all" covers every row that
- * matches the filter. The selection survives paging and filtering so a large cleanup can be
- * assembled across pages; only Delete accepts more than one row.</p>
+ * <p>A plain click selects one row, Ctrl or Cmd click toggles a row, and Shift click extends the
+ * selection from the last clicked row on the page. The selection survives paging and filtering,
+ * so a delete of many backups can be put together across pages. Select all replaces the selection
+ * with every backup that matches the filter, and Clear empties it. Only Delete accepts more than
+ * one backup.</p>
  */
 public final class BackupBrowserScreen extends Screen {
     private static final int ROW_HEIGHT = 38;
 
     private static final int ROW_GAP = 2;
 
-    private static final int ACTION_GAP = 3;
+    private static final int FILTER_Y = 41;
+
+    private static final int ROWS_TOP = 64;
+
+    private static final int MAXIMUM_PAGE_SIZE = 100;
 
     private static final int CONTENT_MIN = 180;
 
@@ -60,11 +64,6 @@ public final class BackupBrowserScreen extends Screen {
 
     private static final int CAPABILITY_POLL_INTERVAL_TICKS = 20;
 
-    /** Covers both sequential five-minute Git tool probes plus scheduling headroom. */
-    private static final int MAXIMUM_CAPABILITY_POLLS = 660;
-
-    private static final int CONFIRMATION_PREVIEW_ROWS = 5;
-
     private final Screen parent;
 
     private final BackupWorldContext world;
@@ -73,10 +72,26 @@ public final class BackupBrowserScreen extends Screen {
 
     private final BackupService service;
 
-    private List<BackupRecord> records = List.of();
+    /** Loads of the backup list; a newer one drops the answer of an older one. */
+    private final ScreenCalls calls = new ScreenCalls(this);
+
+    private final ScreenCalls folders = new ScreenCalls(this);
+
+    private final ScreenCalls polls = new ScreenCalls(this);
+
+    private final BackupSelection selection = new BackupSelection();
+
+    /** Every backup of the world, from the newest catalog load. */
+    private List<BackupRow> rows = List.of();
+
+    /** The rows that match the filter, in sort order; rebuilt only when rows, filter or sort change. */
+    private List<BackupRow> matching = List.of();
+
+    /** The backups on the current page, in page order, for Shift click ranges. */
+    private List<BackupId> page = List.of();
 
     private BackupBrowserCapabilities capabilities = new BackupBrowserCapabilities(
-            false, true, false, false, false, Optional.empty());
+            false, true, Optional.empty(), false, false, Optional.empty());
 
     private BackupSort sort = BackupSort.NEWEST;
 
@@ -84,689 +99,394 @@ public final class BackupBrowserScreen extends Screen {
 
     private int pageIndex;
 
-    private final Set<BackupId> selectedBackupIds = new LinkedHashSet<>();
-
-    /** Last row clicked without Shift; Shift click selects from here to the clicked row. */
-    private BackupId selectionAnchor;
-
-    private List<BackupRow> visibleRows = List.of();
-
     private Component status = Component.literal("Loading backups…").withStyle(ChatFormatting.GRAY);
 
     private boolean loading = true;
 
-    private boolean busy;
+    private int pollTicks;
 
-    private boolean active;
+    private boolean pollPending;
 
-    private long lifecycle;
-
-    private long requestRevision;
-
-    private int capabilityPollTicks;
-
-    private int capabilityPollsRemaining;
-
-    private boolean capabilityRefreshPending;
-
-    private EditBox filterWidget;
+    private EditBox filterBox;
 
     public BackupBrowserScreen(Screen parent, BackupWorldContext world, BackupClientFacade facade) {
         super(Component.literal("Backups"));
         this.parent = Objects.requireNonNull(parent, "parent");
         this.world = Objects.requireNonNull(world, "world");
         this.facade = Objects.requireNonNull(facade, "facade");
-        service = Objects.requireNonNull(facade.backupService(), "backupService");
+        service = facade.backupService();
     }
 
     @Override
     public void added() {
         super.added();
-        active = true;
-        lifecycle++;
-        capabilityPollTicks = CAPABILITY_POLL_INTERVAL_TICKS;
-        capabilityPollsRemaining = MAXIMUM_CAPABILITY_POLLS;
-        capabilityRefreshPending = false;
-        reloadData();
+        pollTicks = CAPABILITY_POLL_INTERVAL_TICKS;
+        pollPending = false;
+        reload();
     }
 
-    @Override
-    public void removed() {
-        active = false;
-        lifecycle++;
-        requestRevision++;
-        super.removed();
-    }
-
+    /**
+     * Asks the runtime every second whether an operation runs or a warning applies. When a backup
+     * of this world finishes meanwhile, for example at world exit, the list loads again.
+     */
     @Override
     public void tick() {
         super.tick();
-        if (!active
-                || capabilityRefreshPending
-                || capabilityPollsRemaining <= 0
-                || --capabilityPollTicks > 0) {
+        if (pollPending || --pollTicks > 0) {
             return;
         }
-        capabilityPollTicks = CAPABILITY_POLL_INTERVAL_TICKS;
-        capabilityPollsRemaining--;
-        refreshCapabilities();
+        pollTicks = CAPABILITY_POLL_INTERVAL_TICKS;
+        pollPending = true;
+        polls.start(
+                () -> facade.browserCapabilities(world),
+                this::capabilitiesPolled,
+                ignored -> pollPending = false);
     }
 
-    private void refreshCapabilities() {
-        long token = lifecycle;
-        capabilityRefreshPending = true;
-        CompletionStage<BackupBrowserCapabilities> refresh;
-        try {
-            refresh = Objects.requireNonNull(
-                    facade.browserCapabilities(world),
-                    "browserCapabilities result");
-        } catch (RuntimeException exception) {
-            capabilityRefreshPending = false;
+    private void capabilitiesPolled(BackupBrowserCapabilities updated) {
+        pollPending = false;
+        if (updated.equals(capabilities)) {
             return;
         }
-        refresh.whenComplete((updated, throwable) -> minecraft.execute(() -> {
-            if (!active || lifecycle != token) {
-                return;
-            }
-            capabilityRefreshPending = false;
-            if (throwable == null && updated != null && !updated.equals(capabilities)) {
-                capabilities = updated;
-                rebuildIfInitialized();
-            }
-        }));
+        boolean backupFinished = capabilities.operationInProgress() && !updated.operationInProgress();
+        capabilities = updated;
+        if (backupFinished) {
+            reload();
+        } else {
+            refresh();
+        }
     }
 
     @Override
     protected void init() {
-        filterWidget = null;
         int contentWidth = ScreenGeometry.contentWidth(width, CONTENT_MIN, CONTENT_MAX, CONTENT_MARGIN);
-        int contentX = ScreenGeometry.centerX(width, contentWidth);
-        addRenderableOnly(Widgets.title(font, contentX, 5, contentWidth, 18, title));
-        addRenderableOnly(Widgets.muted(font, contentX, 22, contentWidth, 16, world.displayName()));
-
-        int paginationY = Math.max(
-                88,
-                height - (capabilities.warning().isPresent() ? 100 : 84));
-        int rowTop = 64;
-        int rowCapacity = Math.clamp(
-                (paginationY - rowTop) / (ROW_HEIGHT + ROW_GAP), 1, BackupBrowserQuery.MAXIMUM_PAGE_SIZE);
-        BackupBrowserPage page = page(rowCapacity);
-        pageIndex = page.pageIndex();
-        visibleRows = page.rows();
-        addFilterAndSort(page, contentX, contentWidth);
-        addRows(page, contentX, contentWidth, rowTop);
-        addPagination(page, contentX, contentWidth, paginationY);
-        addWarning(contentX, contentWidth);
-        addStatus(contentX, contentWidth);
-        addActions(contentX, contentWidth);
+        int x = ScreenGeometry.centerX(width, contentWidth);
+        addRenderableOnly(Widgets.title(font, x, 5, contentWidth, 18, title));
+        addRenderableOnly(Widgets.muted(font, x, 22, contentWidth, 16, world.displayName()));
+        Layout layout = Layout.of(height, capabilities.warning().isPresent());
+        int pageSize = Math.clamp((layout.paginationY() - ROWS_TOP) / (ROW_HEIGHT + ROW_GAP), 1, MAXIMUM_PAGE_SIZE);
+        Paging paging = Paging.of(matching.size(), pageSize, pageIndex);
+        pageIndex = paging.pageIndex();
+        List<BackupRow> pageRows = paging.slice(matching);
+        page = ids(pageRows);
+        addFilterBar(x, contentWidth);
+        addRows(pageRows, x, contentWidth);
+        addPagination(paging, x, contentWidth, layout.paginationY());
+        capabilities.warning().ifPresent(warning -> addLine(
+                Component.literal(warning).withStyle(ChatFormatting.YELLOW), x, contentWidth, layout.warningY()));
+        addLine(status, x, contentWidth, layout.statusY());
+        addActions(x, contentWidth, layout);
     }
 
-    private void addFilterAndSort(BackupBrowserPage page, int x, int contentWidth) {
+    private void addFilterBar(int x, int contentWidth) {
         int sortWidth = Math.min(120, Math.max(72, contentWidth / 4));
         int selectWidth = Math.min(90, Math.max(60, contentWidth / 5));
         int filterWidth = contentWidth - sortWidth - selectWidth - 8;
-        EditBox filterBox = new EditBox(
-                font,
-                x,
-                41,
-                filterWidth,
-                20,
-                Component.literal("Filter backups"));
+        filterBox = new EditBox(font, x, FILTER_Y, filterWidth, 20, Component.literal("Filter backups"));
         filterBox.setMaxLength(128);
         filterBox.setValue(filter);
         filterBox.setHint(Component.literal("Filter backups"));
-        filterBox.setResponder(value -> {
-            if (value.equals(filter)) {
-                return;
-            }
-            filter = value;
-            pageIndex = 0;
-            rebuildWidgets();
-            if (filterWidget != null) {
-                setInitialFocus(filterWidget);
-                filterWidget.moveCursorToEnd(false);
-            }
-        });
-        filterBox.active = !busy;
-        filterWidget = filterBox;
+        filterBox.setResponder(this::filterChanged);
         addRenderableWidget(filterBox);
 
-        Button sortButton = Button.builder(
-                        Component.literal("Sort: " + sortLabel(sort)),
-                        ignored -> {
-                            BackupSort[] values = BackupSort.values();
-                            sort = values[(sort.ordinal() + 1) % values.length];
-                            pageIndex = 0;
-                            rebuildWidgets();
-                        })
-                .bounds(x + filterWidth + 4, 41, sortWidth, 20)
+        Button sortButton = Button.builder(Component.literal("Sort: " + sortLabel(sort)), ignored -> nextSort())
+                .bounds(x + filterWidth + 4, FILTER_Y, sortWidth, 20)
                 .build();
-        sortButton.active = !busy;
         addRenderableWidget(sortButton);
 
-        boolean allMatchingSelected = !page.matchingBackupIds().isEmpty()
-                && selectedBackupIds.containsAll(page.matchingBackupIds());
+        List<BackupId> matchingIds = ids(matching);
         Button selectButton = Button.builder(
-                        Component.literal(allMatchingSelected ? "Clear" : "Select all"),
+                        Component.literal(selection.coversAll(matchingIds) ? "Clear" : "Select all"),
                         ignored -> {
-                            selectedBackupIds.clear();
-                            if (!allMatchingSelected) {
-                                selectedBackupIds.addAll(page.matchingBackupIds());
-                            }
-                            rebuildWidgets();
+                            selection.selectAllOrClear(matchingIds);
+                            refresh();
                         })
-                .bounds(x + filterWidth + sortWidth + 8, 41, selectWidth, 20)
+                .bounds(x + filterWidth + sortWidth + 8, FILTER_Y, selectWidth, 20)
                 .build();
-        selectButton.active = !busy && !page.matchingBackupIds().isEmpty();
+        selectButton.active = !matchingIds.isEmpty();
         selectButton.setTooltip(Tooltip.create(Component.literal(
                 "Selects every backup that matches the filter, on every page")));
         addRenderableWidget(selectButton);
     }
 
-    private BackupBrowserPage page(int pageSize) {
-        BackupBrowserQuery query = new BackupBrowserQuery(filter, sort, pageIndex, pageSize);
-        return BackupBrowserPage.create(records, query, selectedBackupIds);
+    private void filterChanged(String value) {
+        if (!value.equals(filter)) {
+            filter = value;
+            pageIndex = 0;
+            rematch();
+            refresh();
+        }
     }
 
-    private void addRows(
-            BackupBrowserPage page,
-            int x,
-            int contentWidth,
-            int rowTop) {
-        int y = rowTop;
-        for (BackupRow row : page.rows()) {
-            BackupRowButton button = new BackupRowButton(
-                    x,
-                    y,
-                    contentWidth,
-                    ROW_HEIGHT,
-                    row,
-                    font,
-                    this::selectRow);
-            button.setSelected(selectedBackupIds.contains(row.backupId()));
-            button.active = !busy;
+    private void nextSort() {
+        BackupSort[] values = BackupSort.values();
+        sort = values[(sort.ordinal() + 1) % values.length];
+        pageIndex = 0;
+        rematch();
+        refresh();
+    }
+
+    private void addRows(List<BackupRow> pageRows, int x, int contentWidth) {
+        int y = ROWS_TOP;
+        for (BackupRow row : pageRows) {
+            BackupRowButton button = new BackupRowButton(x, y, contentWidth, ROW_HEIGHT, row, font, this::rowClicked);
+            button.setSelected(selection.contains(row.backupId()));
             addRenderableWidget(button);
             y += ROW_HEIGHT + ROW_GAP;
         }
-        if (!loading && page.rows().isEmpty()) {
-            addRenderableOnly(new StringWidget(
-                    x,
-                    rowTop + 10,
-                    contentWidth,
-                    20,
-                    Component.literal(filter.isBlank()
-                            ? "No backups yet"
-                            : "No backups match the filter").withStyle(ChatFormatting.GRAY),
-                    font));
+        if (!loading && pageRows.isEmpty()) {
+            Component empty = Component.literal(filter.isBlank() ? "No backups yet" : "No backups match the filter")
+                    .withStyle(ChatFormatting.GRAY);
+            addRenderableOnly(new StringWidget(x, ROWS_TOP + 10, contentWidth, 20, empty, font));
         }
     }
 
-    private void selectRow(BackupRow row, InputWithModifiers input) {
-        BackupId clicked = row.backupId();
-        if (input.hasShiftDown() && selectionAnchor != null) {
-            selectedBackupIds.addAll(rangeOnPage(selectionAnchor, clicked));
+    private void rowClicked(BackupRow row, InputWithModifiers input) {
+        BackupSelection.Click click;
+        if (input.hasShiftDown()) {
+            click = BackupSelection.Click.EXTEND;
         } else if (input.hasControlDownWithQuirk()) {
-            if (!selectedBackupIds.remove(clicked)) {
-                selectedBackupIds.add(clicked);
-            }
-            selectionAnchor = clicked;
+            click = BackupSelection.Click.TOGGLE;
         } else {
-            selectedBackupIds.clear();
-            selectedBackupIds.add(clicked);
-            selectionAnchor = clicked;
+            click = BackupSelection.Click.SELECT;
         }
-        rebuildWidgets();
+        selection.click(row.backupId(), click, page);
+        refresh();
     }
 
-    /** Rows between two ids in page order; just the clicked row when the anchor scrolled away. */
-    private List<BackupId> rangeOnPage(BackupId anchor, BackupId clicked) {
-        List<BackupId> order = visibleRows.stream().map(BackupRow::backupId).toList();
-        int from = order.indexOf(anchor);
-        int to = order.indexOf(clicked);
-        if (from < 0 || to < 0) {
-            return List.of(clicked);
-        }
-        return order.subList(Math.min(from, to), Math.max(from, to) + 1);
-    }
-
-    private void addPagination(
-            BackupBrowserPage page,
-            int x,
-            int contentWidth,
-            int y) {
+    private void addPagination(Paging paging, int x, int contentWidth, int y) {
         int buttonWidth = Math.min(72, Math.max(48, contentWidth / 5));
-        Button previous = Button.builder(Component.literal("Previous"), ignored -> {
-                    pageIndex = Math.max(0, page.pageIndex() - 1);
-                    rebuildWidgets();
-                })
-                .bounds(x, y, buttonWidth, 18)
-                .build();
-        previous.active = !busy && page.pageIndex() > 0;
-        addRenderableWidget(previous);
-        Button next = Button.builder(Component.literal("Next"), ignored -> {
-                    pageIndex = Math.min(page.pageCount() - 1, page.pageIndex() + 1);
-                    rebuildWidgets();
-                })
-                .bounds(x + contentWidth - buttonWidth, y, buttonWidth, 18)
-                .build();
-        next.active = !busy && page.pageIndex() + 1 < page.pageCount();
-        addRenderableWidget(next);
-        String selection = selectedBackupIds.isEmpty()
-                ? ""
-                : " · " + selectedBackupIds.size() + " selected";
+        List<Button> pager = Widgets.pageButtons(paging, index -> {
+            pageIndex = index;
+            refresh();
+        });
+        pager.getFirst().setRectangle(buttonWidth, 18, x, y);
+        pager.getLast().setRectangle(buttonWidth, 18, x + contentWidth - buttonWidth, y);
+        pager.forEach(this::addRenderableWidget);
+        String selected = selection.size() == 0 ? "" : " · " + selection.size() + " selected";
         addRenderableOnly(new StringWidget(
                 x + buttonWidth + 4,
                 y,
                 contentWidth - buttonWidth * 2 - 8,
                 18,
-                Component.literal("Page " + (page.pageIndex() + 1)
-                        + " of " + page.pageCount()
-                        + " · " + page.totalRows() + " backups"
-                        + selection),
+                Component.literal("Page " + (paging.pageIndex() + 1)
+                        + " of " + paging.pageCount()
+                        + " · " + matching.size() + " backups"
+                        + selected),
                 font));
     }
 
-    private void addStatus(int x, int contentWidth) {
-        StringWidget widget = new StringWidget(
-                x,
-                ScreenGeometry.anchorBottom(108, height, 64),
-                contentWidth,
-                14,
-                status,
-                font);
-        widget.setTooltip(Tooltip.create(status));
-        addRenderableOnly(widget);
+    private void addLine(Component text, int x, int contentWidth, int y) {
+        StringWidget line = new StringWidget(x, y, contentWidth, 14, text, font);
+        line.setTooltip(Tooltip.create(text));
+        addRenderableOnly(line);
     }
 
-    private void addWarning(int x, int contentWidth) {
-        capabilities.warning().ifPresent(message -> {
-            Component warning = Component.literal(message).withStyle(ChatFormatting.YELLOW);
-            StringWidget widget = new StringWidget(
-                    x,
-                    ScreenGeometry.anchorBottom(94, height, 80),
-                    contentWidth,
-                    14,
-                    warning,
-                    font);
-            widget.setTooltip(Tooltip.create(warning));
-            addRenderableOnly(widget);
-        });
-    }
-
-    private void addActions(int x, int contentWidth) {
-        List<BackupRow> selection = selectedRows();
-        BackupBrowserCapabilities effectiveCapabilities = new BackupBrowserCapabilities(
-                busy || loading,
-                capabilities.sourceAvailable(),
-                capabilities.createDestinationConfigured(),
-                capabilities.gitRemoteConfigured(),
-                capabilities.managedFolderAvailable(),
-                capabilities.warning());
-        Map<BackupAction, BackupActionAvailability> availability = BackupActionPolicy.evaluate(
-                effectiveCapabilities,
-                selection);
-
-        addActionRow(
-                List.of(
+    private void addActions(int x, int contentWidth, Layout layout) {
+        List<BackupRow> selected = selection.rows(rows);
+        Map<BackupAction, ActionDisabledReason> reasons = BackupActionPolicy.evaluate(
+                loading ? capabilities.withOperationInProgress() : capabilities,
+                selected);
+        List<Button> primary = Stream.of(
                         BackupAction.CREATE,
                         BackupAction.RESTORE,
                         BackupAction.DELETE,
                         BackupAction.SYNC,
-                        BackupAction.VERIFY),
-                availability,
-                selection.size(),
-                x,
-                contentWidth,
-                ScreenGeometry.anchorBottom(128, height, 48));
-        int y = ScreenGeometry.anchorBottom(150, height, 24);
-        List<BackupAction> secondaryActions = List.of(
-                BackupAction.OPEN_FOLDER,
-                BackupAction.STORAGE,
-                BackupAction.SETTINGS);
-        int buttonWidth = actionButtonWidth(contentWidth, secondaryActions.size() + 1);
-        int currentX = x;
-        for (BackupAction action : secondaryActions) {
-            addActionButton(action, availability.get(action), 0, currentX, y, buttonWidth);
-            currentX += buttonWidth + ACTION_GAP;
-        }
-        addRenderableWidget(Button.builder(Component.literal("Done"), ignored -> onClose())
-                .bounds(currentX, y, buttonWidth, 20)
-                .build());
-    }
-
-    private void addActionRow(
-            List<BackupAction> actions,
-            Map<BackupAction, BackupActionAvailability> availability,
-            int selectionCount,
-            int x,
-            int contentWidth,
-            int y) {
-        int buttonWidth = actionButtonWidth(contentWidth, actions.size());
-        int currentX = x;
-        for (BackupAction action : actions) {
-            addActionButton(action, availability.get(action), selectionCount, currentX, y, buttonWidth);
-            currentX += buttonWidth + ACTION_GAP;
-        }
-    }
-
-    private void addActionButton(
-            BackupAction action,
-            BackupActionAvailability availability,
-            int selectionCount,
-            int x,
-            int y,
-            int width) {
-        String label = action == BackupAction.DELETE && selectionCount > 1
-                ? "Delete (" + selectionCount + ")"
-                : actionLabel(action);
-        Button button = Button.builder(Component.literal(label), ignored -> runAction(action))
-                .bounds(x, y, width, 20)
-                .build();
-        button.active = availability.enabled();
-        if (!availability.enabled()) {
-            button.setTooltip(Tooltip.create(Component.literal(disabledReason(availability.reason()))));
-        }
-        addRenderableWidget(button);
-    }
-
-    private int actionButtonWidth(int contentWidth, int buttonCount) {
-        return Math.max(32, (contentWidth - ACTION_GAP * (buttonCount - 1)) / buttonCount);
-    }
-
-    private void runAction(BackupAction action) {
-        List<BackupRow> selection = selectedRows();
-        Optional<BackupRow> single = selection.size() == 1
-                ? Optional.of(selection.getFirst())
-                : Optional.empty();
-        switch (action) {
-            case CREATE -> promptManualBackup();
-            case RESTORE -> single.ifPresent(row -> minecraft.setScreenAndShow(
-                    new BackupRestoreScreen(this, parent, world, row, facade)));
-            case DELETE -> {
-                if (selection.size() > 1) {
-                    prepareDeleteMany(selection);
-                } else {
-                    single.ifPresent(this::prepareDelete);
-                }
-            }
-            case SYNC -> single.ifPresent(row -> openResultOperation(
-                    BackupOperation.SYNC,
-                    "Syncing backup",
-                    listener -> service.syncBackup(row.backupId(), listener)));
-            case VERIFY -> single.ifPresent(row -> openResultOperation(
-                    BackupOperation.VERIFY,
-                    "Checking backup integrity",
-                    listener -> service.verifyBackup(row.backupId(), listener)));
-            case OPEN_FOLDER -> openFolder();
-            case STORAGE -> minecraft.setScreenAndShow(
-                    new StorageScreen(this, world, facade));
-            case SETTINGS -> openSettings();
-            default -> throw new IllegalStateException("Unknown backup action: " + action);
-        }
-    }
-
-    /** Every selected row, including rows on other pages, in catalog order. */
-    private List<BackupRow> selectedRows() {
-        if (selectedBackupIds.isEmpty()) {
-            return List.of();
-        }
-        return records.stream()
-                .filter(record -> selectedBackupIds.contains(record.manifest().backupId()))
-                .map(BackupRow::from)
+                        BackupAction.VERIFY)
+                .map(action -> actionButton(action, reasons.get(action), selected.size()))
                 .toList();
+        List<Button> secondary = new ArrayList<>(Stream.of(
+                        BackupAction.OPEN_FOLDER,
+                        BackupAction.STORAGE,
+                        BackupAction.SETTINGS)
+                .map(action -> actionButton(action, reasons.get(action), selected.size()))
+                .toList());
+        secondary.add(Button.builder(Component.literal("Done"), ignored -> onClose()).build());
+        Widgets.row(x, layout.primaryActionsY(), contentWidth, primary);
+        Widgets.row(x, layout.secondaryActionsY(), contentWidth, secondary);
+        primary.forEach(this::addRenderableWidget);
+        secondary.forEach(this::addRenderableWidget);
     }
 
-    private void promptManualBackup() {
-        minecraft.setScreenAndShow(new BackupCreateScreen(this, label -> openResultOperation(
-                "Creating backup",
-                listener -> facade.createManualBackup(world, label, listener))));
-    }
-
-    private void prepareDelete(BackupRow row) {
-        if (busy) {
-            return;
+    private Button actionButton(BackupAction action, ActionDisabledReason reason, int selectedCount) {
+        String label = action == BackupAction.DELETE && selectedCount > 1
+                ? "Delete (" + selectedCount + ")"
+                : actionLabel(action);
+        Button button = Button.builder(Component.literal(label), ignored -> runAction(action)).build();
+        button.active = reason == ActionDisabledReason.NONE;
+        if (!button.active) {
+            button.setTooltip(Tooltip.create(disabledReason(reason)));
         }
-        busy = true;
-        status = Component.literal("Preparing deletion…").withStyle(ChatFormatting.GRAY);
-        rebuildWidgets();
-        long token = lifecycle;
-        long revision = ++requestRevision;
-        CompletionStage<DeletePreparation> preparation;
-        try {
-            preparation = Objects.requireNonNull(
-                    service.prepareDelete(row.backupId()),
-                    "prepareDelete result");
-        } catch (RuntimeException exception) {
-            finishInlineFailure(token, revision, exception);
-            return;
-        }
-        preparation.whenComplete((result, throwable) -> minecraft.execute(() -> {
-            if (!accepts(token, revision)) {
-                return;
-            }
-            if (throwable != null || result == null) {
-                finishInlineFailureOnClient(token, revision, throwable == null
-                        ? new IllegalStateException("Delete preparation returned no result")
-                        : throwable);
-                return;
-            }
-            busy = false;
-            ConfirmationState confirmation = new ConfirmationState(
-                    ConfirmationKind.DELETE,
-                    result.backupId(),
-                    "Delete backup?",
-                    result.description(),
-                    Optional.empty(),
-                    true);
-            minecraft.setScreenAndShow(new BackupConfirmationScreen(this, confirmation, () -> {
-                DeleteBackupRequest request = new DeleteBackupRequest(
-                        result.backupId(),
-                        result.confirmationToken());
-                openResultOperation(
-                        BackupOperation.DELETE,
-                        "Deleting backup",
-                        listener -> service.deleteBackup(request, listener));
-            }));
-        }));
+        return button;
     }
 
     /**
-     * Issues one confirmation per selected backup, then asks once. Every token must be
-     * issued before the prompt appears, so a backup that cannot be prepared cancels the
-     * whole batch with nothing deleted.
+     * Runs a button's action; the policy has already checked the selection it needs. The selected
+     * backups keep the browser's sort order, so a delete prompt lists them as the browser does.
      */
-    private void prepareDeleteMany(List<BackupRow> rows) {
-        if (busy) {
-            return;
-        }
-        busy = true;
-        status = Component.literal("Preparing deletion of " + rows.size() + " backups…")
-                .withStyle(ChatFormatting.GRAY);
-        rebuildWidgets();
-        long token = lifecycle;
-        long revision = ++requestRevision;
-        List<CompletableFuture<DeletePreparation>> preparations = new ArrayList<>();
-        try {
-            for (BackupRow row : rows) {
-                preparations.add(Objects.requireNonNull(
-                                service.prepareDelete(row.backupId()),
-                                "prepareDelete result")
-                        .toCompletableFuture());
-            }
-        } catch (RuntimeException exception) {
-            finishInlineFailure(token, revision, exception);
-            return;
-        }
-        CompletableFuture.allOf(preparations.toArray(CompletableFuture[]::new))
-                .whenComplete((ignored, throwable) -> minecraft.execute(() -> {
-                    if (!accepts(token, revision)) {
-                        return;
-                    }
-                    if (throwable != null) {
-                        finishInlineFailureOnClient(token, revision, throwable);
-                        return;
-                    }
-                    List<DeletePreparation> prepared = preparations.stream()
-                            .map(CompletableFuture::join)
-                            .toList();
-                    if (prepared.stream().anyMatch(Objects::isNull)) {
-                        finishInlineFailureOnClient(token, revision, new IllegalStateException(
-                                "Delete preparation returned no result"));
-                        return;
-                    }
-                    busy = false;
-                    List<DeleteBackupRequest> requests = prepared.stream()
-                            .map(preparation -> new DeleteBackupRequest(
-                                    preparation.backupId(), preparation.confirmationToken()))
-                            .toList();
-                    ConfirmationState confirmation = new ConfirmationState(
-                            ConfirmationKind.DELETE,
-                            requests.getFirst().backupId(),
-                            "Delete " + rows.size() + " backups?",
-                            deletePrompt(rows),
-                            Optional.empty(),
-                            true);
-                    minecraft.setScreenAndShow(new BackupConfirmationScreen(
-                            this,
-                            confirmation,
-                            () -> minecraft.setScreenAndShow(BackupOperationScreen.deleteBatch(
-                                    this,
-                                    "Deleting backups",
-                                    listener -> service.deleteBackups(requests, listener)))));
-                }));
+    private void runAction(BackupAction action) {
+        List<BackupRow> selected = BackupFilter.apply(selection.rows(rows), "", sort);
+        Runnable run = switch (action) {
+            case CREATE -> () -> minecraft.setScreenAndShow(new BackupCreateScreen(this, label -> openOperation(
+                    BackupOperation.CREATE,
+                    "Creating backup",
+                    listener -> facade.createManualBackup(world, label, listener))));
+            case RESTORE -> () -> minecraft.setScreenAndShow(
+                    new BackupRestoreScreen(this, parent, world, selected.getFirst(), facade));
+            case DELETE -> () -> confirmDelete(selected);
+            case SYNC -> () -> openOperation(
+                    BackupOperation.SYNC,
+                    "Syncing backup",
+                    listener -> service.syncBackup(selected.getFirst().backupId(), listener));
+            case VERIFY -> () -> openOperation(
+                    BackupOperation.VERIFY,
+                    "Checking backup integrity",
+                    listener -> service.verifyBackup(selected.getFirst().backupId(), listener));
+            case OPEN_FOLDER -> () -> openFolder(selected);
+            case STORAGE -> () -> minecraft.setScreenAndShow(new StorageScreen(this, world, facade));
+            case SETTINGS -> this::openSettings;
+        };
+        run.run();
     }
 
-    private static String deletePrompt(List<BackupRow> rows) {
-        StringBuilder prompt = new StringBuilder("Delete these backups from every available destination?");
-        int shown = Math.min(rows.size(), CONFIRMATION_PREVIEW_ROWS);
-        for (BackupRow row : rows.subList(0, shown)) {
-            prompt.append('\n').append(BackupRowButton.primaryLine(row));
-        }
-        if (rows.size() > shown) {
-            prompt.append("\n…and ").append(rows.size() - shown).append(" more");
-        }
-        return prompt.toString();
-    }
-
-    private void openResultOperation(
-            String operationTitle,
-            BackupOperationScreen.OperationStarter<BackupResult> starter) {
-        openResultOperation(BackupOperation.CREATE, operationTitle, starter);
-    }
-
-    private void openResultOperation(
+    private void openOperation(
             BackupOperation operation,
-            String operationTitle,
+            String title,
             BackupOperationScreen.OperationStarter<BackupResult> starter) {
-        minecraft.setScreenAndShow(BackupOperationScreen.backupResult(
-                this,
-                operationTitle,
-                operation,
-                starter));
+        minecraft.setScreenAndShow(BackupOperationScreen.backupResult(this, operation, title, starter));
     }
 
-    private void openFolder() {
-        try {
-            List<BackupRow> selection = selectedRows();
-            facade.openManagedFolder(
-                    world,
-                    selection.size() == 1 ? Optional.of(selection.getFirst()) : Optional.empty());
-            status = Component.literal("Opened the backup folder").withStyle(ChatFormatting.GRAY);
-        } catch (RuntimeException exception) {
-            status = failureStatus(exception);
+    /**
+     * Asks once for the selected backups, by name as the browser shows them. The delete request
+     * carries the copies each row shows, so a backup that changed since the list loaded is left
+     * alone. One backup or many, the delete is one call and one result screen.
+     */
+    private void confirmDelete(List<BackupRow> selected) {
+        List<DeleteBackupRequest> requests = selected.stream()
+                .map(row -> new DeleteBackupRequest(world.worldId(), row.backupId(), row.copies()))
+                .toList();
+        DeletePrompt prompt = DeletePrompt.of(selected);
+        Component title = prompt.count() == 1
+                ? Component.translatable("screen.worldarchive.delete.title_one")
+                : Component.translatable("screen.worldarchive.delete.title_many", prompt.count());
+        minecraft.setScreenAndShow(new BackupConfirmationScreen(
+                this,
+                title,
+                deletePromptText(prompt),
+                Component.literal("Delete").withStyle(ChatFormatting.RED),
+                () -> minecraft.setScreenAndShow(BackupOperationScreen.deleteBatch(
+                        this,
+                        prompt.count() == 1 ? "Deleting backup" : "Deleting backups",
+                        listener -> service.deleteBackups(requests, listener),
+                        selected))));
+    }
+
+    /** The delete prompt: what is deleted, by name as the browser shows it, and what goes with it. */
+    private static Component deletePromptText(DeletePrompt prompt) {
+        boolean one = prompt.count() == 1;
+        List<Component> lines = new ArrayList<>();
+        lines.add(one
+                ? Component.translatable("screen.worldarchive.delete.prompt_one")
+                : Component.translatable("screen.worldarchive.delete.prompt_many", prompt.count()));
+        prompt.shown().forEach(row -> lines.add(Component.literal(BackupRowText.promptLine(row))));
+        if (prompt.more() > 0) {
+            lines.add(Component.translatable("screen.worldarchive.delete.more", prompt.more()));
         }
-        rebuildWidgets();
+        if (prompt.onRemote() > 0) {
+            lines.add(one
+                    ? Component.translatable("screen.worldarchive.delete.remote_one")
+                    : Component.translatable("screen.worldarchive.delete.remote_many", prompt.onRemote()));
+        }
+        if (prompt.labeled() > 0 && !one) {
+            lines.add(Component.translatable("screen.worldarchive.delete.labeled", prompt.labeled()));
+        }
+        return CommonComponents.joinLines(lines);
+    }
+
+    /** Opens the folder of the selected backup, or the world's backup folder; the runtime opens it on a worker. */
+    private void openFolder(List<BackupRow> selected) {
+        status = Component.translatable("screen.worldarchive.browser.opening_folder").withStyle(ChatFormatting.GRAY);
+        refresh();
+        folders.dropPending();
+        folders.start(
+                () -> facade.openManagedFolder(
+                        world,
+                        selected.size() == 1 ? Optional.of(selected.getFirst().backupId()) : Optional.empty()),
+                ignored -> {
+                },
+                failure -> {
+                    status = FailureMessages.status(failure);
+                    refresh();
+                });
     }
 
     private void openSettings() {
         try {
             facade.openSettings(this);
         } catch (RuntimeException exception) {
-            status = failureStatus(exception);
-            rebuildWidgets();
+            status = FailureMessages.status(exception);
+            refresh();
         }
     }
 
-    private void reloadData() {
+    private void reload() {
         loading = true;
-        busy = false;
         status = Component.literal("Loading backups…").withStyle(ChatFormatting.GRAY);
-        long token = lifecycle;
-        long revision = ++requestRevision;
-        rebuildIfInitialized();
-        CompletionStage<List<BackupRecord>> backupLoad;
-        CompletionStage<BackupBrowserCapabilities> capabilityLoad;
-        try {
-            backupLoad = Objects.requireNonNull(
-                    service.listBackups(Optional.of(world.worldId())),
-                    "listBackups result");
-            capabilityLoad = Objects.requireNonNull(
-                    facade.browserCapabilities(world),
-                    "browserCapabilities result");
-        } catch (RuntimeException exception) {
-            finishInlineFailure(token, revision, exception);
-            return;
-        }
-        backupLoad.thenCombine(capabilityLoad, BrowserLoad::new)
-                .whenComplete((result, throwable) -> minecraft.execute(() -> {
-                    if (!accepts(token, revision)) {
-                        return;
-                    }
-                    loading = false;
-                    if (throwable != null || result == null) {
-                        status = failureStatus(throwable == null
-                                ? new IllegalStateException("Backup browser returned no result")
-                                : throwable);
-                        rebuildIfInitialized();
-                        return;
-                    }
-                    records = result.records().stream()
-                            .filter(record -> record.manifest().worldId().equals(world.worldId()))
-                            .toList();
-                    capabilities = result.capabilities();
-                    Set<BackupId> known = new LinkedHashSet<>();
-                    for (BackupRecord record : records) {
-                        known.add(record.manifest().backupId());
-                    }
-                    selectedBackupIds.retainAll(known);
-                    if (selectionAnchor != null && !known.contains(selectionAnchor)) {
-                        selectionAnchor = null;
-                    }
-                    status = Component.literal(records.isEmpty()
-                                    ? "No backups yet"
-                                    : records.size() + " backups loaded")
-                            .withStyle(ChatFormatting.GRAY);
-                    rebuildIfInitialized();
-                }));
+        refresh();
+        calls.dropPending();
+        calls.start(this::load, this::loaded, this::showFailure);
     }
 
-    private void finishInlineFailure(long token, long revision, Throwable throwable) {
-        minecraft.execute(() -> finishInlineFailureOnClient(token, revision, throwable));
+    /** Lists the world's backups and builds their rows on the thread that loaded them. */
+    private CompletionStage<BrowserLoad> load() {
+        return service.listBackups(Optional.of(world.worldId()))
+                .thenApply(records -> records.stream().map(BackupRow::from).toList())
+                .thenCombine(facade.browserCapabilities(world), BrowserLoad::new);
     }
 
-    private void finishInlineFailureOnClient(long token, long revision, Throwable throwable) {
-        if (!accepts(token, revision)) {
-            return;
-        }
+    private void loaded(BrowserLoad load) {
         loading = false;
-        busy = false;
-        status = failureStatus(throwable);
-        rebuildIfInitialized();
+        rows = load.rows();
+        capabilities = load.capabilities();
+        selection.retain(rows.stream().map(BackupRow::backupId).collect(Collectors.toSet()));
+        rematch();
+        status = Component.literal(rows.isEmpty() ? "No backups yet" : rows.size() + " backups loaded")
+                .withStyle(ChatFormatting.GRAY);
+        refresh();
     }
 
-    private boolean accepts(long token, long revision) {
-        return active && lifecycle == token && requestRevision == revision;
+    private void showFailure(Throwable failure) {
+        loading = false;
+        status = FailureMessages.status(failure);
+        refresh();
     }
 
-    private void rebuildIfInitialized() {
-        if (width > 0 && height > 0) {
-            rebuildWidgets();
+    private void rematch() {
+        matching = BackupFilter.apply(rows, filter, sort);
+    }
+
+    /** Lays the screen out again; a focused filter box keeps its focus and its cursor. */
+    private void refresh() {
+        if (width == 0 || height == 0) {
+            return;
+        }
+        boolean typing = filterBox != null && filterBox.isFocused();
+        int cursor = typing ? filterBox.getCursorPosition() : 0;
+        rebuildWidgets();
+        if (typing) {
+            setInitialFocus(filterBox);
+            filterBox.setCursorPosition(cursor);
+            filterBox.setHighlightPos(cursor);
         }
     }
 
     @Override
     public void onClose() {
         minecraft.setScreenAndShow(parent);
+    }
+
+    private static List<BackupId> ids(List<BackupRow> rows) {
+        return rows.stream().map(BackupRow::backupId).toList();
     }
 
     private static String sortLabel(BackupSort value) {
@@ -776,7 +496,6 @@ public final class BackupBrowserScreen extends Screen {
             case LABEL -> "Label";
             case SIZE_DESCENDING -> "Largest";
             case CHANGED_FILES_DESCENDING -> "Most changed";
-            default -> throw new IllegalStateException("Unknown backup sort: " + value);
         };
     }
 
@@ -790,35 +509,51 @@ public final class BackupBrowserScreen extends Screen {
             case OPEN_FOLDER -> "Open Folder";
             case STORAGE -> "Storage";
             case SETTINGS -> "Settings";
-            default -> throw new IllegalStateException("Unknown backup action: " + action);
         };
     }
 
-    private static String disabledReason(ActionDisabledReason reason) {
+    private Component disabledReason(ActionDisabledReason reason) {
         return switch (reason) {
-            case OPERATION_IN_PROGRESS -> "Wait for the current operation";
-            case SOURCE_UNAVAILABLE -> "The original world is unavailable";
-            case NO_DESTINATION_CONFIGURED -> "Configure at least one destination";
-            case NO_SELECTION -> "Select a backup";
-            case MULTIPLE_SELECTED -> "Select one backup";
-            case NO_DURABLE_COPY -> "This backup has no available copy";
-            case REMOTE_NOT_CONFIGURED -> "Configure a Git remote first";
-            case FOLDER_UNAVAILABLE -> "No managed backup folder is available";
-            case NONE -> "Available";
-            default -> throw new IllegalStateException("Unknown disabled reason: " + reason);
+            case NONE -> throw new IllegalArgumentException("An available action has no disabled reason");
+            case OPERATION_IN_PROGRESS -> Component.literal("Wait for the current operation");
+            case SOURCE_UNAVAILABLE -> Component.literal("The original world is unavailable");
+            case CREATE_BLOCKED -> createBlocked();
+            case NO_SELECTION -> Component.literal("Select a backup");
+            case MULTIPLE_SELECTED -> Component.literal("Select one backup");
+            case NO_DURABLE_COPY -> Component.literal("This backup has no available copy");
+            case REMOTE_NOT_CONFIGURED -> Component.literal("Configure a Git remote first");
+            case FOLDER_UNAVAILABLE -> Component.literal("No managed backup folder is available");
         };
     }
 
-    private static Component failureStatus(Throwable throwable) {
-        return Component.literal("Error: " + FailureMessages.safe(throwable, 220))
-                .withStyle(ChatFormatting.RED);
+    private Component createBlocked() {
+        return Component.translatable(switch (capabilities.createBlock().orElseThrow()) {
+            case WORLD_OFF -> "screen.worldarchive.browser.create_world_off";
+            case NO_DESTINATION -> "screen.worldarchive.browser.create_no_destination";
+            case GIT_MISSING -> "screen.worldarchive.browser.create_git_missing";
+            case STORAGE_PROBLEM -> "screen.worldarchive.browser.create_storage_problem";
+        });
     }
 
-    private record BrowserLoad(
-            List<BackupRecord> records,
-            BackupBrowserCapabilities capabilities) {
+    /**
+     * The vertical position of each row below the backup list. Each row keeps its distance from
+     * the bottom edge, but never rises above its minimum on a very short screen.
+     */
+    private record Layout(int paginationY, int warningY, int statusY, int primaryActionsY, int secondaryActionsY) {
+        private static Layout of(int height, boolean warning) {
+            return new Layout(
+                    Math.max(88, height - (warning ? 100 : 84)),
+                    Math.max(94, height - 80),
+                    Math.max(108, height - 64),
+                    Math.max(128, height - 48),
+                    Math.max(150, height - 24));
+        }
+    }
+
+    /** One catalog load: the world's rows and what the runtime reported with them. */
+    private record BrowserLoad(List<BackupRow> rows, BackupBrowserCapabilities capabilities) {
         private BrowserLoad {
-            records = List.copyOf(records);
+            rows = List.copyOf(rows);
             Objects.requireNonNull(capabilities, "capabilities");
         }
     }

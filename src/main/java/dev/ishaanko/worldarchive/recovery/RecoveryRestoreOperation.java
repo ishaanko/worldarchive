@@ -2,31 +2,43 @@ package dev.ishaanko.worldarchive.recovery;
 
 import dev.ishaanko.worldarchive.catalog.BackupCatalog;
 import dev.ishaanko.worldarchive.config.WorldIdentityStore;
-import dev.ishaanko.worldarchive.core.BackupOperation;
-import dev.ishaanko.worldarchive.core.OperationId;
-import dev.ishaanko.worldarchive.core.OperationPhase;
-import dev.ishaanko.worldarchive.core.ProgressListener;
 import dev.ishaanko.worldarchive.core.RestoreBackupRequest;
 import dev.ishaanko.worldarchive.core.RestoreBackupResult;
 import dev.ishaanko.worldarchive.core.WorldOperationGate;
+import dev.ishaanko.worldarchive.model.BackupOperation;
 import dev.ishaanko.worldarchive.model.BackupRecord;
 import dev.ishaanko.worldarchive.model.DestinationResult;
 import dev.ishaanko.worldarchive.model.DestinationType;
+import dev.ishaanko.worldarchive.model.OperationId;
+import dev.ishaanko.worldarchive.model.OperationPhase;
+import dev.ishaanko.worldarchive.model.ProgressListener;
+import dev.ishaanko.worldarchive.model.SafeText;
 import dev.ishaanko.worldarchive.model.WorldIdentity;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.time.Clock;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 
-/** Executes the restore-backup operation: private staging through atomic publication. */
+/**
+ * Restores a backup into a new world, from its ZIP copy first and then from its Git copy. A copy
+ * writes the world into a fresh private staging folder and checks every file as it writes; the
+ * world then gets a new identity and its display name, and one rename publishes it. The source
+ * world is never touched, and a restore that fails or is cancelled leaves nothing in the saves
+ * folder. When no copy works, the error names each copy's reason.
+ */
 final class RecoveryRestoreOperation {
+    private static final Comparator<DestinationResult> RESTORE_ORDER =
+            Comparator.comparing(copy -> copy.destination() == DestinationType.ZIP ? 0 : 1);
+
     private final BackupCatalog catalog;
 
-    private final RecoveryDestinations destinations;
+    private final Map<DestinationType, RecoveryDestination> destinations;
 
     private final WorldIdentityStore identityStore;
 
@@ -34,247 +46,130 @@ final class RecoveryRestoreOperation {
 
     private final WorldOperationGate operationGate;
 
-    private final BackupRecoveryService.DirectoryMove directoryMove;
+    private final Clock clock;
 
     RecoveryRestoreOperation(
             BackupCatalog catalog,
-            RecoveryDestinations destinations,
+            Map<DestinationType, RecoveryDestination> destinations,
             WorldIdentityStore identityStore,
             RestoredWorldMetadataFinalizer metadataFinalizer,
             WorldOperationGate operationGate,
-            BackupRecoveryService.DirectoryMove directoryMove) {
+            Clock clock) {
         this.catalog = Objects.requireNonNull(catalog, "catalog");
-        this.destinations = Objects.requireNonNull(destinations, "destinations");
+        this.destinations = Map.copyOf(destinations);
         this.identityStore = Objects.requireNonNull(identityStore, "identityStore");
         this.metadataFinalizer = Objects.requireNonNull(metadataFinalizer, "metadataFinalizer");
         this.operationGate = Objects.requireNonNull(operationGate, "operationGate");
-        this.directoryMove = Objects.requireNonNull(directoryMove, "directoryMove");
+        this.clock = Objects.requireNonNull(clock, "clock");
     }
 
-    RestoreBackupResult restoreBlocking(
+    RestoreBackupResult restore(
             RestoreBackupRequest request,
-            ProgressListener progressListener,
-            OperationCancellation cancellation) throws Exception {
-        cancellation.checkpoint();
+            ProgressListener listener,
+            CancellableTask<?> task) throws Exception {
+        task.checkpoint();
         BackupRecord record = RecoverySupport.requireRecord(catalog, request.sourceBackupId());
         try (WorldOperationGate.Permit ignored = operationGate.enter(record.manifest().worldId())) {
-            cancellation.checkpoint();
+            task.checkpoint();
             BackupRecord current = RecoverySupport.requireRecord(catalog, request.sourceBackupId());
             RecoverySupport.requireSameManifest(record, current);
-            OperationId operationId = OperationId.create();
-            RecoverySupport.report(progressListener, RecoverySupport.progress(
-                    operationId, current, BackupOperation.RESTORE, OperationPhase.PREPARING,
-                    0, 0, "Preparing restored world copy"));
-            RestoreWorkspace workspace = openRestoreWorkspace(
-                    request, progressListener, operationId, current);
-            List<DestinationCandidate> candidates = restorableCandidates(current);
-            for (int index = 0; index < candidates.size(); index++) {
-                DestinationCandidate candidate = candidates.get(index);
-                if (!verifyRestoreSource(
-                        current,
-                        candidate,
-                        progressListener,
-                        operationId,
-                        cancellation,
-                        index,
-                        candidates.size())) {
+            Progress progress = new Progress(listener, current);
+            progress.report(OperationPhase.PREPARING, "Preparing restored world copy");
+            RestoreWorkspace workspace = openWorkspace(request);
+            List<String> failures = new ArrayList<>();
+            for (DestinationResult copy : RecoverySupport.copies(current).stream().sorted(RESTORE_ORDER).toList()) {
+                progress.report(OperationPhase.WRITING, "Restoring from the " + label(copy) + " copy");
+                Path staging = workspace.createStaging();
+                try {
+                    destinations.get(copy.destination()).restore(current, copy, staging);
+                    requireNoIdentityFolder(staging);
+                } catch (InterruptedException interrupted) {
+                    discard(workspace, staging, interrupted);
+                    throw interrupted;
+                } catch (Exception failure) {
+                    discard(workspace, staging, failure);
+                    task.checkpoint();
+                    failures.add(label(copy) + ": " + SafeText.from(failure, "the copy could not be restored", 300));
                     continue;
                 }
-                Optional<RestoreBackupResult> restored = restoreFromCandidate(
-                        request,
-                        current,
-                        candidate,
-                        workspace,
-                        progressListener,
-                        operationId,
-                        cancellation);
-                if (restored.isPresent()) {
-                    return restored.orElseThrow();
-                }
+                return finish(request, current, workspace, staging, progress, task);
             }
-            RecoverySupport.reportFailure(progressListener, operationId, current, BackupOperation.RESTORE,
-                    "No valid restore source is available");
-            throw new BackupRecoveryException("No valid destination can restore this backup");
+            progress.report(OperationPhase.FAILED, "No copy of this backup could be restored");
+            throw new BackupRecoveryException(failures.isEmpty()
+                    ? "This backup has no copy left to restore from."
+                    : "This backup could not be restored from any of its copies. " + String.join(" ", failures));
         }
     }
 
-    private RestoreWorkspace openRestoreWorkspace(
-            RestoreBackupRequest request,
-            ProgressListener progressListener,
-            OperationId operationId,
-            BackupRecord record) {
+    private RestoreWorkspace openWorkspace(RestoreBackupRequest request) {
         try {
-            return RestoreWorkspace.open(request.worldsDirectory(), directoryMove);
+            return RestoreWorkspace.open(request.worldsDirectory(), clock);
         } catch (IOException exception) {
-            RecoverySupport.reportFailure(progressListener, operationId, record, BackupOperation.RESTORE,
-                    "Worlds directory is unavailable or unsafe");
-            throw new BackupRecoveryException(
-                    "Worlds directory is unavailable or unsafe", exception);
+            throw new BackupRecoveryException("The worlds folder " + request.worldsDirectory() + " cannot be used: "
+                    + SafeText.from(exception, "it cannot be opened", 300), exception);
         }
     }
 
-    private boolean verifyRestoreSource(
-            BackupRecord record,
-            DestinationCandidate candidate,
-            ProgressListener progressListener,
-            OperationId operationId,
-            OperationCancellation cancellation,
-            int completed,
-            int total) throws InterruptedException {
-        cancellation.checkpoint();
-        RecoverySupport.report(progressListener, RecoverySupport.progress(
-                operationId, record, BackupOperation.RESTORE, OperationPhase.VERIFYING,
-                completed, total, "Verifying restore source"));
-        try {
-            VerificationOutcome outcome = candidate.adapter().verifyForRestore(
-                    record, candidate.result());
-            cancellation.checkpoint();
-            return outcome.valid();
-        } catch (InterruptedException exception) {
-            Thread.currentThread().interrupt();
-            throw exception;
-        } catch (Exception exception) {
-            // Another independently stored destination may still be valid.
-            return false;
-        }
-    }
-
-    private Optional<RestoreBackupResult> restoreFromCandidate(
-            RestoreBackupRequest request,
-            BackupRecord record,
-            DestinationCandidate candidate,
-            RestoreWorkspace workspace,
-            ProgressListener progressListener,
-            OperationId operationId,
-            OperationCancellation cancellation) throws Exception {
-        RecoverySupport.report(progressListener, RecoverySupport.progress(
-                operationId, record, BackupOperation.RESTORE, OperationPhase.WRITING,
-                0, 0, "Materializing a private restored copy"));
-        RestoreWorkspace.Staging staging = workspace.createStaging();
-        Optional<RestoreWorkspace.Staging> materialized = materializeCandidate(
-                record, candidate, workspace, staging, cancellation);
-        if (materialized.isEmpty()) {
-            return Optional.empty();
-        }
-        staging = materialized.orElseThrow();
-        WorldIdentity identity = finalizeRestoredIdentity(
-                request, record, workspace, staging, cancellation);
-        RecoverySupport.report(progressListener, RecoverySupport.progress(
-                operationId, record, BackupOperation.RESTORE, OperationPhase.PUBLISHING,
-                0, 0, "Publishing restored world copy"));
-        Path published = publishRestoredWorld(
-                request, workspace, staging, cancellation);
-        RestoreBackupResult result = new RestoreBackupResult(
-                record.manifest().backupId(), identity.worldId(), published);
-        RecoverySupport.report(progressListener, RecoverySupport.progress(
-                operationId, record, BackupOperation.RESTORE, OperationPhase.COMPLETE,
-                1, 1, "Restored world copy is ready"));
-        return Optional.of(result);
-    }
-
-    private static Optional<RestoreWorkspace.Staging> materializeCandidate(
-            BackupRecord record,
-            DestinationCandidate candidate,
-            RestoreWorkspace workspace,
-            RestoreWorkspace.Staging initialStaging,
-            OperationCancellation cancellation) throws InterruptedException {
-        RestoreWorkspace.Staging staging = initialStaging;
-        try {
-            RecoveryDestination.Materialization materialization = candidate.adapter().materialize(
-                    record, candidate.result(), staging.path());
-            boolean interruptedAfterMaterialization = Thread.interrupted();
-            try {
-                staging = staging.afterMaterialization(materialization);
-            } finally {
-                if (interruptedAfterMaterialization) {
-                    Thread.currentThread().interrupt();
-                }
-            }
-            if (materialization.postMaterializationProblem().isPresent()) {
-                throw new BackupRecoveryException(
-                        materialization.postMaterializationProblem().orElseThrow());
-            }
-            cancellation.checkpoint();
-            staging.requireUnchanged();
-            if (Files.exists(
-                    staging.path().resolve(".worldarchive"), LinkOption.NOFOLLOW_LINKS)) {
-                throw new IOException("Restore source contains internal metadata");
-            }
-            return Optional.of(staging);
-        } catch (InterruptedException exception) {
-            Thread.currentThread().interrupt();
-            workspace.cleanup(staging, exception);
-            throw exception;
-        } catch (Exception exception) {
-            if (!workspace.cleanup(staging, exception)) {
-                throw new BackupRecoveryException(
-                        "Private restore staging could not be cleaned safely", exception);
-            }
-            return Optional.empty();
-        }
-    }
-
-    private WorldIdentity finalizeRestoredIdentity(
+    /** Names the restored world, gives it a new identity, and publishes it. */
+    private RestoreBackupResult finish(
             RestoreBackupRequest request,
             BackupRecord record,
             RestoreWorkspace workspace,
-            RestoreWorkspace.Staging staging,
-            OperationCancellation cancellation) throws InterruptedException {
+            Path staging,
+            Progress progress,
+            CancellableTask<?> task) throws Exception {
         try {
-            cancellation.checkpoint();
-            staging.requireUnchanged();
-            metadataFinalizer.finalizeDisplayName(staging.path(), request.restoredWorldName());
-            cancellation.checkpoint();
-            staging.requireUnchanged();
-            WorldIdentity identity = identityStore.createFreshRestoredCopyIdentity(
-                    staging.path(), record.manifest().backupId());
-            cancellation.checkpoint();
-            staging.requireUnchanged();
-            return identity;
-        } catch (InterruptedException exception) {
-            Thread.currentThread().interrupt();
-            workspace.cleanup(staging, exception);
-            throw exception;
-        } catch (IOException | RuntimeException exception) {
-            workspace.cleanup(staging, exception);
-            throw new BackupRecoveryException(
-                    "Restored world metadata could not be finalized", exception);
+            task.checkpoint();
+            metadataFinalizer.finalizeDisplayName(staging, request.restoredWorldName());
+            WorldIdentity identity = identityStore.createFreshRestoredCopyIdentity(staging, record.manifest().backupId());
+            task.checkpoint();
+            progress.report(OperationPhase.PUBLISHING, "Publishing restored world copy");
+            Path published = workspace.publish(staging, request.restoredWorldName(), task);
+            progress.report(OperationPhase.COMPLETE, "Restored world copy is ready");
+            return new RestoreBackupResult(identity.worldId(), published);
+        } catch (InterruptedException interrupted) {
+            discard(workspace, staging, interrupted);
+            throw interrupted;
+        } catch (Exception failure) {
+            discard(workspace, staging, failure);
+            throw new BackupRecoveryException("The restored world could not be finished: "
+                    + SafeText.from(failure, "it could not be written", 300), failure);
         }
     }
 
-    private static Path publishRestoredWorld(
-            RestoreBackupRequest request,
-            RestoreWorkspace workspace,
-            RestoreWorkspace.Staging staging,
-            OperationCancellation cancellation) throws InterruptedException {
-        try {
-            return workspace.publish(staging, request.restoredWorldName(), cancellation);
-        } catch (InterruptedException exception) {
-            Thread.currentThread().interrupt();
-            workspace.cleanup(staging, exception);
-            throw exception;
-        } catch (Exception exception) {
-            workspace.cleanup(staging, exception);
-            throw new BackupRecoveryException(
-                    "Restored world copy could not be published", exception);
+    /** A backup never holds WorldArchive's identity folder; a copy that does is not restored. */
+    private static void requireNoIdentityFolder(Path staging) throws IOException {
+        if (Files.exists(staging.resolve(".worldarchive"), LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("The copy holds WorldArchive's own identity folder (.worldarchive)");
         }
     }
 
-    private List<DestinationCandidate> restorableCandidates(BackupRecord record) {
-        return RecoverySupport.presentDestinations(record).stream()
-                .map(result -> new DestinationCandidate(result, destinations.get(result.destination())))
-                .filter(candidate -> candidate.adapter() != null)
-                .sorted(Comparator.comparingInt(candidate -> restorePriority(
-                        candidate.result().destination())))
-                .toList();
+    /** Removes a staging folder after a failure; one that cannot be removed is reported. */
+    private static void discard(RestoreWorkspace workspace, Path staging, Exception failure) {
+        try {
+            workspace.delete(staging);
+        } catch (IOException | RuntimeException cleanup) {
+            failure.addSuppressed(cleanup);
+            throw new BackupRecoveryException("Part of the restored world could not be removed from " + staging
+                    + ". Delete that folder, then try again.", failure);
+        }
     }
 
-    private static int restorePriority(DestinationType type) {
-        return type == DestinationType.ZIP ? 0 : 1;
+    private static String label(DestinationResult copy) {
+        return copy.destination() == DestinationType.ZIP ? "ZIP" : "Git";
     }
 
-    private record DestinationCandidate(
-            DestinationResult result,
-            RecoveryDestination adapter) {
+    /** Progress of one restore. */
+    private record Progress(ProgressListener listener, BackupRecord record, OperationId operationId) {
+        private Progress(ProgressListener listener, BackupRecord record) {
+            this(listener, record, OperationId.create());
+        }
+
+        /** A restore has no countable steps; it reports one unit, done when complete. */
+        private void report(OperationPhase phase, String message) {
+            long units = phase == OperationPhase.COMPLETE ? 1 : 0;
+            RecoverySupport.report(listener, RecoverySupport.progress(
+                    operationId, record, BackupOperation.RESTORE, phase, units, units, message));
+        }
     }
 }

@@ -1,67 +1,88 @@
 package dev.ishaanko.worldarchive.recovery;
 
 import dev.ishaanko.worldarchive.catalog.BackupCatalog;
-import dev.ishaanko.worldarchive.core.BackupOperation;
-import dev.ishaanko.worldarchive.core.OperationId;
-import dev.ishaanko.worldarchive.core.OperationPhase;
-import dev.ishaanko.worldarchive.core.OperationProgress;
-import dev.ishaanko.worldarchive.core.ProgressListener;
 import dev.ishaanko.worldarchive.model.BackupId;
+import dev.ishaanko.worldarchive.model.BackupOperation;
 import dev.ishaanko.worldarchive.model.BackupRecord;
 import dev.ishaanko.worldarchive.model.BackupResult;
 import dev.ishaanko.worldarchive.model.DestinationResult;
-import dev.ishaanko.worldarchive.model.DestinationStatus;
 import dev.ishaanko.worldarchive.model.DestinationType;
+import dev.ishaanko.worldarchive.model.OperationId;
+import dev.ishaanko.worldarchive.model.OperationPhase;
+import dev.ishaanko.worldarchive.model.OperationProgress;
+import dev.ishaanko.worldarchive.model.ProgressListener;
+import dev.ishaanko.worldarchive.model.WorldId;
+import dev.ishaanko.worldarchive.support.AsyncTasks;
+import dev.ishaanko.worldarchive.support.Observers;
 import java.io.IOException;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
-import java.util.function.UnaryOperator;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.CompletionStage;
 
-/** Small helpers shared across the recovery operation classes. */
+/** Small helpers shared by the recovery operations. */
 final class RecoverySupport {
     private RecoverySupport() {
     }
 
     static BackupRecord requireRecord(BackupCatalog catalog, BackupId backupId) throws IOException {
-        return catalog.find(backupId).orElseThrow(
-                () -> new BackupRecoveryException("Backup was not found in the catalog"));
+        return catalog.find(backupId).orElseThrow(() -> new BackupRecoveryException(
+                "This backup is no longer in the backup list. Open the list again."));
     }
 
     static void requireSameManifest(BackupRecord expected, BackupRecord current) {
         if (!expected.manifest().equals(current.manifest())) {
-            throw new BackupRecoveryException("Backup catalog identity changed during the operation");
+            throw new BackupRecoveryException("The backup changed while the operation waited. Try again.");
         }
     }
 
-    static List<DestinationResult> presentDestinations(BackupRecord record) {
+    /** The destinations that hold a copy, Git before ZIP. */
+    static List<DestinationResult> copies(BackupRecord record) {
         return record.result().destinations().stream()
-                .filter(RecoverySupport::isPresent)
+                .filter(DestinationResult::isDurable)
                 .sorted(Comparator.comparing(DestinationResult::destination))
                 .toList();
     }
 
-    static boolean isPresent(DestinationResult destination) {
-        return destination.artifactId().isPresent()
-                && (destination.status() == DestinationStatus.SUCCESS
-                        || destination.status() == DestinationStatus.PENDING_SYNC);
+    static Optional<DestinationResult> copy(BackupRecord record, DestinationType type) {
+        return copies(record).stream().filter(copy -> copy.destination() == type).findFirst();
     }
 
-    static BackupRecord updateCatalog(
-            BackupCatalog catalog,
-            BackupId backupId,
-            UnaryOperator<List<DestinationResult>> destinationUpdate) throws IOException {
-        return catalog.update(backupId, existing -> {
-            List<DestinationResult> replacements = List.copyOf(
-                    destinationUpdate.apply(existing.result().destinations()));
-            BackupResult result = BackupResult.aggregate(
-                    existing.manifest().backupId(),
-                    existing.manifest().worldId(),
-                    replacements,
-                    existing.result().completedAt());
-            return new BackupRecord(existing.manifest(), result);
-        }).orElseThrow(() -> new BackupRecoveryException(
-                "Backup disappeared while updating the catalog"));
+    /** The record with its destinations replaced, keeping its completion time. */
+    static BackupRecord withDestinations(BackupRecord record, List<DestinationResult> destinations) {
+        return new BackupRecord(record.manifest(), new BackupResult(
+                record.manifest().backupId(),
+                record.manifest().worldId(),
+                destinations,
+                record.result().completedAt()));
+    }
+
+    /**
+     * Waits for a storage operation even when this thread is interrupted: the operation is then
+     * asked to stop, and its outcome is still awaited, so nothing it writes outlives the wait. The
+     * interrupt is restored afterwards.
+     */
+    static <T> T awaitStopped(CompletionStage<T> stage) throws Exception {
+        CompletableFuture<T> future = stage.toCompletableFuture();
+        try {
+            return AsyncTasks.await(future);
+        } catch (InterruptedException interrupted) {
+            if (future instanceof AsyncTasks.InterruptibleFuture<T> running) {
+                running.stop(true);
+            }
+            try {
+                return future.join();
+            } catch (CompletionException failure) {
+                if (failure.getCause() instanceof Exception cause) {
+                    throw cause;
+                }
+                throw failure;
+            } finally {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     static OperationProgress progress(
@@ -72,39 +93,23 @@ final class RecoverySupport {
             long completed,
             long total,
             String message) {
-        return new OperationProgress(
-                operationId,
-                record.manifest().worldId(),
-                Optional.of(record.manifest().backupId()),
-                operation,
-                phase,
-                completed,
-                total,
-                message);
+        return new OperationProgress(operationId, record.manifest().worldId(), Optional.of(record.manifest().backupId()),
+                operation, phase, completed, total, message);
     }
 
-    static void reportFailure(
-            ProgressListener listener,
+    static OperationProgress worldProgress(
             OperationId operationId,
-            BackupRecord record,
+            WorldId worldId,
             BackupOperation operation,
+            OperationPhase phase,
+            long completed,
+            long total,
             String message) {
-        report(listener, progress(
-                operationId, record, operation, OperationPhase.FAILED, 0, 0, message));
+        return new OperationProgress(operationId, worldId, Optional.empty(), operation, phase, completed, total, message);
     }
 
+    /** Tells the listener; a listener that throws never changes the outcome. */
     static void report(ProgressListener listener, OperationProgress progress) {
-        try {
-            listener.onProgress(progress);
-        } catch (RuntimeException exception) {
-            // Storage outcomes cannot depend on observers.
-        }
-    }
-
-    record DestinationKey(DestinationType type, String artifactId) {
-        static DestinationKey from(DestinationResult result) {
-            return new DestinationKey(
-                    result.destination(), result.artifactId().orElse("<none>"));
-        }
+        Observers.safely(() -> listener.onProgress(progress));
     }
 }

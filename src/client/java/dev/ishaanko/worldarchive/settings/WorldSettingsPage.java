@@ -4,11 +4,9 @@ import dev.ishaanko.worldarchive.config.WorldConfig;
 import dev.ishaanko.worldarchive.model.WorldId;
 import dev.ishaanko.worldarchive.ui.Widgets;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.Checkbox;
@@ -16,38 +14,38 @@ import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.components.StringWidget;
 import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.MutableComponent;
 
-/** Multi-world selector and selected-world destination editor for the settings screen. */
+/**
+ * The Worlds tab: a paged list of worlds, and the selected world's own settings. Worlds with a
+ * problem are shown in red.
+ */
 final class WorldSettingsPage {
     private static final int ROW_HEIGHT = 22;
 
     private final WorldArchiveSettingsScreen screen;
 
+    /** The list buttons of the page shown last, so their marks can change without a rebuild. */
+    private final Map<WorldId, Button> listButtons = new HashMap<>();
+
     private int page;
 
     private WorldId selectedWorldId;
-
-    /** Worlds whose override box is ticked while the folder field is still empty. */
-    private final Set<WorldId> overrideEnabled = new HashSet<>();
-
-    /** The last override typed for a world, restored when its box is ticked again. */
-    private final Map<WorldId, String> rememberedOverrides = new HashMap<>();
-
-    /** The draft the transient state above belongs to; a new draft (reload, reset) drops it. */
-    private SettingsDraft observedDraft;
 
     WorldSettingsPage(WorldArchiveSettingsScreen screen) {
         this.screen = Objects.requireNonNull(screen, "screen");
     }
 
+    /** The world whose settings the page shows; null before the page was shown or when there are no worlds. */
+    WorldId selectedWorld() {
+        return selectedWorldId;
+    }
+
     void add(int x, int contentWidth, int pageSize) {
-        if (screen.draft() != observedDraft) {
-            observedDraft = screen.draft();
-            overrideEnabled.clear();
-            rememberedOverrides.clear();
-        }
+        listButtons.clear();
         List<WorldConfig> worlds = screen.draft().base().worlds();
         if (worlds.isEmpty()) {
+            selectedWorldId = null;
             screen.addSettingsText(SettingsWidgets.wrappedText(
                     screen.settingsFont(),
                     x,
@@ -81,12 +79,11 @@ final class WorldSettingsPage {
         for (int index = start; index < end; index++) {
             WorldConfig world = worlds.get(index);
             boolean selected = world.worldId().equals(selectedWorldId);
-            Component label = Component.literal((selected ? "> " : "")
-                    + folderName(world) + " [" + world.worldId().displayCode() + "]");
-            Button button = Button.builder(label, ignored -> select(world.worldId()))
+            Button button = Button.builder(listLabel(world), ignored -> select(world.worldId()))
                     .bounds(x, 53 + (index - start) * ROW_HEIGHT, width, 20)
                     .build();
             button.setOverrideRenderHighlightedSprite(() -> selected);
+            listButtons.put(world.worldId(), button);
             button.active = !screen.controlsLocked();
             button.setTooltip(Tooltip.create(Component.literal(world.path().toString())));
             screen.addSettingsButton(button);
@@ -94,6 +91,25 @@ final class WorldSettingsPage {
         if (pageCount > 1) {
             addPageNavigation(worlds, x, width, pageSize, pageCount);
         }
+    }
+
+    /** Shows the listed worlds that have a problem in red; called when a validation finishes. */
+    void refreshWorldMarks() {
+        for (WorldConfig world : screen.draft().base().worlds()) {
+            Button button = listButtons.get(world.worldId());
+            if (button != null) {
+                button.setMessage(listLabel(world));
+            }
+        }
+    }
+
+    private Component listLabel(WorldConfig world) {
+        String marker = world.worldId().equals(selectedWorldId) ? "> " : "";
+        MutableComponent label = Component.literal(
+                marker + folderName(world) + " [" + world.worldId().displayCode() + "]");
+        return screen.validation().invalidWorlds().contains(world.worldId())
+                ? label.withStyle(ChatFormatting.RED)
+                : label;
     }
 
     private void addPageNavigation(
@@ -167,19 +183,13 @@ final class WorldSettingsPage {
                 y,
                 width,
                 2048,
-                value -> {
-                    screen.draft().setWorldRemoteUrl(world.worldId(), value);
-                    screen.requestHealthProbe();
-                });
+                value -> screen.draft().setWorldRemoteUrl(world.worldId(), value));
         remoteUrl.setHint(Component.translatable("screen.worldarchive.settings.world_remote_hint"));
-        remoteUrl.setTooltip(Tooltip.create(Component.translatable(
-                "screen.worldarchive.settings.world_remote_steps")));
     }
 
     private void addZipFields(WorldConfig world, int x, int y, int width) {
         WorldId worldId = world.worldId();
-        boolean usesOverride = overrideEnabled.contains(worldId)
-                || !screen.draft().worldZipDestination(worldId).isBlank();
+        boolean usesOverride = screen.draft().worldZipOverride(worldId);
         screen.addCheckbox(
                 "screen.worldarchive.settings.world_zip_default",
                 usesOverride,
@@ -187,33 +197,25 @@ final class WorldSettingsPage {
                 y,
                 width,
                 useOverride -> {
-                    if (useOverride) {
-                        overrideEnabled.add(worldId);
-                        screen.draft().setWorldZipDestination(worldId, rememberedOverrides
-                                .getOrDefault(worldId, screen.draft().zipDestination()));
-                    } else {
-                        overrideEnabled.remove(worldId);
-                        rememberedOverrides.put(worldId, screen.draft().worldZipDestination(worldId));
-                        screen.draft().setWorldZipDestination(worldId, "");
-                    }
+                    screen.draft().setWorldZipOverride(worldId, useOverride);
                     screen.rebuildWorldWidgets();
                 });
         int fieldY = y + ROW_HEIGHT;
         int browseWidth = Math.min(64, Math.max(32, width / 4));
         EditBox destination = screen.addTextRow(
                 "screen.worldarchive.settings.world_zip_destination",
-                screen.draft().worldZipDestination(world.worldId()),
+                screen.draft().worldZipDestination(worldId),
                 SettingsField.WORLD_ZIP_DESTINATION,
                 x,
                 fieldY,
                 width - browseWidth - 4,
                 1024,
-                value -> screen.draft().setWorldZipDestination(world.worldId(), value));
+                value -> screen.draft().setWorldZipDestination(worldId, value));
         destination.active = usesOverride && !screen.controlsLocked();
         destination.setHint(Component.translatable("screen.worldarchive.settings.world_zip_hint"));
         Button browse = Button.builder(
                         Component.translatable("screen.worldarchive.settings.browse"),
-                        ignored -> screen.chooseWorldZipFolder(world.worldId()))
+                        ignored -> screen.chooseWorldZipFolder(worldId))
                 .bounds(x + width - browseWidth, fieldY, browseWidth, 20)
                 .build();
         screen.setWorldZipBrowseButton(browse, usesOverride);

@@ -1,6 +1,5 @@
 package dev.ishaanko.worldarchive.model;
 
-import java.nio.charset.StandardCharsets;
 import java.time.DateTimeException;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -25,6 +24,9 @@ public record BackupManifest(
         Optional<GameVersionStamp> gameVersion) {
     public static final int CURRENT_FORMAT_VERSION = 1;
 
+    /** The longest label in UTF-16 units; the Create screen's label box stops here too. */
+    public static final int MAXIMUM_LABEL_LENGTH = 128;
+
     private static final Pattern SHA256 = Pattern.compile("[0-9a-f]{64}");
 
     public BackupManifest {
@@ -33,10 +35,9 @@ public record BackupManifest(
         }
         Objects.requireNonNull(backupId, "backupId");
         Objects.requireNonNull(worldId, "worldId");
-        worldName = requireText(worldName, "worldName", 255);
+        worldName = SafeText.require(worldName, "worldName", 255);
         label = Objects.requireNonNull(label, "label")
-                .map(SensitiveDataRedactor::redact)
-                .map(value -> requireText(value, "label", 128));
+                .map(value -> SafeText.require(value, "label", MAXIMUM_LABEL_LENGTH));
         createdAt = requirePortableCreatedAt(createdAt);
         Objects.requireNonNull(trigger, "trigger");
         if (sourceFileCount < 0) {
@@ -53,109 +54,7 @@ public record BackupManifest(
         Objects.requireNonNull(gameVersion, "gameVersion");
     }
 
-    public BackupManifest(
-            int formatVersion,
-            BackupId backupId,
-            WorldId worldId,
-            String worldName,
-            Optional<String> label,
-            Instant createdAt,
-            BackupTrigger trigger,
-            long sourceFileCount,
-            long sourceByteCount,
-            long changedFileCount,
-            String contentSha256,
-            String inventorySha256) {
-        this(
-                formatVersion,
-                backupId,
-                worldId,
-                worldName,
-                label,
-                createdAt,
-                trigger,
-                sourceFileCount,
-                sourceByteCount,
-                changedFileCount,
-                contentSha256,
-                inventorySha256,
-                Optional.empty());
-    }
-
-    /** Compatibility constructor for the initial single-digest manifest contract. */
-    public BackupManifest(
-            int formatVersion,
-            BackupId backupId,
-            WorldId worldId,
-            String worldName,
-            Instant createdAt,
-            BackupTrigger trigger,
-            long sourceFileCount,
-            long sourceByteCount,
-            String sourceSha256) {
-        this(
-                formatVersion,
-                backupId,
-                worldId,
-                worldName,
-                Optional.empty(),
-                createdAt,
-                trigger,
-                sourceFileCount,
-                sourceByteCount,
-                sourceFileCount,
-                sourceSha256,
-                sourceSha256);
-    }
-
-    public static BackupManifest create(
-            BackupId backupId,
-            WorldId worldId,
-            String worldName,
-            Instant createdAt,
-            BackupTrigger trigger,
-            long sourceFileCount,
-            long sourceByteCount,
-            String sourceSha256) {
-        return new BackupManifest(
-                CURRENT_FORMAT_VERSION,
-                backupId,
-                worldId,
-                worldName,
-                createdAt,
-                trigger,
-                sourceFileCount,
-                sourceByteCount,
-                sourceSha256);
-    }
-
-    public static BackupManifest create(
-            BackupId backupId,
-            WorldId worldId,
-            String worldName,
-            Optional<String> label,
-            Instant createdAt,
-            BackupTrigger trigger,
-            long sourceFileCount,
-            long sourceByteCount,
-            long changedFileCount,
-            String contentSha256,
-            String inventorySha256) {
-        return new BackupManifest(
-                CURRENT_FORMAT_VERSION,
-                backupId,
-                worldId,
-                worldName,
-                label,
-                createdAt,
-                trigger,
-                sourceFileCount,
-                sourceByteCount,
-                changedFileCount,
-                contentSha256,
-                inventorySha256);
-    }
-
+    /** A manifest in the current format, as a capture writes it. */
     public static BackupManifest create(
             BackupId backupId,
             WorldId worldId,
@@ -183,25 +82,6 @@ public record BackupManifest(
                 contentSha256,
                 inventorySha256,
                 gameVersion);
-    }
-
-    /** Compatibility alias for callers that previously consumed the single source digest. */
-    public String sourceSha256() {
-        return contentSha256;
-    }
-
-    private static String requireText(String value, String name, int maximumLength) {
-        Objects.requireNonNull(value, name);
-        if (value.isBlank() || value.length() > maximumLength) {
-            throw new IllegalArgumentException(name + " must contain between 1 and " + maximumLength + " characters");
-        }
-        if (value.chars().anyMatch(character -> Character.isISOControl(character))) {
-            throw new IllegalArgumentException(name + " must not contain control characters");
-        }
-        if (!StandardCharsets.UTF_8.newEncoder().canEncode(value)) {
-            throw new IllegalArgumentException(name + " must contain valid Unicode text");
-        }
-        return value;
     }
 
     private static String requireSha256(String value, String name) {

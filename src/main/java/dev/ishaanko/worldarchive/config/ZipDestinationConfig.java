@@ -1,45 +1,28 @@
 package dev.ishaanko.worldarchive.config;
 
-import dev.ishaanko.worldarchive.model.DestinationHealth;
-import dev.ishaanko.worldarchive.model.DestinationType;
 import java.nio.file.Path;
 import java.util.Objects;
 import java.util.Optional;
 
-/** Configuration for local or desktop-synced ZIP archives. */
+/**
+ * Settings of the ZIP destination. An empty destination means the default folder
+ * ({@link DefaultDestinations}); a world can name its own folder in {@link WorldConfig}.
+ */
 public record ZipDestinationConfig(
         boolean enabled,
         Optional<Path> destination,
-        DestinationTriggerConfig triggers,
-        DestinationHealth health) {
+        DestinationTriggerConfig triggers) {
     public ZipDestinationConfig {
         destination = Objects.requireNonNull(destination, "destination")
                 .map(path -> path.toAbsolutePath().normalize());
         Objects.requireNonNull(triggers, "triggers");
-        Objects.requireNonNull(health, "health");
-        if (health.destination() != DestinationType.ZIP) {
-            throw new IllegalArgumentException("ZIP health state must describe the ZIP destination");
-        }
-    }
-
-    /** Compatibility constructor for callers that predate persisted destination health. */
-    public ZipDestinationConfig(
-            boolean enabled,
-            Optional<Path> destination,
-            DestinationTriggerConfig triggers) {
-        this(enabled, destination, triggers, DestinationHealth.notChecked(DestinationType.ZIP));
-    }
-
-    /** Compatibility constructor for callers that predate per-destination triggers. */
-    public ZipDestinationConfig(boolean enabled, Optional<Path> destination) {
-        this(enabled, destination, DestinationTriggerConfig.defaults());
     }
 
     public static ZipDestinationConfig defaults() {
-        return new ZipDestinationConfig(
-                true,
-                Optional.empty(),
-                DestinationTriggerConfig.defaults(),
-                DestinationHealth.notChecked(DestinationType.ZIP));
+        return new ZipDestinationConfig(true, Optional.empty(), DestinationTriggerConfig.defaults());
+    }
+
+    public ZipDestinationConfig withDestination(Optional<Path> destination) {
+        return new ZipDestinationConfig(enabled, destination, triggers);
     }
 }

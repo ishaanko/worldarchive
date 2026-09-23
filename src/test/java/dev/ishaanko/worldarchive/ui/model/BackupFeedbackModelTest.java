@@ -1,21 +1,16 @@
 package dev.ishaanko.worldarchive.ui.model;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import dev.ishaanko.worldarchive.core.BackupOperation;
-import dev.ishaanko.worldarchive.core.OperationId;
-import dev.ishaanko.worldarchive.core.OperationPhase;
-import dev.ishaanko.worldarchive.core.OperationProgress;
 import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.BackupManifest;
+import dev.ishaanko.worldarchive.model.BackupOperation;
 import dev.ishaanko.worldarchive.model.BackupRecord;
 import dev.ishaanko.worldarchive.model.BackupResult;
 import dev.ishaanko.worldarchive.model.BackupStatus;
 import dev.ishaanko.worldarchive.model.BackupTrigger;
 import dev.ishaanko.worldarchive.model.DestinationResult;
-import dev.ishaanko.worldarchive.model.DestinationStatus;
 import dev.ishaanko.worldarchive.model.DestinationType;
 import dev.ishaanko.worldarchive.model.SyncStatus;
 import dev.ishaanko.worldarchive.model.VerificationStatus;
@@ -23,244 +18,94 @@ import dev.ishaanko.worldarchive.model.WorldId;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
-import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
 class BackupFeedbackModelTest {
-    @Test
-    void batchDeleteCountsAPendingRemoteDeletionAsAProblem() {
-        BackupId backupId = BackupId.create();
-        WorldId worldId = WorldId.create();
-        BackupResult pending = BackupResult.aggregate(
-                backupId,
-                worldId,
-                List.of(
-                        DestinationResult.success(DestinationType.ZIP, worldId + "/archive.zip"),
-                        DestinationResult.pendingSync(
-                                DestinationType.GIT, "refs/heads/x", "deletion pending on the remote")),
-                Instant.parse("2026-09-15T10:00:00Z"));
+    private static final BackupId BACKUP_ID = BackupId.parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
 
-        DeleteBatchSummary summary = DeleteBatchSummary.from(List.of(pending));
-
-        assertEquals(BackupStatus.PARTIAL_SUCCESS, summary.status());
-        assertEquals(1, summary.details().size());
-        assertTrue(summary.details().getFirst().contains("GIT"));
-    }
-
-    private static final BackupId BACKUP_ID = new BackupId(
-            UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"));
-
-    private static final WorldId WORLD_ID = new WorldId(
-            UUID.fromString("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"));
+    private static final WorldId WORLD_ID = WorldId.parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
 
     @Test
-    void retainsAndRedactsPartialDestinationFailures() {
-        BackupResult result = BackupResult.aggregate(
-                BACKUP_ID,
-                WORLD_ID,
-                List.of(
-                        DestinationResult.success(DestinationType.GIT, "git-object"),
-                        DestinationResult.failed(
-                                DestinationType.ZIP,
-                                "Upload failed token=secret-value")),
-                Instant.EPOCH.plusSeconds(2));
+    void synchronizationReportsTheGitCopyOnly() {
+        BackupOutcomeSummary synced = BackupOutcomeSummary.from(BackupOperation.SYNC, result(BACKUP_ID,
+                DestinationResult.success(DestinationType.GIT, "git-object").withSync(SyncStatus.SYNCED),
+                DestinationResult.success(DestinationType.ZIP, "zip-object")));
+        assertEquals(BackupStatus.SUCCESS, synced.status());
+        assertEquals("Backup synchronized", synced.headline());
+        assertEquals(List.of("GIT: synced"), synced.lines());
 
-        BackupOutcomeSummary summary = BackupOutcomeSummary.from(result);
-
-        assertEquals(BackupStatus.PARTIAL_SUCCESS, summary.status());
-        assertTrue(summary.partialFailure());
-        assertEquals("Backup completed with destination issues", summary.headline());
-        assertEquals(2, summary.destinations().size());
-        assertEquals(
-                "Upload failed token=[REDACTED]",
-                summary.destinations().get(1).detail().orElseThrow());
-    }
-
-    @Test
-    void deletionSummaryUsesDeletionSpecificLanguage() {
-        BackupResult deleted = BackupResult.aggregate(
-                BACKUP_ID,
-                WORLD_ID,
-                List.of(
-                        DestinationResult.success(DestinationType.GIT, "git-object"),
-                        DestinationResult.success(DestinationType.ZIP, "zip-object")),
-                Instant.EPOCH.plusSeconds(2));
-        BackupOutcomeSummary success = BackupOutcomeSummary.from(
-                BackupOperation.DELETE,
-                deleted);
-
-        assertEquals(BackupOperation.DELETE, success.operation());
-        assertEquals("Backup deleted", success.headline());
-        assertEquals("deleted", success.destinationStatus(success.destinations().get(0)));
-        assertEquals("deleted", success.destinationStatus(success.destinations().get(1)));
-
-        BackupResult partialDelete = BackupResult.aggregate(
-                BACKUP_ID,
-                WORLD_ID,
-                List.of(
-                        DestinationResult.success(DestinationType.GIT, "git-object"),
-                        DestinationResult.failed(DestinationType.ZIP, "Delete failed")),
-                Instant.EPOCH.plusSeconds(3));
-        BackupOutcomeSummary partial = BackupOutcomeSummary.from(
-                BackupOperation.DELETE,
-                partialDelete);
-
-        assertEquals("Backup deleted from some destinations", partial.headline());
-        assertEquals("not deleted", partial.destinationStatus(partial.destinations().get(1)));
-
-        BackupOutcomeSummary empty = BackupOutcomeSummary.from(
-                BackupOperation.DELETE,
-                BackupResult.aggregate(BACKUP_ID, WORLD_ID, List.of(), Instant.EPOCH.plusSeconds(4)));
-        assertEquals("Backup removed", empty.headline());
-    }
-
-    @Test
-    void synchronizationSummaryUsesRemoteSyncOutcome() {
-        DestinationResult git = new DestinationResult(
-                DestinationType.GIT,
-                DestinationStatus.SUCCESS,
-                Optional.of("git-object"),
-                Optional.empty(),
-                VerificationStatus.NOT_VERIFIED,
-                SyncStatus.SYNCED);
-        BackupResult result = BackupResult.aggregate(
-                BACKUP_ID,
-                WORLD_ID,
-                List.of(
-                        git,
-                        DestinationResult.success(DestinationType.ZIP, "zip-object")),
-                Instant.EPOCH.plusSeconds(2));
-
-        BackupOutcomeSummary synchronizedSummary = BackupOutcomeSummary.from(
-                BackupOperation.SYNC,
-                result);
-
-        assertEquals(BackupStatus.SUCCESS, synchronizedSummary.status());
-        assertEquals("Backup synchronized", synchronizedSummary.headline());
-        assertEquals(1, synchronizedSummary.destinations().size());
-        assertEquals(
-                "synced",
-                synchronizedSummary.destinationStatus(synchronizedSummary.destinations().getFirst()));
-
-        DestinationResult failedGit = new DestinationResult(
-                DestinationType.GIT,
-                DestinationStatus.PENDING_SYNC,
-                Optional.of("git-object"),
-                Optional.of("Remote rejected the update"),
-                VerificationStatus.NOT_VERIFIED,
-                SyncStatus.FAILED);
-        BackupOutcomeSummary failed = BackupOutcomeSummary.from(
-                BackupOperation.SYNC,
-                BackupResult.aggregate(
-                        BACKUP_ID,
-                        WORLD_ID,
-                        List.of(failedGit),
-                        Instant.EPOCH.plusSeconds(3)));
-
+        BackupOutcomeSummary failed = BackupOutcomeSummary.from(BackupOperation.SYNC, result(BACKUP_ID,
+                DestinationResult.pendingSync(DestinationType.GIT, "git-object", "Remote rejected the update")
+                        .withSync(SyncStatus.FAILED)));
         assertEquals(BackupStatus.FAILED, failed.status());
         assertEquals("Backup synchronization failed", failed.headline());
-        assertEquals("sync failed", failed.destinationStatus(failed.destinations().getFirst()));
+        assertEquals(List.of("GIT: sync failed · Remote rejected the update"), failed.lines());
     }
 
     @Test
-    void verificationSummaryUsesIntegrityOutcome() {
-        DestinationResult verifiedGit = new DestinationResult(
-                DestinationType.GIT,
-                DestinationStatus.SUCCESS,
-                Optional.of("git-object"),
-                Optional.empty(),
-                VerificationStatus.VERIFIED,
-                SyncStatus.NOT_CONFIGURED);
-        DestinationResult unavailableZip = new DestinationResult(
-                DestinationType.ZIP,
-                DestinationStatus.SUCCESS,
-                Optional.of("zip-object"),
-                Optional.empty(),
-                VerificationStatus.UNAVAILABLE,
-                SyncStatus.NOT_CONFIGURED);
-
-        BackupOutcomeSummary summary = BackupOutcomeSummary.from(
-                BackupOperation.VERIFY,
-                BackupResult.aggregate(
-                        BACKUP_ID,
-                        WORLD_ID,
-                        List.of(verifiedGit, unavailableZip),
-                        Instant.EPOCH.plusSeconds(2)));
+    void verificationIsIncompleteWhileACopyCouldNotBeChecked() {
+        BackupOutcomeSummary summary = BackupOutcomeSummary.from(BackupOperation.VERIFY, result(BACKUP_ID,
+                DestinationResult.success(DestinationType.GIT, "git-object")
+                        .withVerification(VerificationStatus.VERIFIED),
+                DestinationResult.success(DestinationType.ZIP, "zip-object")
+                        .withVerification(VerificationStatus.UNAVAILABLE)));
 
         assertEquals(BackupStatus.PARTIAL_SUCCESS, summary.status());
         assertEquals("Backup verification incomplete", summary.headline());
-        assertEquals("verified", summary.destinationStatus(summary.destinations().get(0)));
-        assertEquals(
-                "verification unavailable",
-                summary.destinationStatus(summary.destinations().get(1)));
+        assertEquals(List.of("GIT: verified", "ZIP: verification unavailable"), summary.lines());
     }
 
     @Test
-    void confirmationCarriesDeleteAndRestoreIntent() {
-        BackupRow row = BackupRow.from(record());
+    void aBatchDeleteCountsOnlyBackupsWithNoCopyLeftAndNamesTheRest() {
+        BackupId removed = BackupId.parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1");
+        BackupId refused = BackupId.parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa2");
+        BackupId pending = BackupId.parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa3");
+        List<BackupRow> rows = List.of(row(removed, "Kept base"), row(refused, "Before the raid"), row(pending, "Farm"));
+        BackupResult success = result(removed, DestinationResult.success(DestinationType.ZIP, "zip"));
+        BackupResult partlyDeleted = result(refused,
+                DestinationResult.success(DestinationType.ZIP, "zip"),
+                DestinationResult.failed(DestinationType.GIT, "remote refused"));
+        BackupResult remoteWaits = result(pending,
+                DestinationResult.success(DestinationType.ZIP, "zip"),
+                DestinationResult.pendingSync(DestinationType.GIT, "refs/heads/x", "deletion pending on the remote"));
 
-        ConfirmationState delete = ConfirmationState.delete(row);
-        ConfirmationState restore = ConfirmationState.restore(row, RestoreChoice.PLAY);
+        DeleteBatchSummary all = DeleteBatchSummary.from(List.of(success), rows);
+        assertEquals(BackupStatus.SUCCESS, all.status());
+        assertEquals("Deleted 1 backup", all.headline());
+        assertTrue(all.details().isEmpty());
 
-        assertEquals(ConfirmationKind.DELETE, delete.kind());
-        assertTrue(delete.destructive());
-        assertTrue(delete.restoreChoice().isEmpty());
-        assertEquals(ConfirmationKind.RESTORE, restore.kind());
-        assertFalse(restore.destructive());
-        assertEquals(Optional.of(RestoreChoice.PLAY), restore.restoreChoice());
+        DeleteBatchSummary partial = DeleteBatchSummary.from(List.of(success, partlyDeleted), rows);
+        assertEquals(BackupStatus.PARTIAL_SUCCESS, partial.status());
+        assertEquals("Deleted 1 of 2 backups", partial.headline());
+        assertEquals(List.of(BackupText.name(rows.get(1)) + " · GIT: remote refused"), partial.details());
+
+        DeleteBatchSummary none = DeleteBatchSummary.from(List.of(partlyDeleted, remoteWaits), rows);
+        assertEquals(BackupStatus.FAILED, none.status());
+        assertEquals("No backups were deleted", none.headline());
+        assertEquals(2, none.details().size());
+        assertTrue(none.details().get(1).startsWith(BackupText.name(rows.get(2))), none.details().toString());
     }
 
-    @Test
-    void progressIsCredentialSafeAndRendererNeutral() {
-        OperationProgress progress = new OperationProgress(
-                new OperationId(UUID.fromString("cccccccc-cccc-cccc-cccc-cccccccccccc")),
-                WORLD_ID,
-                Optional.of(BACKUP_ID),
-                BackupOperation.CREATE,
-                OperationPhase.WRITING,
-                1,
-                4,
-                "Pushing with token=secret-value");
-
-        ProgressState state = ProgressState.from(progress);
-
-        assertEquals(0.25, state.fraction().orElseThrow());
-        assertEquals("Pushing with token=[REDACTED]", state.message());
-        assertFalse(state.terminal());
-        assertFalse(state.successful());
-
-        OperationProgress completed = new OperationProgress(
-                progress.operationId(),
-                WORLD_ID,
-                Optional.of(BACKUP_ID),
-                BackupOperation.CREATE,
-                OperationPhase.COMPLETE,
-                4,
-                4,
-                "Complete");
-        assertTrue(ProgressState.from(completed).terminal());
-        assertTrue(ProgressState.from(completed).successful());
+    private static BackupResult result(BackupId backupId, DestinationResult... destinations) {
+        return new BackupResult(backupId, WORLD_ID, List.of(destinations), Instant.EPOCH.plusSeconds(2));
     }
 
-    private static BackupRecord record() {
-        Instant createdAt = Instant.EPOCH.plusSeconds(1);
+    private static BackupRow row(BackupId backupId, String label) {
         BackupManifest manifest = BackupManifest.create(
-                BACKUP_ID,
+                backupId,
                 WORLD_ID,
                 "Fixture World",
-                Optional.empty(),
-                createdAt,
+                Optional.of(label),
+                Instant.EPOCH.plusSeconds(1),
                 BackupTrigger.MANUAL,
                 1,
                 10,
                 1,
                 "a".repeat(64),
-                "b".repeat(64));
-        BackupResult result = BackupResult.aggregate(
-                BACKUP_ID,
-                WORLD_ID,
-                List.of(DestinationResult.success(DestinationType.ZIP, "archive.zip")),
-                createdAt.plusSeconds(1));
-        return new BackupRecord(manifest, result);
+                "b".repeat(64),
+                Optional.empty());
+        return BackupRow.from(new BackupRecord(
+                manifest,
+                result(backupId, DestinationResult.success(DestinationType.ZIP, "archive.zip"))));
     }
 }

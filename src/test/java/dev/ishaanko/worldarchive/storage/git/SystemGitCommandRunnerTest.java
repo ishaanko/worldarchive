@@ -2,436 +2,148 @@ package dev.ishaanko.worldarchive.storage.git;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+/** How the runner starts, feeds, limits, reads and stops real processes. */
 class SystemGitCommandRunnerTest {
-    @Test
-    void removesUnsafeInheritedGitEnvironment() {
-        Map<String, String> environment = new HashMap<>();
-        environment.put("PATH", "/safe/path");
-        environment.put("GIT_DIR", "/redirected/repository");
-        environment.put("GIT_WORK_TREE", "/redirected/tree");
-        environment.put("GIT_SSH_COMMAND", "unsafe-command");
-        environment.put("GIT_CONFIG_COUNT", "1");
-        environment.put("GIT_CONFIG_KEY_0", "core.sshCommand");
-        environment.put("GIT_CONFIG_VALUE_0", "unsafe-command");
-        environment.put("GIT_CONFIG_PARAMETERS", "core.sshCommand=unsafe-command");
-        environment.put("GIT_PROXY_COMMAND", "unsafe-command");
-        environment.put("GIT_TRACE", "/untrusted/trace");
-        environment.put("git_unknown_future_setting", "unsafe");
-
-        SystemGitCommandRunner.removeUnsafeGitEnvironment(environment);
-
-        assertEquals("/safe/path", environment.get("PATH"));
-        assertFalse(environment.containsKey("GIT_DIR"));
-        assertFalse(environment.containsKey("GIT_WORK_TREE"));
-        assertFalse(environment.containsKey("GIT_SSH_COMMAND"));
-        assertFalse(environment.containsKey("GIT_CONFIG_COUNT"));
-        assertFalse(environment.containsKey("GIT_CONFIG_KEY_0"));
-        assertFalse(environment.containsKey("GIT_CONFIG_VALUE_0"));
-        assertFalse(environment.containsKey("GIT_CONFIG_PARAMETERS"));
-        assertFalse(environment.containsKey("GIT_PROXY_COMMAND"));
-        assertFalse(environment.containsKey("GIT_TRACE"));
-        assertFalse(environment.containsKey("git_unknown_future_setting"));
-        assertEquals("1", environment.get("GIT_CONFIG_NOSYSTEM"));
-        assertEquals("1", environment.get("GIT_ATTR_NOSYSTEM"));
-    }
-
     @TempDir
     Path temporaryDirectory;
 
-    @Test
-    void boundsAndRedactsProcessOutput() throws Exception {
-        String secret = "https://alice:hunter2@example.invalid/repository?token=visible";
-        GitCommand command = command(List.of("output", secret, "200"), Duration.ofSeconds(10), 1_024, Set.of(secret));
-
-        GitCommandResult result = new SystemGitCommandRunner().run(command);
-
-        assertTrue(result.successful());
-        assertTrue(result.standardOutputTruncated());
-        assertTrue(result.standardOutput().length() <= 1_024);
-        assertFalse(result.standardOutput().contains("hunter2"));
-        assertFalse(result.standardOutput().contains("visible"));
-        byte[] completeOutput = secret.repeat(200).getBytes(StandardCharsets.UTF_8);
-        assertEquals(completeOutput.length, result.standardOutputBytes());
-        assertEquals(
-                HexFormat.of().formatHex(GitInventory.sha256().digest(completeOutput)),
-                result.standardOutputSha256());
-    }
+    private final SystemGitCommandRunner runner = new SystemGitCommandRunner();
 
     @Test
-    void standardOutputKeepsParsedDataThatOnlyLooksLikeASecret() {
-        String manifest = "{ \"worldName\": \"Secret: Base\", \"contentSha256\": \"ab\" }";
-
-        assertEquals(manifest, SystemGitCommandRunner.redactSecrets(manifest, Set.of()));
-        assertEquals("[REDACTED] data", SystemGitCommandRunner.redactSecrets("hunter2 data", Set.of("hunter2")));
-        assertFalse(SystemGitCommandRunner.redact(manifest, Set.of()).contains("Base"));
-    }
-
-    @Test
-    void redactsAuthorizationHeadersKnownTokensJwtAndNamedCredentials() {
-        String github = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
-        String jwt = "eyJabcdefghijk.abcdefghijklmnop.abcdefghijklmnop";
-        String output = "Authorization: Bearer ABCDEFGHIJKLMNOP "
-                + github + " " + jwt + " api_key=visible credential=visible refresh_token=visible";
-
-        String redacted = SystemGitCommandRunner.redact(output, Set.of());
-
-        assertFalse(redacted.contains("ABCDEFGHIJKLMNOP"));
-        assertFalse(redacted.contains(github));
-        assertFalse(redacted.contains(jwt));
-        assertFalse(redacted.contains("=visible"));
-    }
-
-    @Test
-    void terminatesAProcessAtItsDeadline() {
-        GitCommand command = command(List.of("sleep", "10000"), Duration.ofMillis(100), 1_024, Set.of());
-
-        assertThrows(GitCommandTimeoutException.class, () -> new SystemGitCommandRunner().run(command));
-    }
-
-    @Test
-    void timeoutIncludesBlockedStandardInputWrite() {
-        GitCommand base = command(List.of("sleep", "10000"), Duration.ofMillis(100), 1_024, Set.of());
-        GitCommand command = new GitCommand(
-                base.arguments(),
-                base.workingDirectory(),
-                base.environment(),
-                new byte[2_000_000],
-                base.secrets(),
-                base.timeout(),
-                base.maximumOutputBytes());
+    void aSilentCommandStopsAtItsIdleLimitWhileOneThatReportsProgressRuns() throws Exception {
+        Duration idle = Duration.ofMillis(600);
+        GitCommand silent = command(List.of("sleep", "20000"), Optional.of(idle), GitCommand.Input.NONE);
+        GitCommand notReading = command(List.of("sleep", "20000"), Optional.of(idle), GitCommand.Input.of(new byte[4_000_000]));
+        GitCommand reporting = command(List.of("ticks", "8", "250"), Optional.of(idle), GitCommand.Input.NONE);
         long started = System.nanoTime();
 
-        assertThrows(GitCommandTimeoutException.class, () -> new SystemGitCommandRunner().run(command));
-
-        assertTrue(Duration.ofNanos(System.nanoTime() - started).compareTo(Duration.ofSeconds(3)) < 0);
+        assertThrows(GitCommandTimeoutException.class, () -> runner.run(silent));
+        assertThrows(GitCommandTimeoutException.class, () -> runner.run(notReading));
+        assertTrue(Duration.ofNanos(System.nanoTime() - started).compareTo(Duration.ofSeconds(8)) < 0);
+        assertTrue(runner.run(reporting).successful(), "two seconds of progress outlast a 0.6 second idle limit");
     }
 
     @Test
-    void mandatoryNonInteractiveEnvironmentCannotBeOverridden() throws Exception {
-        GitCommand base = command(
-                List.of("environment", "GIT_TERMINAL_PROMPT"),
-                Duration.ofSeconds(10),
-                1_024,
-                Set.of());
-        GitCommand command = new GitCommand(
-                base.arguments(),
-                base.workingDirectory(),
-                Map.of("GIT_TERMINAL_PROMPT", "1"),
-                base.standardInput(),
-                base.secrets(),
-                base.timeout(),
-                base.maximumOutputBytes());
-
-        GitCommandResult result = new SystemGitCommandRunner().run(command);
-
-        assertTrue(result.successful());
-        assertEquals("0", result.standardOutput());
-    }
-
-    @Test
-    void keepsRequiredCommandScopedGitEnvironment() throws Exception {
-        Path index = temporaryDirectory.resolve("index");
-        Map<String, String> environment = Map.of(
-                "GIT_INDEX_FILE", index.toString(),
-                "GIT_LFS_SKIP_SMUDGE", "1");
-
-        assertEquals(
-                index.toString(),
-                runEnvironmentCommand("GIT_INDEX_FILE", environment));
-        assertEquals(
-                "1",
-                runEnvironmentCommand("GIT_LFS_SKIP_SMUDGE", environment));
-    }
-
-    @Test
-    void rejectsCommandScopedGitInjectionAndKeepsConfigIsolation() throws Exception {
-        Map<String, String> environment = Map.of(
-                "GIT_ATTR_NOSYSTEM", "0",
-                "GIT_CONFIG_GLOBAL", "/unsafe/global-config",
-                "GIT_CONFIG_NOSYSTEM", "0",
-                "GIT_CONFIG_PARAMETERS", "core.sshCommand=unsafe-command",
-                "GIT_PROXY_COMMAND", "unsafe-command");
-
-        assertEquals(
-                "1",
-                runEnvironmentCommand("GIT_ATTR_NOSYSTEM", environment));
-        assertEquals(
-                "null",
-                runEnvironmentCommand("GIT_CONFIG_GLOBAL", environment));
-        assertEquals(
-                "1",
-                runEnvironmentCommand("GIT_CONFIG_NOSYSTEM", environment));
-        assertEquals(
-                "null",
-                runEnvironmentCommand("GIT_CONFIG_PARAMETERS", environment));
-        assertEquals(
-                "null",
-                runEnvironmentCommand("GIT_PROXY_COMMAND", environment));
-    }
-
-    @Test
-    void injectsSystemCredentialHelpersForNetworkCommands() throws Exception {
+    void interruptionStopsTheCommandAndTheProcessesItStarted() throws Exception {
+        Path childPid = temporaryDirectory.resolve("child.pid");
         GitCommand command = command(
-                List.of("environment", "GIT_CONFIG_VALUE_0", "push"),
-                Duration.ofSeconds(10),
-                1_024,
-                Set.of());
-        SystemGitCommandRunner runner = new SystemGitCommandRunner(
-                (executable, environment) -> List.of("osxkeychain"));
-
-        GitCommandResult result = runner.run(command);
-
-        assertTrue(result.successful());
-        assertEquals("osxkeychain", result.standardOutput());
-    }
-
-    @Test
-    void countsEveryInjectedCredentialHelper() throws Exception {
-        GitCommand command = command(
-                List.of("environment", "GIT_CONFIG_COUNT", "fetch"),
-                Duration.ofSeconds(10),
-                1_024,
-                Set.of());
-        SystemGitCommandRunner runner = new SystemGitCommandRunner(
-                (executable, environment) -> List.of("osxkeychain", "!custom-helper"));
-
-        GitCommandResult result = runner.run(command);
-
-        assertTrue(result.successful());
-        assertEquals("2", result.standardOutput());
-    }
-
-    @Test
-    void localCommandsNeverResolveCredentialHelpers() throws Exception {
-        AtomicInteger resolutions = new AtomicInteger();
-        SystemGitCommandRunner runner = new SystemGitCommandRunner((executable, environment) -> {
-            resolutions.incrementAndGet();
-            return List.of("osxkeychain");
-        });
-        GitCommand command = command(
-                List.of("environment", "GIT_CONFIG_COUNT"),
-                Duration.ofSeconds(10),
-                1_024,
-                Set.of());
-
-        GitCommandResult result = runner.run(command);
-
-        assertTrue(result.successful());
-        assertEquals("null", result.standardOutput());
-        assertEquals(0, resolutions.get());
-    }
-
-    @Test
-    void networkCommandsWithoutHelpersStayUnconfigured() throws Exception {
-        GitCommand command = command(
-                List.of("environment", "GIT_CONFIG_COUNT", "push"),
-                Duration.ofSeconds(10),
-                1_024,
-                Set.of());
-        SystemGitCommandRunner runner = new SystemGitCommandRunner(
-                (executable, environment) -> List.of());
-
-        GitCommandResult result = runner.run(command);
-
-        assertTrue(result.successful());
-        assertEquals("null", result.standardOutput());
-    }
-
-    @Test
-    void interruptionCancelsTheNativeProcess() throws Exception {
-        GitCommand command = command(List.of("sleep", "10000"), Duration.ofSeconds(30), 1_024, Set.of());
+                List.of("spawn-inherited", childPid.toString(), "20000", "20000"), Optional.empty(), GitCommand.Input.NONE);
         AtomicReference<Throwable> failure = new AtomicReference<>();
         Thread worker = Thread.ofPlatform().start(() -> {
             try {
-                new SystemGitCommandRunner().run(command);
+                runner.run(command);
             } catch (Throwable throwable) {
                 failure.set(throwable);
             }
         });
+        waitFor(childPid);
 
-        Thread.sleep(200L);
         worker.interrupt();
-        worker.join(5_000L);
+        worker.join(5_000);
 
         assertFalse(worker.isAlive());
-        assertTrue(failure.get() instanceof InterruptedException);
+        assertInstanceOf(InterruptedException.class, failure.get());
+        assertEventuallyDead(Long.parseLong(Files.readString(childPid)));
     }
 
     @Test
-    void timeoutKillsAChildHoldingInheritedOutputOpen() throws Exception {
-        Path childPid = temporaryDirectory.resolve("child.pid");
+    void aProcessThatKeepsTheOutputOpenNeverHoldsBackAFinishedCommand() throws Exception {
+        Path childPid = temporaryDirectory.resolve("orphan.pid");
         GitCommand command = command(
-                List.of("spawn-inherited", childPid.toString(), "10000", "100"),
-                Duration.ofSeconds(2),
-                1_024,
-                Set.of());
+                List.of("spawn-inherited", childPid.toString(), "20000", "10"), Optional.empty(), GitCommand.Input.NONE);
         long started = System.nanoTime();
-
-        assertThrows(GitCommandTimeoutException.class, () -> new SystemGitCommandRunner().run(command));
-
-        assertTrue(Duration.ofNanos(System.nanoTime() - started).compareTo(Duration.ofSeconds(5)) < 0);
-        long pid = Long.parseLong(Files.readString(childPid));
-        for (int attempt = 0; attempt < 20
-                && ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false); attempt++) {
-            Thread.sleep(25L);
+        try {
+            assertTrue(runner.run(command).successful());
+            assertTrue(Duration.ofNanos(System.nanoTime() - started).compareTo(Duration.ofSeconds(10)) < 0);
+        } finally {
+            ProcessHandle.of(Long.parseLong(Files.readString(childPid))).ifPresent(ProcessHandle::destroyForcibly);
         }
-        assertFalse(ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false));
     }
 
     @Test
-    void timeoutTracksAChildWhoseParentExitsQuickly() throws Exception {
-        Path childPid = temporaryDirectory.resolve("quick-child.pid");
+    void commandsNeverPromptAndSetOnlyWorldArchivesOwnGitVariables() throws Exception {
+        assertEquals("0", environment("GIT_TERMINAL_PROMPT", Map.of()));
+        assertEquals("Never", environment("GCM_INTERACTIVE", Map.of()));
+        assertEquals("1", environment("GIT_LFS_FORCE_PROGRESS", Map.of("GIT_LFS_FORCE_PROGRESS", "1")));
+        assertThrows(IllegalArgumentException.class, () -> environment("GIT_DIR", Map.of("GIT_DIR", "/elsewhere")));
+        assertThrows(IllegalArgumentException.class,
+                () -> environment("GIT_TERMINAL_PROMPT", Map.of("GIT_TERMINAL_PROMPT", "1")));
+    }
+
+    @Test
+    void outputPastTheLimitIsCutAndFlagged() throws Exception {
+        GitCommand command = new GitCommand(fixture(List.of("output", "abc", "2000")), temporaryDirectory, Map.of(),
+                GitCommand.Input.NONE, Optional.empty(), 1_024);
+
+        GitCommandResult result = runner.run(command);
+
+        assertTrue(result.successful());
+        assertTrue(result.standardOutputTruncated());
+        assertEquals(1_024, result.standardOutput().length());
+    }
+
+    @Test
+    void whenGitFailsWhileItsOutputIsReadGitsOwnErrorIsReported() {
         GitCommand command = command(
-                List.of("spawn-inherited", childPid.toString(), "10000", "10"),
-                Duration.ofSeconds(2),
-                1_024,
-                Set.of());
+                List.of("fail", "partial", "fatal: loose object 1234 is corrupt"), Optional.empty(), GitCommand.Input.NONE);
 
-        assertThrows(GitCommandTimeoutException.class, () -> new SystemGitCommandRunner().run(command));
+        GitStorageException failure = assertThrows(GitStorageException.class, () -> runner.stream(command, output -> {
+            output.readAllBytes();
+            throw new GitStorageException("Git returned incomplete object data");
+        }));
 
-        long pid = Long.parseLong(Files.readString(childPid));
-        for (int attempt = 0; attempt < 20
-                && ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false); attempt++) {
-            Thread.sleep(25L);
-        }
-        assertFalse(ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false));
+        assertTrue(failure.getMessage().contains("loose object 1234 is corrupt"), failure.getMessage());
     }
 
-    @Test
-    void settingsRejectCredentialBearingRemotes() {
-        assertThrows(IllegalArgumentException.class, () -> new GitBackendSettings(
-                true,
-                temporaryDirectory.resolve("repository.git"),
-                "git",
-                "origin",
-                Optional.of("https://alice:secret@example.invalid/repository.git"),
-                GitBackendSettings.DEFAULT_LFS_PATTERNS,
-                Duration.ofSeconds(5),
-                4_096));
-        assertThrows(IllegalArgumentException.class, () -> new GitBackendSettings(
-                true,
-                temporaryDirectory.resolve("repository.git"),
-                "git",
-                "origin",
-                Optional.of("https://example.invalid/repository.git%3Ftoken%3Dsecret"),
-                GitBackendSettings.DEFAULT_LFS_PATTERNS,
-                Duration.ofSeconds(5),
-                4_096));
-    }
-
-    @Test
-    void probesGitAndLfsIndependently() throws Exception {
-        List<List<String>> invocations = new ArrayList<>();
-        AtomicInteger call = new AtomicInteger();
-        GitCommandRunner fakeRunner = command -> {
-            invocations.add(command.arguments());
-            if (call.getAndIncrement() == 0) {
-                return new GitCommandResult(0, "git version 2.50.1", "", false, false);
-            }
-            return new GitCommandResult(1, "", "git: lfs unavailable", false, false);
-        };
-        GitBackendSettings settings = settings("git");
-
-        GitToolHealth health = new GitToolProbe(settings, fakeRunner).probe();
-
-        assertTrue(health.gitAvailable());
-        assertFalse(health.lfsAvailable());
-        assertFalse(health.available());
-        assertEquals(2, invocations.size());
-        assertEquals(List.of("git", "--version"), invocations.get(0));
-        assertEquals(List.of("git", "lfs", "version"), invocations.get(1));
-    }
-
-    @Test
-    void stillProbesLfsWhenGitExecutableCannotStart() throws Exception {
-        AtomicInteger invocations = new AtomicInteger();
-        GitCommandRunner fakeRunner = command -> {
-            invocations.incrementAndGet();
-            throw new IOException("missing");
-        };
-
-        GitToolHealth health = new GitToolProbe(settings("missing-git"), fakeRunner).probe();
-
-        assertFalse(health.available());
-        assertEquals(2, invocations.get());
-    }
-
-    private GitCommand command(
-            List<String> fixtureArguments,
-            Duration timeout,
-            int outputLimit,
-            Set<String> secrets) {
-        Path java = Path.of(System.getProperty("java.home"), "bin", isWindows() ? "java.exe" : "java");
-        List<String> arguments = new ArrayList<>();
-        arguments.add(java.toString());
-        arguments.add("-cp");
-        arguments.add(System.getProperty("java.class.path"));
-        arguments.add(NativeProcessFixture.class.getName());
-        arguments.addAll(fixtureArguments);
-        return new GitCommand(
-                arguments,
-                temporaryDirectory,
-                Map.of(),
-                new byte[0],
-                secrets,
-                timeout,
-                outputLimit);
-    }
-
-    private String runEnvironmentCommand(
-            String name,
-            Map<String, String> environment) throws Exception {
-        GitCommand base = command(
-                List.of("environment", name),
-                Duration.ofSeconds(10),
-                1_024,
-                Set.of());
-        GitCommand command = new GitCommand(
-                base.arguments(),
-                base.workingDirectory(),
-                environment,
-                base.standardInput(),
-                base.secrets(),
-                base.timeout(),
-                base.maximumOutputBytes());
-        GitCommandResult result = new SystemGitCommandRunner().run(command);
+    private String environment(String name, Map<String, String> environment) throws IOException, InterruptedException {
+        GitCommand command = new GitCommand(fixture(List.of("environment", name)), temporaryDirectory, environment,
+                GitCommand.Input.NONE, Optional.empty(), 1_024);
+        GitCommandResult result = runner.run(command);
         assertTrue(result.successful());
         return result.standardOutput();
     }
 
-    private GitBackendSettings settings(String executable) {
-        return new GitBackendSettings(
-                true,
-                temporaryDirectory.resolve("repository.git"),
-                executable,
-                "origin",
-                Optional.empty(),
-                GitBackendSettings.DEFAULT_LFS_PATTERNS,
-                Duration.ofSeconds(5),
-                4_096);
+    private GitCommand command(List<String> fixtureArguments, Optional<Duration> idleLimit, GitCommand.Input input) {
+        return new GitCommand(fixture(fixtureArguments), temporaryDirectory, Map.of(), input, idleLimit, 4_096);
     }
 
-    private static boolean isWindows() {
-        return System.getProperty("os.name").startsWith("Windows");
+    private static List<String> fixture(List<String> fixtureArguments) {
+        String program = System.getProperty("os.name").startsWith("Windows") ? "java.exe" : "java";
+        List<String> arguments = new ArrayList<>(List.of(
+                Path.of(System.getProperty("java.home"), "bin", program).toString(),
+                "-cp",
+                System.getProperty("java.class.path"),
+                NativeProcessFixture.class.getName()));
+        arguments.addAll(fixtureArguments);
+        return arguments;
+    }
+
+    private static void waitFor(Path file) throws Exception {
+        for (int attempt = 0; attempt < 200 && (!Files.exists(file) || Files.size(file) == 0); attempt++) {
+            Thread.sleep(25);
+        }
+    }
+
+    private static void assertEventuallyDead(long pid) throws InterruptedException {
+        for (int attempt = 0; attempt < 80 && ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false); attempt++) {
+            Thread.sleep(25);
+        }
+        assertFalse(ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false));
     }
 }

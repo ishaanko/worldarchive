@@ -1,15 +1,16 @@
 package dev.ishaanko.worldarchive.ui;
 
-import dev.ishaanko.worldarchive.ui.model.ConfirmationState;
 import dev.ishaanko.worldarchive.ui.model.ScreenGeometry;
 import java.util.Objects;
-import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.MultiLineTextWidget;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 
-/** Small native confirmation screen shared by deletion and copy-only restoration. */
+/**
+ * Asks once before a delete or a copy-only restore. The confirm action runs at most once; Cancel
+ * and Esc return to the parent screen.
+ */
 final class BackupConfirmationScreen extends Screen {
     private static final int CONTENT_MIN = 180;
 
@@ -19,16 +20,24 @@ final class BackupConfirmationScreen extends Screen {
 
     private final Screen parent;
 
-    private final ConfirmationState state;
+    private final Component prompt;
+
+    private final Component confirmLabel;
 
     private final Runnable confirmed;
 
     private boolean consumed;
 
-    BackupConfirmationScreen(Screen parent, ConfirmationState state, Runnable confirmed) {
-        super(Component.literal(Objects.requireNonNull(state, "state").title()));
+    BackupConfirmationScreen(
+            Screen parent,
+            Component title,
+            Component prompt,
+            Component confirmLabel,
+            Runnable confirmed) {
+        super(title);
         this.parent = Objects.requireNonNull(parent, "parent");
-        this.state = state;
+        this.prompt = Objects.requireNonNull(prompt, "prompt");
+        this.confirmLabel = Objects.requireNonNull(confirmLabel, "confirmLabel");
         this.confirmed = Objects.requireNonNull(confirmed, "confirmed");
     }
 
@@ -43,23 +52,19 @@ final class BackupConfirmationScreen extends Screen {
                 contentWidth,
                 20,
                 title));
-        MultiLineTextWidget prompt = new MultiLineTextWidget(
+        MultiLineTextWidget promptWidget = new MultiLineTextWidget(
                         contentX,
                         ScreenGeometry.anchorMiddle(38, height, -44),
-                        Component.literal(state.prompt()),
+                        prompt,
                         font)
                 .setMaxWidth(contentWidth)
                 .setCentered(true);
-        prompt.setWidth(contentWidth);
-        addRenderableOnly(prompt);
+        promptWidget.setWidth(contentWidth);
+        addRenderableOnly(promptWidget);
 
         int buttonWidth = Math.min(150, Math.max(80, (contentWidth - 6) / 2));
-        int buttonY = Math.min(height - 28, Math.max(height / 2 + 30, prompt.getBottom() + 16));
-        Component confirmText = switch (state.kind()) {
-            case DELETE -> Component.literal("Delete").withStyle(ChatFormatting.RED);
-            case RESTORE -> Component.literal("Restore");
-        };
-        addRenderableWidget(Button.builder(confirmText, ignored -> confirm())
+        int buttonY = Math.min(height - 28, Math.max(height / 2 + 30, promptWidget.getBottom() + 16));
+        addRenderableWidget(Button.builder(confirmLabel, ignored -> confirm())
                 .bounds(width / 2 - buttonWidth - 3, buttonY, buttonWidth, 20)
                 .build());
         addRenderableWidget(Button.builder(Component.literal("Cancel"), ignored -> onClose())
@@ -68,11 +73,10 @@ final class BackupConfirmationScreen extends Screen {
     }
 
     private void confirm() {
-        if (consumed) {
-            return;
+        if (!consumed) {
+            consumed = true;
+            confirmed.run();
         }
-        consumed = true;
-        confirmed.run();
     }
 
     @Override

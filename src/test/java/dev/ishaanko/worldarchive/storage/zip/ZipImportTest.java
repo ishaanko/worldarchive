@@ -1,29 +1,30 @@
 package dev.ishaanko.worldarchive.storage.zip;
 
-import dev.ishaanko.worldarchive.core.Digests;
+import static dev.ishaanko.worldarchive.storage.zip.ZipTestFixtures.CREATED_AT;
+import static dev.ishaanko.worldarchive.storage.zip.ZipTestFixtures.NO_PROGRESS;
+import static dev.ishaanko.worldarchive.storage.zip.ZipTestFixtures.capture;
+import static dev.ishaanko.worldarchive.storage.zip.ZipTestFixtures.files;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.ishaanko.worldarchive.config.FolderOrigin;
 import dev.ishaanko.worldarchive.core.BackupCapture;
-import dev.ishaanko.worldarchive.model.BackupId;
+import dev.ishaanko.worldarchive.core.TestCaptures;
+import dev.ishaanko.worldarchive.core.WorldInventory;
 import dev.ishaanko.worldarchive.model.BackupManifest;
 import dev.ishaanko.worldarchive.model.BackupTrigger;
 import dev.ishaanko.worldarchive.model.WorldId;
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Instant;
-import java.util.ArrayList;
+import java.nio.file.StandardOpenOption;
 import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.stream.Stream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -32,196 +33,117 @@ final class ZipImportTest {
     Path temporaryDirectory;
 
     @Test
-    void scansAndCopiesOnlyPinnedWorldArchiveArchives() throws Exception {
-        Path world = Files.createDirectories(temporaryDirectory.resolve("world"));
-        Files.writeString(world.resolve("level.dat"), "world-data");
-        BackupManifest manifest = manifest(world);
-        Path sourceRoot = temporaryDirectory.resolve("source-archives");
-        new ZipBackupStore(sourceRoot).create(new BackupCapture(world, manifest));
-        Files.writeString(sourceRoot.resolve("not-a-backup.zip"), "not a zip");
+    void offersOnlyWorldArchiveBackupsAndImportsThemOnce() throws Exception {
+        Path source = temporaryDirectory.resolve("downloads");
+        ZipBackupArtifact backup = new ZipBackupStore(source, FolderOrigin.DEFAULT)
+                .create(worldCapture("world", "world-data"), NO_PROGRESS);
+        Files.writeString(source.resolve("not-a-zip.zip"), "not a zip");
+        try (ZipOutputStream modpack = new ZipOutputStream(Files.newOutputStream(source.resolve("modpack.zip")))) {
+            modpack.putNextEntry(new ZipEntry("mods/readme.txt"));
+            modpack.write("a modpack".getBytes(StandardCharsets.UTF_8));
+        }
+        ZipBackupStore managed = new ZipBackupStore(temporaryDirectory.resolve("managed"), FolderOrigin.DEFAULT);
 
-        ZipImportScan scan = new ZipImportScanner().scan(sourceRoot);
+        ZipImportScan scan = new ZipImportScanner().scan(source);
+        ZipBackupArtifact imported = managed.importCopy(scan.candidates().getFirst());
+        ZipBackupArtifact again = managed.importCopy(scan.candidates().getFirst());
 
         assertEquals(1, scan.candidates().size());
-        assertEquals(1, scan.issues().size());
-        ZipImportCandidate candidate = scan.candidates().getFirst();
-        ZipBackupStore managed = new ZipBackupStore(temporaryDirectory.resolve("managed"));
-        ZipBackupArtifact copied = managed.importCopy(candidate);
-        assertTrue(managed.verify(copied.archivePath()).valid());
-        assertEquals(manifest, copied.manifest());
-    }
-
-    @Test
-    void rejectsEveryArchiveWhenBackupIdentityIsDuplicated() throws Exception {
-        Path world = Files.createDirectories(temporaryDirectory.resolve("duplicate-world"));
-        Files.writeString(world.resolve("level.dat"), "world-data");
-        Path sourceRoot = temporaryDirectory.resolve("duplicate-archives");
-        ZipBackupArtifact source = new ZipBackupStore(sourceRoot)
-                .create(new BackupCapture(world, manifest(world)));
-        Files.copy(source.archivePath(), sourceRoot.resolve("duplicate.zip"));
-
-        ZipImportScan scan = new ZipImportScanner().scan(sourceRoot);
-
-        assertTrue(scan.candidates().isEmpty());
         assertEquals(2, scan.issues().size());
-        assertTrue(scan.issues().stream().allMatch(issue ->
-                issue.message().contains("same backup identity")));
+        assertEquals(backup.manifest(), imported.manifest());
+        assertEquals(imported, again);
+        assertTrue(managed.verify(imported.archivePath()).valid());
+        assertArrayEquals(Files.readAllBytes(backup.archivePath()), Files.readAllBytes(imported.archivePath()));
+        assertTrue(Files.isRegularFile(backup.archivePath()));
     }
 
     @Test
-    void rejectsAnOversizedChecksumSidecar() throws Exception {
-        Path world = Files.createDirectories(temporaryDirectory.resolve("sidecar-world"));
-        Files.writeString(world.resolve("level.dat"), "world-data");
-        Path sourceRoot = temporaryDirectory.resolve("sidecar-source");
-        ZipBackupArtifact source = new ZipBackupStore(sourceRoot)
-                .create(new BackupCapture(world, manifest(world)));
-        Files.writeString(
-                source.checksumPath(),
-                "0".repeat(ZipLimits.MAXIMUM_CHECKSUM_BYTES + 1));
+    void identicalCopiesCountOnceAndDifferentFilesForOneBackupAreRefused() throws Exception {
+        Path source = temporaryDirectory.resolve("source");
+        ZipBackupArtifact copied =
+                new ZipBackupStore(source.resolve("archives"), FolderOrigin.DEFAULT)
+                        .create(worldCapture("copied", "a"), NO_PROGRESS);
+        Path copy = Files.createDirectories(source.resolve("archives - Copy").resolve("folder"));
+        Files.copy(copied.archivePath(), copy.resolve(copied.archivePath().getFileName()));
+        BackupCapture claimed = worldCapture("claimed", "b");
+        new ZipBackupStore(source.resolve("first"), FolderOrigin.DEFAULT).create(claimed, NO_PROGRESS);
+        Path other = ZipTestFixtures.world(temporaryDirectory.resolve("other"), files("level.dat", "different data"));
+        WorldInventory otherInventory = TestCaptures.inventoryOf(other);
+        BackupManifest sameBackupOtherData = BackupManifest.create(
+                claimed.manifest().backupId(), claimed.manifest().worldId(), "Test World", Optional.empty(),
+                CREATED_AT, BackupTrigger.MANUAL, otherInventory.fileCount(), otherInventory.byteCount(), 1,
+                otherInventory.contentSha256(), otherInventory.inventorySha256(), Optional.empty());
+        new ZipBackupStore(source.resolve("second"), FolderOrigin.DEFAULT)
+                .create(new BackupCapture(other, sameBackupOtherData, otherInventory), NO_PROGRESS);
 
-        ZipImportScan scan = new ZipImportScanner().scan(sourceRoot);
+        ZipImportScan scan = new ZipImportScanner().scan(source);
 
-        assertTrue(scan.candidates().isEmpty());
-        assertEquals(1, scan.issues().size());
+        assertEquals(List.of(copied.manifest()), scan.candidates().stream().map(ZipImportCandidate::manifest).toList());
+        assertEquals(2, scan.issues().size());
     }
 
     @Test
-    void boundedSidecarReaderRejectsMalformedUtf8() throws Exception {
-        Path sidecar = temporaryDirectory.resolve("malformed.sha256");
-        Files.write(sidecar, new byte[] {(byte) 0xff});
-
-        assertThrows(IOException.class, () -> ZipImportScanner.readSidecar(sidecar));
-    }
-
-    @Test
-    void boundedSidecarReaderPreservesNormalManagedText() throws Exception {
-        Path sidecar = temporaryDirectory.resolve("normal.sha256");
-        String expected = "0".repeat(64) + "  archive 世界.zip\n";
-        Files.writeString(sidecar, expected, StandardCharsets.UTF_8);
-
-        assertEquals(expected, ZipImportScanner.readSidecar(sidecar));
-    }
-
-    @Test
-    void importWaitsForCreateThroughTheSharedWorldLock() throws Exception {
-        Path world = Files.createDirectories(temporaryDirectory.resolve("locked-world"));
-        Files.writeString(world.resolve("level.dat"), "world-data");
-        BackupManifest manifest = manifest(world);
-        Path sourceRoot = temporaryDirectory.resolve("locked-source");
-        new ZipBackupStore(sourceRoot).create(new BackupCapture(world, manifest));
-        ZipImportCandidate candidate = new ZipImportScanner()
-                .scan(sourceRoot)
-                .candidates()
-                .getFirst();
-        Path managedRoot = temporaryDirectory.resolve("locked-managed");
-        Path managedWorld = managedRoot.resolve(manifest.worldId().toString());
-        CountDownLatch createEntered = new CountDownLatch(1);
-        CountDownLatch releaseCreate = new CountDownLatch(1);
-        ZipStoreHooks hooks = new ZipStoreHooks() {
-            @Override
-            public void archiveCompleted(Path partialArchive) throws IOException {
-                createEntered.countDown();
-                try {
-                    if (!releaseCreate.await(5, TimeUnit.SECONDS)) {
-                        throw new IOException("Timed out while the test held ZIP creation");
-                    }
-                } catch (InterruptedException exception) {
-                    Thread.currentThread().interrupt();
-                    throw new IOException("ZIP creation test wait was interrupted", exception);
-                }
-            }
-        };
-        ZipBackupStore creating = new ZipBackupStore(managedRoot, hooks);
-        ZipBackupStore importing = new ZipBackupStore(managedRoot);
-        ReentrantLock operationLock = ZipBackupStore.processLock(managedWorld);
-
-        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            Future<ZipBackupArtifact> created = executor.submit(
-                    () -> creating.create(new BackupCapture(world, manifest)));
-            assertTrue(createEntered.await(5, TimeUnit.SECONDS));
-            CountDownLatch importStarted = new CountDownLatch(1);
-            Future<ZipBackupArtifact> imported;
-            try {
-                imported = executor.submit(() -> {
-                    importStarted.countDown();
-                    return importing.importCopy(candidate);
-                });
-                assertTrue(importStarted.await(5, TimeUnit.SECONDS));
-                assertTrue(
-                        waitForQueuedThread(operationLock),
-                        "ZIP import did not wait for the active create operation");
-            } finally {
-                releaseCreate.countDown();
-            }
-
-            ZipBackupArtifact createdArtifact = created.get(10, TimeUnit.SECONDS);
-            ZipBackupArtifact importedArtifact = imported.get(10, TimeUnit.SECONDS);
-            assertEquals(createdArtifact, importedArtifact);
-            assertEquals(List.of(createdArtifact), importing.listCompleteArchives());
-        }
-    }
-
-    @Test
-    void resumesImportFromAMatchingChecksumOnlyDestination() throws Exception {
-        Path world = Files.createDirectories(temporaryDirectory.resolve("resumed-world"));
-        Files.writeString(world.resolve("level.dat"), "world-data");
-        BackupManifest manifest = manifest(world);
-        Path sourceRoot = temporaryDirectory.resolve("resumed-source");
-        new ZipBackupStore(sourceRoot).create(new BackupCapture(world, manifest));
-        ZipImportCandidate candidate = new ZipImportScanner()
-                .scan(sourceRoot)
-                .candidates()
-                .getFirst();
-        Path managedRoot = temporaryDirectory.resolve("resumed-managed");
-        Path managedWorld = Files.createDirectories(
-                managedRoot.resolve(manifest.worldId().toString()));
-        String archiveName = ZipBackupStore.archiveFilename(manifest);
-        Path checksum = managedWorld.resolve(archiveName + ".sha256");
-        String checksumText =
-                candidate.archiveSha256() + "  " + archiveName + System.lineSeparator();
-        Files.writeString(checksum, checksumText);
-        ZipBackupStore managed = new ZipBackupStore(managedRoot);
+    void leftoversOfAnInterruptedImportDoNotBlockTheNextOne() throws Exception {
+        Path source = temporaryDirectory.resolve("source");
+        new ZipBackupStore(source, FolderOrigin.DEFAULT)
+                .create(worldCapture("world", "world-data"), NO_PROGRESS);
+        ZipImportCandidate candidate = new ZipImportScanner().scan(source).candidates().getFirst();
+        ZipBackupStore managed = new ZipBackupStore(temporaryDirectory.resolve("managed"), FolderOrigin.DEFAULT);
+        ManagedZipArchive target = ManagedZipArchive.of(managed.root(), candidate.manifest());
+        Files.createDirectories(target.folder());
+        Files.writeString(target.archive().resolveSibling(target.name() + ".importing"), "half a copy");
+        Files.writeString(target.checksum(), candidate.archiveSha256() + "  " + target.name() + "\r\n");
 
         ZipBackupArtifact imported = managed.importCopy(candidate);
 
-        assertTrue(Files.isRegularFile(imported.archivePath()));
-        assertEquals(checksumText, Files.readString(checksum));
-        assertTrue(Files.isRegularFile(managedWorld.resolve(".worldarchive.lock")));
         assertTrue(managed.verify(imported.archivePath()).valid());
-        assertEquals(List.of(imported), managed.listCompleteArchives());
+        assertEquals(List.of(target.name(), target.name() + ".sha256"), fileNames(target.folder()));
     }
 
-    private static boolean waitForQueuedThread(ReentrantLock lock) throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (System.nanoTime() < deadline) {
-            if (lock.hasQueuedThreads()) {
-                return true;
-            }
-            Thread.sleep(10);
-        }
-        return lock.hasQueuedThreads();
+    @Test
+    void aFileThatChangedAfterThePreviewIsNotImported() throws Exception {
+        Path source = temporaryDirectory.resolve("source");
+        ZipBackupArtifact backup = new ZipBackupStore(source, FolderOrigin.DEFAULT)
+                .create(worldCapture("world", "world-data"), NO_PROGRESS);
+        ZipImportCandidate candidate = new ZipImportScanner().scan(source).candidates().getFirst();
+        Files.write(backup.archivePath(), new byte[] {1}, StandardOpenOption.APPEND);
+        ZipBackupStore managed = new ZipBackupStore(temporaryDirectory.resolve("managed"), FolderOrigin.DEFAULT);
+
+        assertThrows(ZipBackupException.class, () -> managed.importCopy(candidate));
+
+        assertEquals(List.of(), fileNames(ManagedZipArchive.of(managed.root(), candidate.manifest()).folder()));
     }
 
-    private static BackupManifest manifest(Path world) throws Exception {
-        List<ZipInventoryEntry> files = new ArrayList<>();
-        for (ZipSourceScanner.SourceEntry entry : ZipSourceScanner.snapshot(world).entries()) {
-            if (!entry.directory()) {
-                files.add(new ZipInventoryEntry(
-                        entry.relativePath(), entry.size(), Digests.sha256(entry.path())));
-            }
+    @Test
+    void aDifferentFileAlreadyStoredForTheBackupIsNeverReplaced() throws Exception {
+        Path source = temporaryDirectory.resolve("source");
+        new ZipBackupStore(source, FolderOrigin.DEFAULT)
+                .create(worldCapture("world", "world-data"), NO_PROGRESS);
+        ZipImportCandidate candidate = new ZipImportScanner().scan(source).candidates().getFirst();
+        ZipBackupStore managed = new ZipBackupStore(temporaryDirectory.resolve("managed"), FolderOrigin.DEFAULT);
+        Path stored = ManagedZipArchive.of(managed.root(), candidate.manifest()).archive();
+        Files.createDirectories(stored.getParent());
+        Files.writeString(stored, "another file under the same name");
+
+        assertThrows(ZipBackupException.class, () -> managed.importCopy(candidate));
+
+        assertEquals("another file under the same name", Files.readString(stored));
+    }
+
+    private BackupCapture worldCapture(String name, String level) throws Exception {
+        Path world = ZipTestFixtures.world(temporaryDirectory.resolve("world-" + name), files("level.dat", level));
+        return capture(world, WorldId.create(), CREATED_AT);
+    }
+
+    private static List<String> fileNames(Path folder) throws Exception {
+        if (!Files.isDirectory(folder)) {
+            return List.of();
         }
-        ZipInventory inventory = ZipInventory.create(files);
-        return BackupManifest.create(
-                BackupId.create(),
-                WorldId.create(),
-                "Imported World",
-                Optional.of("Recovery"),
-                Instant.parse("2026-07-21T20:00:00Z"),
-                BackupTrigger.MANUAL,
-                inventory.fileCount(),
-                inventory.byteCount(),
-                inventory.fileCount(),
-                ZipDigests.contentSha256(inventory.files()),
-                inventory.inventorySha256());
+        try (Stream<Path> files = Files.list(folder)) {
+            return files.map(file -> file.getFileName().toString())
+                    .filter(name -> !name.equals(".worldarchive.lock"))
+                    .sorted()
+                    .toList();
+        }
     }
 }

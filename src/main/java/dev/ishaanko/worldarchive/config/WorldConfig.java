@@ -5,7 +5,7 @@ import java.nio.file.Path;
 import java.util.Objects;
 import java.util.Optional;
 
-/** Per-world enablement, source path, and optional destination overrides. */
+/** One world's settings: whether it is backed up, where its folder is, and its own remote and ZIP folder. */
 public record WorldConfig(
         WorldId worldId,
         boolean enabled,
@@ -23,30 +23,28 @@ public record WorldConfig(
         Objects.requireNonNull(storagePolicy, "storagePolicy");
     }
 
-    public WorldConfig(
-            WorldId worldId,
-            boolean enabled,
-            Path path,
-            Optional<String> remoteUrl,
-            Optional<Path> zipDestination) {
-        this(
-                worldId,
-                enabled,
-                path,
-                remoteUrl,
-                zipDestination,
-                StoragePolicy.defaults());
+    /** Settings for a world seen for the first time: backed up, with no remote or own ZIP folder. */
+    public static WorldConfig defaults(WorldId worldId, Path path) {
+        return new WorldConfig(worldId, true, path, Optional.empty(), Optional.empty(), StoragePolicy.defaults());
     }
 
-    public WorldConfig(
-            WorldId worldId,
-            boolean enabled,
-            Path path,
-            Optional<String> remoteUrl) {
-        this(worldId, enabled, path, remoteUrl, Optional.empty());
+    public WorldConfig withEnabled(boolean enabled) {
+        return new WorldConfig(worldId, enabled, path, remoteUrl, zipDestination, storagePolicy);
     }
 
-    public WorldConfig(WorldId worldId, boolean enabled, Path path) {
-        this(worldId, enabled, path, Optional.empty(), Optional.empty());
+    public WorldConfig withPath(Path path) {
+        return new WorldConfig(worldId, enabled, path, remoteUrl, zipDestination, storagePolicy);
+    }
+
+    public WorldConfig withRemoteUrl(Optional<String> remoteUrl) {
+        return new WorldConfig(worldId, enabled, path, remoteUrl, zipDestination, storagePolicy);
+    }
+
+    public WorldConfig withZipDestination(Optional<Path> zipDestination) {
+        return new WorldConfig(worldId, enabled, path, remoteUrl, zipDestination, storagePolicy);
+    }
+
+    public WorldConfig withStoragePolicy(StoragePolicy storagePolicy) {
+        return new WorldConfig(worldId, enabled, path, remoteUrl, zipDestination, storagePolicy);
     }
 }

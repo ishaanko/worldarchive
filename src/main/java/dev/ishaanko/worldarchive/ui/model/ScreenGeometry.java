@@ -17,11 +17,6 @@ public final class ScreenGeometry {
         return (screenWidth - contentWidth) / 2;
     }
 
-    /** Row anchored to the bottom of the screen, never rising above {@code minY}. */
-    public static int anchorBottom(int minY, int screenHeight, int offset) {
-        return Math.max(minY, screenHeight - offset);
-    }
-
     /** Row anchored to the screen's vertical middle, never rising above {@code minY}. */
     public static int anchorMiddle(int minY, int screenHeight, int offset) {
         return Math.max(minY, screenHeight / 2 + offset);

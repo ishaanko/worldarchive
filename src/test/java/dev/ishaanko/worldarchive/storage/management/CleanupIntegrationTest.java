@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.ishaanko.worldarchive.catalog.FileBackupCatalog;
 import dev.ishaanko.worldarchive.catalog.FileBackupDeletionRegistry;
+import dev.ishaanko.worldarchive.config.FolderOrigin;
 import dev.ishaanko.worldarchive.config.GitDestinationConfig;
 import dev.ishaanko.worldarchive.config.StoragePolicy;
 import dev.ishaanko.worldarchive.config.TriggerConfig;
@@ -13,7 +14,8 @@ import dev.ishaanko.worldarchive.config.WorldArchiveConfig;
 import dev.ishaanko.worldarchive.config.WorldConfig;
 import dev.ishaanko.worldarchive.config.ZipDestinationConfig;
 import dev.ishaanko.worldarchive.core.BackupCapture;
-import dev.ishaanko.worldarchive.core.ProgressListener;
+import dev.ishaanko.worldarchive.core.LockingWorldOperationGate;
+import dev.ishaanko.worldarchive.core.TestCaptures;
 import dev.ishaanko.worldarchive.core.WorldInventory;
 import dev.ishaanko.worldarchive.importing.FileBackupImportService;
 import dev.ishaanko.worldarchive.importing.FileImportSourceRegistry;
@@ -24,6 +26,7 @@ import dev.ishaanko.worldarchive.model.BackupResult;
 import dev.ishaanko.worldarchive.model.BackupTrigger;
 import dev.ishaanko.worldarchive.model.DestinationResult;
 import dev.ishaanko.worldarchive.model.DestinationType;
+import dev.ishaanko.worldarchive.model.ProgressListener;
 import dev.ishaanko.worldarchive.model.SyncStatus;
 import dev.ishaanko.worldarchive.model.VerificationStatus;
 import dev.ishaanko.worldarchive.model.WorldId;
@@ -94,25 +97,24 @@ final class CleanupIntegrationTest {
                 new GitBackendSettings(
                         true,
                         temporaryDirectory.resolve("git"),
+                        FolderOrigin.DEFAULT,
                         "git",
                         "origin",
                         Optional.empty(),
                         GitDestinationConfig.DEFAULT_LFS_PATTERNS,
                         GitBackendSettings.DEFAULT_COMMAND_TIMEOUT,
                         GitBackendSettings.DEFAULT_MAXIMUM_OUTPUT_BYTES),
-                Optional.empty(),
                 Map.of(worldId, remote.toUri().toString()),
                 new SystemGitCommandRunner(),
                 executor);
         Assumptions.assumeTrue(await(git.probeTools()).available(), "git and git-lfs required");
-        zipStore = new ZipBackupStore(temporaryDirectory.resolve("archives"));
+        zipStore = new ZipBackupStore(temporaryDirectory.resolve("archives"), FolderOrigin.DEFAULT);
         catalog = new FileBackupCatalog(temporaryDirectory.resolve("catalog.json"));
         deletions = new FileBackupDeletionRegistry(temporaryDirectory.resolve("deleted.txt"));
     }
 
     @AfterEach
     void tearDown() {
-        git.close();
         executor.shutdownNow();
     }
 
@@ -145,9 +147,9 @@ final class CleanupIntegrationTest {
             BackupRecord record = catalog.find(removed).orElseThrow();
             assertEquals(List.of(DestinationType.GIT), record.result().destinations().stream()
                     .map(DestinationResult::destination).toList());
-            assertFalse(deletions.contains(removed));
+            assertFalse(deletions.marked().contains(removed));
         }
-        assertEquals(Set.of(newest), await(git.listCurrentSnapshots(worldId)).stream()
+        assertEquals(Set.of(newest), await(git.listSnapshots(Optional.of(worldId))).stream()
                 .map(snapshot -> snapshot.backupId()).collect(Collectors.toSet()));
         assertEquals(1, zipStore.listArchives().size());
         assertEquals(2, lfsObjectCount(), "only the newest snapshot's objects remain");
@@ -156,7 +158,7 @@ final class CleanupIntegrationTest {
 
         imports().rebuildLocal().toCompletableFuture().get(30, TimeUnit.SECONDS);
         assertEquals(3, catalog.list(worldId).size());
-        assertEquals(1, await(git.listCurrentSnapshots(worldId)).size());
+        assertEquals(1, await(git.listSnapshots(Optional.of(worldId))).size());
     }
 
     @Test
@@ -167,7 +169,7 @@ final class CleanupIntegrationTest {
                 remoteRef(newest));
         catalog.update(newest, record -> new BackupRecord(
                 record.manifest(),
-                BackupResult.aggregate(
+                new BackupResult(
                         newest,
                         worldId,
                         record.result().destinations().stream()
@@ -191,7 +193,7 @@ final class CleanupIntegrationTest {
         assertEquals(Map.of(), result.failures());
 
         assertFalse(catalog.find(newest).isPresent());
-        assertTrue(deletions.contains(newest));
+        assertTrue(deletions.marked().contains(newest));
         BackupRecord kept = catalog.find(older).orElseThrow();
         assertEquals(
                 List.of(DestinationType.GIT, DestinationType.ZIP),
@@ -199,8 +201,51 @@ final class CleanupIntegrationTest {
                         .map(DestinationResult::destination).toList(),
                 "the synchronized remote copy stays in the catalog");
         assertEquals(Set.of(older), remoteBackupIds());
-        assertTrue(await(git.listCurrentSnapshots(worldId)).isEmpty());
+        assertTrue(await(git.listSnapshots(Optional.of(worldId))).isEmpty());
         assertEquals(0, lfsObjectCount());
+    }
+
+    @Test
+    void aLocalSnapshotThatNoListedBackupOwnsKeepsEveryProtectedLocalGitCopy() throws Exception {
+        BackupId older = backup(2, true);
+        BackupId newest = backup(1, true);
+        BackupId failedGit = backup(3, true);
+        catalog.update(failedGit, record -> new BackupRecord(record.manifest(), new BackupResult(failedGit, worldId,
+                List.of(DestinationResult.failed(DestinationType.GIT, "Git failed after the snapshot was published"),
+                        record.result().destinations().get(1)),
+                record.result().completedAt())));
+        snapshotOnly(4);
+
+        CleanupPlan plan = await(service(KEEP_ONLY_SAFETY_FLOOR).prepareCleanup(worldId));
+
+        Map<BackupId, CleanupItem> items = plan.items().stream()
+                .collect(Collectors.toMap(CleanupItem::backupId, item -> item));
+        assertFalse(items.containsKey(newest), "the protected newest backup keeps its local Git copy");
+        assertTrue(items.get(older).removeGit() && items.get(older).removeZip());
+        assertTrue(!items.get(failedGit).removeGit() && items.get(failedGit).removeZip());
+        assertFalse(plan.targetReachable());
+    }
+
+    @Test
+    void aRemoteThatLostTheSnapshotKeepsItsLastLocalGitCopy() throws Exception {
+        BackupId safety = backup(3, true);
+        BackupId protectedGitOnly = backup(1, false);
+        BackupId unprotectedGitOnly = backup(2, false);
+        nativeGit("--git-dir=" + remote, "update-ref", "-d", remoteRef(protectedGitOnly));
+        ManagedStorageService service = service(new StoragePolicy(1, 1, 0, 0));
+
+        CleanupPlan plan = await(service.prepareCleanup(worldId));
+        nativeGit("--git-dir=" + remote, "update-ref", "-d", remoteRef(unprotectedGitOnly));
+        CleanupResult result = await(service.applyCleanup(new CleanupRequest(plan.confirmationToken(),
+                plan.items().stream().map(CleanupItem::backupId).collect(Collectors.toSet()))));
+
+        assertTrue(plan.items().stream().noneMatch(item -> item.backupId().equals(protectedGitOnly)),
+                "the preview checks the remote before offering a protected backup's last local copy");
+        assertTrue(result.failures().get(unprotectedGitOnly).contains("no longer has this backup"),
+                result.failures().toString());
+        assertEquals(Set.of(safety, protectedGitOnly, unprotectedGitOnly), await(git.listSnapshots(Optional.of(worldId)))
+                .stream().map(snapshot -> snapshot.backupId()).collect(Collectors.toSet()));
+        assertTrue(catalog.find(unprotectedGitOnly).isPresent());
     }
 
     private BackupId backup(int daysAgo, boolean withZip) throws Exception {
@@ -224,21 +269,29 @@ final class CleanupIntegrationTest {
                 inventory.byteCount(),
                 inventory.fileCount(),
                 inventory.contentSha256(),
-                inventory.inventorySha256());
-        BackupCapture capture = new BackupCapture(source, manifest);
-        DestinationResult gitResult = await(git.createBackup(capture, ProgressListener.NO_OP));
+                inventory.inventorySha256(),
+                Optional.empty());
+        BackupCapture capture = TestCaptures.of(source, manifest);
+        DestinationResult gitResult = git.createBackup(capture, ProgressListener.NO_OP);
         assertEquals(SyncStatus.SYNCED, gitResult.syncStatus());
         List<DestinationResult> destinations = new ArrayList<>();
         destinations.add(gitResult);
         if (withZip) {
-            ZipBackupArtifact artifact = zipStore.create(capture);
+            ZipBackupArtifact artifact = zipStore.create(capture, bytes -> {
+            });
             destinations.add(DestinationResult.success(DestinationType.ZIP, artifact.artifactId())
                     .withVerification(VerificationStatus.VERIFIED));
         }
         catalog.add(new BackupRecord(
                 manifest,
-                BackupResult.aggregate(backupId, worldId, destinations, NOW)));
+                new BackupResult(backupId, worldId, destinations, NOW)));
         return backupId;
+    }
+
+    /** A Git snapshot of the world that the catalog does not list. */
+    private void snapshotOnly(int daysAgo) throws Exception {
+        BackupId backupId = backup(daysAgo, false);
+        catalog.updateAll(Map.of(backupId, current -> Optional.empty()));
     }
 
     private ManagedStorageService service(StoragePolicy policy) {
@@ -250,7 +303,6 @@ final class CleanupIntegrationTest {
                 Optional.empty(),
                 policy);
         WorldArchiveConfig config = new WorldArchiveConfig(
-                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
                 TriggerConfig.defaults(),
                 GitDestinationConfig.defaults(),
                 ZipDestinationConfig.defaults(),
@@ -260,11 +312,9 @@ final class CleanupIntegrationTest {
                 catalog,
                 deletions,
                 git,
-                zipStore,
+                ignored -> zipStore,
                 new FileStorageHistoryStore(temporaryDirectory.resolve("history")),
-                new FileStorageReviewStore(temporaryDirectory.resolve("reviews")),
-                ignored -> () -> {
-                },
+                new LockingWorldOperationGate(),
                 executor,
                 Clock.fixed(NOW, ZoneOffset.UTC),
                 ZoneOffset.UTC);
@@ -290,7 +340,9 @@ final class CleanupIntegrationTest {
                 git,
                 stores,
                 () -> Set.of(worldId),
-                executor);
+                new LockingWorldOperationGate(),
+                executor,
+                Clock.fixed(NOW, ZoneOffset.UTC));
     }
 
     private String remoteRef(BackupId backupId) throws Exception {

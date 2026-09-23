@@ -1,31 +1,25 @@
 package dev.ishaanko.worldarchive.storage.git;
 
 import dev.ishaanko.worldarchive.model.BackupManifest;
-import dev.ishaanko.worldarchive.model.SensitiveDataRedactor;
+import dev.ishaanko.worldarchive.model.SafeText;
 import java.util.Objects;
 import java.util.Optional;
 
-/** Git and LFS integrity result for one exact snapshot. */
-public record GitVerification(
-        GitSnapshot snapshot,
-        Optional<BackupManifest> manifest,
-        boolean valid,
-        String message) {
+/** The result of checking one snapshot: valid snapshots expose the manifest they hold. */
+public record GitVerification(Optional<BackupManifest> manifest, boolean valid, String message) {
     public GitVerification {
-        Objects.requireNonNull(snapshot, "snapshot");
         manifest = Objects.requireNonNull(manifest, "manifest");
         if (valid && manifest.isEmpty()) {
             throw new IllegalArgumentException("A valid Git verification must expose its manifest");
         }
-        Objects.requireNonNull(message, "message");
-        message = SensitiveDataRedactor.redact(message);
-        if (message.isBlank() || message.chars().anyMatch(Character::isISOControl)) {
-            throw new IllegalArgumentException("Verification message must be safe display text");
-        }
+        message = SafeText.of(Objects.requireNonNull(message, "message"), "Git verification finished", 1_024);
     }
 
-    /** Compatibility constructor for a verification that cannot expose a trusted manifest. */
-    public GitVerification(GitSnapshot snapshot, boolean valid, String message) {
-        this(snapshot, Optional.empty(), valid, message);
+    static GitVerification verified(BackupManifest manifest) {
+        return new GitVerification(Optional.of(manifest), true, "Git and Git LFS objects verified");
+    }
+
+    static GitVerification failed(String message) {
+        return new GitVerification(Optional.empty(), false, message);
     }
 }

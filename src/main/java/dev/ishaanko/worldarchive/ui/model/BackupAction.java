@@ -1,6 +1,6 @@
 package dev.ishaanko.worldarchive.ui.model;
 
-/** Backup-browser actions whose enablement is derived from presentation state. */
+/** The buttons of the backup browser; {@link BackupActionPolicy} decides which can run. */
 public enum BackupAction {
     CREATE,
     RESTORE,

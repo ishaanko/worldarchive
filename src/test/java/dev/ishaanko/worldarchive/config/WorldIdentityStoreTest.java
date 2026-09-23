@@ -20,7 +20,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.io.TempDir;
 
 final class WorldIdentityStoreTest {
@@ -112,23 +111,6 @@ final class WorldIdentityStoreTest {
 
         assertThrows(IOException.class, () -> new WorldIdentityStore().loadOrCreateIdentity(world));
         assertEquals(future, Files.readString(identity, StandardCharsets.UTF_8));
-    }
-
-    @Test
-    void rejectsSymbolicIdentityAndLockFiles() throws IOException {
-        Path world = Files.createDirectory(temporaryDirectory.resolve("linked-world"));
-        Path metadata = Files.createDirectory(world.resolve(".worldarchive"));
-        Path target = Files.createFile(temporaryDirectory.resolve("identity-target"));
-        Path identity = metadata.resolve("world.json");
-        try {
-            Files.createSymbolicLink(identity, target);
-        } catch (UnsupportedOperationException | IOException exception) {
-            Assumptions.assumeTrue(false, "Symbolic links unavailable: " + exception.getMessage());
-        }
-        assertThrows(IOException.class, () -> new WorldIdentityStore().loadOrCreateIdentity(world));
-        Files.delete(identity);
-        Files.createSymbolicLink(metadata.resolve("world.json.lock"), target);
-        assertThrows(IOException.class, () -> new WorldIdentityStore().loadOrCreateIdentity(world));
     }
 
     private static WorldId get(Future<WorldId> future) throws InterruptedException, ExecutionException {

@@ -1,6 +1,5 @@
 package dev.ishaanko.worldarchive.model;
 
-import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 
 /** The Minecraft version a backup was made with: display name plus the world data version. */
@@ -27,19 +26,9 @@ public record GameVersionStamp(String name, int dataVersion) {
     }
 
     private static String requireName(String value) {
-        Objects.requireNonNull(value, "name");
-        if (value.isBlank() || value.length() > MAXIMUM_NAME_LENGTH) {
-            throw new IllegalArgumentException(
-                    "name must contain between 1 and " + MAXIMUM_NAME_LENGTH + " characters");
-        }
+        SafeText.require(value, "name", MAXIMUM_NAME_LENGTH);
         if (!value.equals(value.strip())) {
             throw new IllegalArgumentException("name must not have leading or trailing whitespace");
-        }
-        if (value.chars().anyMatch(character -> Character.isISOControl(character))) {
-            throw new IllegalArgumentException("name must not contain control characters");
-        }
-        if (!StandardCharsets.UTF_8.newEncoder().canEncode(value)) {
-            throw new IllegalArgumentException("name must contain valid Unicode text");
         }
         return value;
     }

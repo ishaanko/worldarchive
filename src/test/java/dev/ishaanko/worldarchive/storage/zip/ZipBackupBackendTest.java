@@ -1,30 +1,28 @@
 package dev.ishaanko.worldarchive.storage.zip;
 
-import dev.ishaanko.worldarchive.core.Digests;
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static dev.ishaanko.worldarchive.storage.zip.ZipTestFixtures.CREATED_AT;
+import static dev.ishaanko.worldarchive.storage.zip.ZipTestFixtures.bytes;
+import static dev.ishaanko.worldarchive.storage.zip.ZipTestFixtures.capture;
+import static dev.ishaanko.worldarchive.storage.zip.ZipTestFixtures.files;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.ishaanko.worldarchive.config.FolderOrigin;
 import dev.ishaanko.worldarchive.core.BackupCapture;
-import dev.ishaanko.worldarchive.model.BackupId;
-import dev.ishaanko.worldarchive.model.BackupManifest;
-import dev.ishaanko.worldarchive.model.BackupTrigger;
+import dev.ishaanko.worldarchive.core.TestCaptures;
+import dev.ishaanko.worldarchive.core.WorldInventory;
+import dev.ishaanko.worldarchive.model.DestinationResult;
 import dev.ishaanko.worldarchive.model.DestinationStatus;
+import dev.ishaanko.worldarchive.model.OperationPhase;
+import dev.ishaanko.worldarchive.model.OperationProgress;
+import dev.ishaanko.worldarchive.model.VerificationStatus;
 import dev.ishaanko.worldarchive.model.WorldId;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Instant;
 import java.util.List;
-import java.util.Optional;
-import java.util.concurrent.CompletionException;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -33,130 +31,76 @@ class ZipBackupBackendTest {
     Path temporaryDirectory;
 
     @Test
-    void backendRunsOnItsExecutorAndObserverFailuresCannotCauseFalseFailure() throws Exception {
-        Path world = Files.createDirectory(temporaryDirectory.resolve("world"));
-        byte[] contents = "world data".getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        Files.write(world.resolve("level.dat"), contents);
-        BackupManifest manifest = manifest(contents);
-        List<String> callbackThreads = new CopyOnWriteArrayList<>();
-        try (ExecutorService executor = Executors.newSingleThreadExecutor(runnable -> {
-            Thread thread = new Thread(runnable, "zip-backup-worker");
-            thread.setDaemon(true);
-            return thread;
-        })) {
-            ZipBackupBackend backend = new ZipBackupBackend(
-                    temporaryDirectory.resolve("archives"), executor);
-            var result = backend.createBackup(new BackupCapture(world, manifest), progress -> {
-                callbackThreads.add(Thread.currentThread().getName());
-                throw new IllegalStateException("observer failed");
-            }).toCompletableFuture().get(10, TimeUnit.SECONDS);
+    void aFailingProgressListenerCannotFailTheBackup() throws Exception {
+        Path world = ZipTestFixtures.world(temporaryDirectory.resolve("world"), files("level.dat", "world data"));
+        List<OperationPhase> reported = new CopyOnWriteArrayList<>();
+        ZipBackupBackend backend = new ZipBackupBackend(worldId -> store("archives"));
 
-            assertEquals(DestinationStatus.SUCCESS, result.status());
-            assertTrue(result.artifactId().isPresent());
-            assertFalse(callbackThreads.isEmpty());
-            assertTrue(callbackThreads.stream().allMatch(name -> name.equals("zip-backup-worker")));
+        DestinationResult result = backend.createBackup(capture(world, WorldId.create(), CREATED_AT), progress -> {
+            reported.add(progress.phase());
+            throw new IllegalStateException("listener failed");
+        });
+
+        assertEquals(DestinationStatus.SUCCESS, result.status());
+        assertEquals(VerificationStatus.VERIFIED, result.verificationStatus());
+        assertTrue(result.artifactId().isPresent());
+        assertEquals(OperationPhase.COMPLETE, reported.getLast());
+    }
+
+    @Test
+    void writingProgressIsReportedOncePerPercent() throws Exception {
+        Path world = ZipTestFixtures.world(
+                temporaryDirectory.resolve("world"), Map.of("region/r.0.0.mca", bytes(8 * 1_024 * 1_024, 1)));
+        List<OperationProgress> writing = new CopyOnWriteArrayList<>();
+        ZipBackupBackend backend = new ZipBackupBackend(worldId -> store("archives"));
+
+        backend.createBackup(capture(world, WorldId.create(), CREATED_AT), progress -> {
+            if (progress.phase() == OperationPhase.WRITING) {
+                writing.add(progress);
+            }
+        });
+
+        assertTrue(writing.size() > 10 && writing.size() <= 101, "events: " + writing.size());
+        assertEquals(writing.getLast().totalUnits(), writing.getLast().completedUnits());
+        for (int index = 1; index < writing.size(); index++) {
+            assertTrue(writing.get(index).completedUnits() > writing.get(index - 1).completedUnits());
         }
     }
 
     @Test
-    void recoverableStoreFailureCompletesWithDestinationFailure() throws Exception {
-        Path world = Files.createDirectory(temporaryDirectory.resolve("world"));
-        Files.writeString(world.resolve("level.dat"), "unexpected file");
-        BackupManifest staleManifest = emptyManifest();
-        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
-            ZipBackupBackend backend = new ZipBackupBackend(
-                    temporaryDirectory.resolve("archives"), executor);
+    void aCaptureThatDoesNotMatchItsManifestFailsWithAPlainMessage() throws Exception {
+        Path world = ZipTestFixtures.world(temporaryDirectory.resolve("world"), files("level.dat", "unexpected file"));
+        BackupCapture capture = capture(world, WorldId.create(), CREATED_AT);
+        BackupCapture stale = new BackupCapture(world, capture.manifest(), WorldInventory.create(List.of()));
+        ZipBackupBackend backend = new ZipBackupBackend(worldId -> store("archives"));
 
-            var result = backend.createBackup(
-                    new BackupCapture(world, staleManifest), progress -> {
-                    }).toCompletableFuture().get(10, TimeUnit.SECONDS);
+        DestinationResult result = backend.createBackup(stale, progress -> {
+        });
 
-            assertEquals(DestinationStatus.FAILED, result.status());
-            assertEquals("World contents no longer match the prepared backup manifest",
-                    result.message().orElseThrow());
-            assertTrue(result.artifactId().isEmpty());
-        }
+        assertEquals(DestinationStatus.FAILED, result.status());
+        assertEquals(
+                "The prepared copy of the world does not match its backup manifest. Try the backup again.",
+                result.message().orElseThrow());
+        assertFalse(Files.exists(temporaryDirectory.resolve("archives")));
     }
 
     @Test
-    void resolverRoutesEachWorldToItsConfiguredZipRoot() throws Exception {
-        Path world = Files.createDirectory(temporaryDirectory.resolve("routed-world"));
-        byte[] contents = "routed world data".getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        Files.write(world.resolve("level.dat"), contents);
-        WorldId worldId = WorldId.create();
-        Path defaultRoot = temporaryDirectory.resolve("default-archives");
-        Path overrideRoot = temporaryDirectory.resolve("override-archives");
-        ZipBackupStoreResolver stores = candidate -> new ZipBackupStore(
-                candidate.equals(worldId) ? overrideRoot : defaultRoot);
-        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
-            ZipBackupBackend backend = new ZipBackupBackend(stores, executor);
-
-            var result = backend.createBackup(
-                    new BackupCapture(world, manifest(contents, worldId)),
-                    ignored -> {}).toCompletableFuture().get(10, TimeUnit.SECONDS);
-
-            assertEquals(DestinationStatus.SUCCESS, result.status());
-            assertTrue(Files.isDirectory(overrideRoot.resolve(worldId.toString())));
-            assertFalse(Files.exists(defaultRoot));
-        }
-    }
-
-    @Test
-    void rejectedExecutionReturnsAFailedStage() {
+    void eachWorldIsWrittenToItsOwnZipFolder() throws Exception {
+        Path world = ZipTestFixtures.world(temporaryDirectory.resolve("world"), files("level.dat", "routed"));
+        WorldId routed = WorldId.create();
         ZipBackupBackend backend = new ZipBackupBackend(
-                temporaryDirectory.resolve("archives"),
-                command -> {
-                    throw new RejectedExecutionException("simulated rejection");
+                worldId -> store(worldId.equals(routed) ? "override-archives" : "default-archives"));
+
+        DestinationResult result = backend.createBackup(
+                TestCaptures.of(world, capture(world, routed, CREATED_AT).manifest()), progress -> {
                 });
 
-        var result = assertDoesNotThrow(() -> backend.createBackup(
-                new BackupCapture(temporaryDirectory, emptyManifest()),
-                ignored -> {
-                }));
-        CompletionException failure = assertThrows(
-                CompletionException.class,
-                () -> result.toCompletableFuture().join());
-
-        assertInstanceOf(RejectedExecutionException.class, failure.getCause());
+        assertEquals(DestinationStatus.SUCCESS, result.status());
+        assertTrue(Files.isDirectory(temporaryDirectory.resolve("override-archives").resolve(routed.toString())));
+        assertFalse(Files.exists(temporaryDirectory.resolve("default-archives")));
     }
 
-    private static BackupManifest manifest(byte[] contents) {
-        return manifest(contents, WorldId.create());
-    }
-
-    private static BackupManifest manifest(byte[] contents, WorldId worldId) {
-        ZipInventory inventory = ZipInventory.create(List.of(new ZipInventoryEntry(
-                "level.dat", contents.length, sha256(contents))));
-        return BackupManifest.create(
-                BackupId.create(),
-                worldId,
-                "Test World",
-                Optional.empty(),
-                Instant.parse("2026-07-17T20:15:30.123Z"),
-                BackupTrigger.MANUAL,
-                inventory.fileCount(),
-                inventory.byteCount(),
-                inventory.fileCount(),
-                ZipDigests.contentSha256(inventory.files()),
-                inventory.inventorySha256());
-    }
-
-    private static BackupManifest emptyManifest() {
-        ZipInventory inventory = ZipInventory.create(List.of());
-        return BackupManifest.create(
-                BackupId.create(),
-                WorldId.create(),
-                "Test World",
-                Instant.parse("2026-07-17T20:15:30.123Z"),
-                BackupTrigger.MANUAL,
-                0,
-                0,
-                ZipDigests.contentSha256(inventory.files()));
-    }
-
-    private static String sha256(byte[] contents) {
-        var digest = Digests.sha256();
-        digest.update(contents);
-        return Digests.hex(digest.digest());
+    private ZipBackupStore store(String name) {
+        return new ZipBackupStore(temporaryDirectory.resolve(name), FolderOrigin.DEFAULT);
     }
 }

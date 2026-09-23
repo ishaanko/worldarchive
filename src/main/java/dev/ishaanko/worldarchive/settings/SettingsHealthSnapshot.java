@@ -1,145 +1,70 @@
 package dev.ishaanko.worldarchive.settings;
 
-import dev.ishaanko.worldarchive.model.DestinationHealth;
-import dev.ishaanko.worldarchive.model.DestinationHealthStatus;
-import dev.ishaanko.worldarchive.model.DestinationType;
-import java.time.Instant;
 import java.util.Objects;
 
-/** Independent Git, LFS, repository, remote, and ZIP health for the settings UI. */
+/** The settings footer: Git, Git LFS, the repository folder and the ZIP folder, each checked on its own. */
 public record SettingsHealthSnapshot(
         SettingsHealthItem gitTool,
         SettingsHealthItem lfsTool,
         SettingsHealthItem repository,
-        SettingsHealthItem remote,
-        SettingsHealthItem zipDirectory) {
+        SettingsHealthItem zipFolder) {
     public SettingsHealthSnapshot {
         Objects.requireNonNull(gitTool, "gitTool");
         Objects.requireNonNull(lfsTool, "lfsTool");
         Objects.requireNonNull(repository, "repository");
-        Objects.requireNonNull(remote, "remote");
-        Objects.requireNonNull(zipDirectory, "zipDirectory");
+        Objects.requireNonNull(zipFolder, "zipFolder");
     }
 
+    /** What the footer shows while a probe runs. */
     public static SettingsHealthSnapshot unchecked(SettingsProbeRequest request) {
-        Objects.requireNonNull(request, "request");
-        SettingsHealthItem gitToolState = request.gitEnabled()
-                ? SettingsHealthItem.unchecked()
-                : SettingsHealthItem.disabled();
-        SettingsHealthItem repositoryState = configuredState(
-                request.gitEnabled(),
-                request.gitRepository().isPresent());
-        SettingsHealthItem remoteState = configuredState(
-                request.gitEnabled(),
-                request.remoteConfigured());
-        SettingsHealthItem zipState = configuredState(
-                request.zipEnabled(),
-                request.zipDirectory().isPresent());
-        return new SettingsHealthSnapshot(
-                gitToolState,
-                gitToolState,
-                repositoryState,
-                remoteState,
-                zipState);
+        return placeholder(request, SettingsHealthItem.unchecked());
     }
 
-    /** Produces a safe failed-probe result while preserving disabled and unconfigured states. */
+    /** What the footer shows when a probe failed. */
     public static SettingsHealthSnapshot unavailable(SettingsProbeRequest request, String message) {
+        return placeholder(request, new SettingsHealthItem(SettingsHealthStatus.UNAVAILABLE, message));
+    }
+
+    /** Every part that is switched on and configured shows {@code checked}; the others say why they are not checked. */
+    private static SettingsHealthSnapshot placeholder(SettingsProbeRequest request, SettingsHealthItem checked) {
         Objects.requireNonNull(request, "request");
-        SettingsHealthItem unavailable = new SettingsHealthItem(
-                SettingsHealthStatus.UNAVAILABLE,
-                Objects.requireNonNull(message, "message"));
-        SettingsHealthItem disabled = SettingsHealthItem.disabled();
-        SettingsHealthItem unconfigured = new SettingsHealthItem(
-                SettingsHealthStatus.UNCONFIGURED,
-                "not configured");
-        SettingsHealthItem gitToolState = request.gitEnabled() ? unavailable : disabled;
-        SettingsHealthItem repositoryState = componentFailureState(
-                request.gitEnabled(),
-                request.gitRepository().isPresent(),
-                unavailable,
-                disabled,
-                unconfigured);
-        SettingsHealthItem remoteState = componentFailureState(
-                request.gitEnabled(),
-                request.remoteConfigured(),
-                unavailable,
-                disabled,
-                unconfigured);
-        SettingsHealthItem zipState = componentFailureState(
-                request.zipEnabled(),
-                request.zipDirectory().isPresent(),
-                unavailable,
-                disabled,
-                unconfigured);
+        SettingsHealthItem tools = request.gitEnabled() ? checked : SettingsHealthItem.disabled();
         return new SettingsHealthSnapshot(
-                gitToolState,
-                gitToolState,
-                repositoryState,
-                remoteState,
-                zipState);
+                tools,
+                tools,
+                part(request.gitEnabled(), request.gitRepository().isPresent(), checked),
+                part(request.zipEnabled(), request.zipFolder().isPresent(), checked));
     }
 
-    private static SettingsHealthItem componentFailureState(
-            boolean enabled,
-            boolean configured,
-            SettingsHealthItem unavailable,
-            SettingsHealthItem disabled,
-            SettingsHealthItem unconfigured) {
-        if (!enabled) {
-            return disabled;
-        }
-        return configured ? unavailable : unconfigured;
-    }
-
-    private static SettingsHealthItem configuredState(boolean enabled, boolean configured) {
+    private static SettingsHealthItem part(boolean enabled, boolean configured, SettingsHealthItem checked) {
         if (!enabled) {
             return SettingsHealthItem.disabled();
         }
-        return configured
-                ? SettingsHealthItem.unchecked()
-                : new SettingsHealthItem(SettingsHealthStatus.UNCONFIGURED, "not configured");
+        return configured ? checked : SettingsHealthItem.unconfigured();
     }
 
-    public DestinationHealth gitDestinationHealth(Instant checkedAt) {
-        SettingsHealthStatus status = mostSevere(gitTool, lfsTool, repository);
-        return new DestinationHealth(
-                DestinationType.GIT,
-                destinationStatus(status),
-                gitSummary(),
-                Objects.requireNonNull(checkedAt, "checkedAt"));
-    }
-
-    public DestinationHealth zipDestinationHealth(Instant checkedAt) {
-        return new DestinationHealth(
-                DestinationType.ZIP,
-                destinationStatus(zipDirectory.status()),
-                "ZIP: " + zipDirectory.message(),
-                Objects.requireNonNull(checkedAt, "checkedAt"));
-    }
-
-    public String gitSummary() {
-        return "Git " + gitTool.message()
-                + " | LFS " + lfsTool.message()
-                + " | repository " + repository.message()
-                + " | remote " + remote.message();
-    }
-
-    /** Short, stable wording for the constrained in-game settings footer. */
+    /** Short, stable wording for the settings footer. */
     public String gitDisplaySummary() {
         return "Git " + displayStatus(gitTool)
                 + " | LFS " + displayStatus(lfsTool)
-                + " | Repository " + displayStatus(repository)
-                + " | Remote " + displayStatus(remote);
+                + " | Repository " + displayStatus(repository);
     }
 
-    public String zipSummary() {
-        return "ZIP " + zipDirectory.message();
+    /** The full messages, for the footer's tooltip. */
+    public String gitSummary() {
+        return "Git " + gitTool.message()
+                + " | LFS " + lfsTool.message()
+                + " | repository " + repository.message();
     }
 
-    /** Short, stable wording for the constrained in-game settings footer. */
+    /** Short, stable wording for the settings footer. */
     public String zipDisplaySummary() {
-        return "ZIP Folder " + displayStatus(zipDirectory);
+        return "ZIP Folder " + displayStatus(zipFolder);
+    }
+
+    /** The full message, for the footer's tooltip. */
+    public String zipSummary() {
+        return "ZIP " + zipFolder.message();
     }
 
     private static String displayStatus(SettingsHealthItem item) {
@@ -150,37 +75,6 @@ public record SettingsHealthSnapshot(
             case UNCONFIGURED -> "Not Configured";
             case TOOL_MISSING -> "Missing";
             case UNAVAILABLE -> "Unavailable";
-        };
-    }
-
-    private static SettingsHealthStatus mostSevere(SettingsHealthItem... items) {
-        SettingsHealthStatus selected = SettingsHealthStatus.HEALTHY;
-        for (SettingsHealthItem item : items) {
-            if (priority(item.status()) > priority(selected)) {
-                selected = item.status();
-            }
-        }
-        return selected;
-    }
-
-    private static int priority(SettingsHealthStatus status) {
-        return switch (status) {
-            case UNAVAILABLE -> 6;
-            case TOOL_MISSING -> 5;
-            case UNCONFIGURED -> 4;
-            case UNCHECKED -> 3;
-            case DISABLED -> 2;
-            case HEALTHY -> 1;
-        };
-    }
-
-    private static DestinationHealthStatus destinationStatus(SettingsHealthStatus status) {
-        return switch (status) {
-            case HEALTHY -> DestinationHealthStatus.HEALTHY;
-            case DISABLED -> DestinationHealthStatus.DISABLED;
-            case UNCHECKED, UNCONFIGURED -> DestinationHealthStatus.UNCONFIGURED;
-            case TOOL_MISSING -> DestinationHealthStatus.TOOL_MISSING;
-            case UNAVAILABLE -> DestinationHealthStatus.UNAVAILABLE;
         };
     }
 }

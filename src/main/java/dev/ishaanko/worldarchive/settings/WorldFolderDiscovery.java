@@ -1,38 +1,44 @@
 package dev.ishaanko.worldarchive.settings;
 
+import dev.ishaanko.worldarchive.recovery.RestoreWorkspace;
 import java.io.IOException;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
-import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
+import java.util.TreeSet;
 
-/** Read-only discovery of direct, non-linked Minecraft save directories. */
+/**
+ * Finds the worlds in a saves folder without changing anything. The saves folder and each world
+ * folder may be links, as launchers that share saves between instances create; each world is
+ * reported once, by its real path. Links inside a world are left to the capture, which refuses them.
+ * A restore's staging folder is never a world, even while it holds a {@code level.dat}.
+ */
 public final class WorldFolderDiscovery {
     private static final String LEVEL_DATA_FILE = "level.dat";
 
     private WorldFolderDiscovery() {
     }
 
+    /** The real paths of the worlds in the saves folder, sorted; empty when the folder does not exist. */
     public static List<Path> discover(Path savesDirectory) throws IOException {
-        Path saves = Objects.requireNonNull(savesDirectory, "savesDirectory")
-                .toAbsolutePath()
-                .normalize();
-        if (!safeDirectory(saves)) {
+        Path saves = Objects.requireNonNull(savesDirectory, "savesDirectory").toAbsolutePath().normalize();
+        if (!Files.isDirectory(saves)) {
             return List.of();
         }
-        Path realSaves = saves.toRealPath();
-        List<Path> worlds = new ArrayList<>();
-        try (var children = Files.newDirectoryStream(saves)) {
+        Set<Path> worlds = new TreeSet<>();
+        try (DirectoryStream<Path> children = Files.newDirectoryStream(saves.toRealPath())) {
             for (Path child : children) {
-                safeWorldDirectory(child, realSaves).ifPresent(worlds::add);
+                if (!child.getFileName().toString().startsWith(RestoreWorkspace.STAGING_PREFIX)) {
+                    realWorld(child).ifPresent(worlds::add);
+                }
             }
         }
-        worlds.sort(Comparator.comparing(Path::toString));
         return List.copyOf(worlds);
     }
 
@@ -47,45 +53,21 @@ public final class WorldFolderDiscovery {
         return saves.equals(world.getParent());
     }
 
-    private static Optional<Path> safeWorldDirectory(Path candidate, Path realSaves) {
+    /**
+     * The real path of one world folder, which may be a link; empty when the folder is not a world.
+     * A folder is a world when it holds a non-empty {@code level.dat} that is a regular file, not a link.
+     */
+    public static Optional<Path> realWorld(Path candidate) {
         try {
-            if (!safeDirectory(candidate)) {
-                return Optional.empty();
-            }
-            Path realWorld = candidate.toRealPath();
-            if (!Objects.equals(realWorld.getParent(), realSaves)) {
-                return Optional.empty();
-            }
-            Path levelData = candidate.resolve(LEVEL_DATA_FILE);
-            BasicFileAttributes attributes = Files.readAttributes(
-                    levelData,
+            BasicFileAttributes levelData = Files.readAttributes(
+                    candidate.resolve(LEVEL_DATA_FILE),
                     BasicFileAttributes.class,
                     LinkOption.NOFOLLOW_LINKS);
-            if (!attributes.isRegularFile()
-                    || attributes.isSymbolicLink()
-                    || attributes.isOther()
-                    || attributes.size() == 0) {
-                return Optional.empty();
-            }
-            Path realLevelData = levelData.toRealPath();
-            return Objects.equals(realLevelData.getParent(), realWorld)
-                    ? Optional.of(realWorld)
+            return levelData.isRegularFile() && levelData.size() > 0
+                    ? Optional.of(candidate.toRealPath())
                     : Optional.empty();
         } catch (IOException | SecurityException exception) {
             return Optional.empty();
         }
-    }
-
-    private static boolean safeDirectory(Path directory) throws IOException {
-        if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
-            return false;
-        }
-        BasicFileAttributes attributes = Files.readAttributes(
-                directory,
-                BasicFileAttributes.class,
-                LinkOption.NOFOLLOW_LINKS);
-        return attributes.isDirectory()
-                && !attributes.isSymbolicLink()
-                && !attributes.isOther();
     }
 }

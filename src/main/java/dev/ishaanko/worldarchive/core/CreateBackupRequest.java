@@ -1,13 +1,14 @@
 package dev.ishaanko.worldarchive.core;
 
+import dev.ishaanko.worldarchive.model.BackupManifest;
 import dev.ishaanko.worldarchive.model.BackupTrigger;
-import dev.ishaanko.worldarchive.model.SensitiveDataRedactor;
+import dev.ishaanko.worldarchive.model.SafeText;
 import dev.ishaanko.worldarchive.model.WorldId;
 import java.nio.file.Path;
 import java.util.Objects;
 import java.util.Optional;
 
-/** A request to capture the current durable state of a world. */
+/** A request to capture the current durable state of a world; the label is kept exactly as typed. */
 public record CreateBackupRequest(
         WorldId worldId,
         Path worldDirectory,
@@ -19,29 +20,9 @@ public record CreateBackupRequest(
         worldDirectory = Objects.requireNonNull(worldDirectory, "worldDirectory")
                 .toAbsolutePath()
                 .normalize();
-        worldName = requireText(worldName, "worldName", 255);
+        worldName = SafeText.require(worldName, "worldName", 255);
         label = Objects.requireNonNull(label, "label")
-                .map(SensitiveDataRedactor::redact)
-                .map(value -> requireText(value, "label", 128));
+                .map(value -> SafeText.require(value, "label", BackupManifest.MAXIMUM_LABEL_LENGTH));
         Objects.requireNonNull(trigger, "trigger");
-    }
-
-    /** Compatibility constructor for unlabeled backup requests. */
-    public CreateBackupRequest(
-            WorldId worldId,
-            Path worldDirectory,
-            String worldName,
-            BackupTrigger trigger) {
-        this(worldId, worldDirectory, worldName, Optional.empty(), trigger);
-    }
-
-    private static String requireText(String value, String name, int maximumLength) {
-        Objects.requireNonNull(value, name);
-        if (value.isBlank()
-                || value.length() > maximumLength
-                || value.chars().anyMatch(character -> Character.isISOControl(character))) {
-            throw new IllegalArgumentException(name + " is blank, too long, or contains control characters");
-        }
-        return value;
     }
 }

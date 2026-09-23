@@ -8,18 +8,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class CapturedBackup implements AutoCloseable {
     private final BackupCapture capture;
 
-    private final WorldInventory inventory;
-
     private final CloseAction closeAction;
 
     private final AtomicBoolean closed = new AtomicBoolean();
 
-    CapturedBackup(
-            BackupCapture capture,
-            WorldInventory inventory,
-            CloseAction closeAction) {
+    CapturedBackup(BackupCapture capture, CloseAction closeAction) {
         this.capture = Objects.requireNonNull(capture, "capture");
-        this.inventory = Objects.requireNonNull(inventory, "inventory");
         this.closeAction = Objects.requireNonNull(closeAction, "closeAction");
     }
 
@@ -28,10 +22,6 @@ public final class CapturedBackup implements AutoCloseable {
             throw new IllegalStateException("Backup capture is already closed");
         }
         return capture;
-    }
-
-    public WorldInventory inventory() {
-        return inventory;
     }
 
     @Override

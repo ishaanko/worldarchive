@@ -1,16 +1,18 @@
 package dev.ishaanko.worldarchive.storage.git;
 
-import dev.ishaanko.worldarchive.core.Digests;
 import dev.ishaanko.worldarchive.model.BackupManifest;
+import dev.ishaanko.worldarchive.support.Digests;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
-import java.util.regex.Pattern;
 
-/** Snapshot-local metadata binding source identity and LFS behavior to one commit. */
+/**
+ * The metadata stored in every snapshot tree: the backup manifest, the LFS patterns the snapshot
+ * was written with, and a source identity that the commit message repeats, which binds the
+ * commit to exactly this manifest.
+ */
 record GitSnapshotManifest(
         int storageFormatVersion,
         BackupManifest manifest,
@@ -18,7 +20,9 @@ record GitSnapshotManifest(
         String sourceIdentity) {
     static final int CURRENT_STORAGE_FORMAT_VERSION = 1;
 
-    private static final Pattern SHA256 = Pattern.compile("[0-9a-f]{64}");
+    private static final int MAXIMUM_PATTERNS = 128;
+
+    private static final int MAXIMUM_PATTERN_LENGTH = 256;
 
     GitSnapshotManifest {
         if (storageFormatVersion != CURRENT_STORAGE_FORMAT_VERSION) {
@@ -27,8 +31,7 @@ record GitSnapshotManifest(
         Objects.requireNonNull(manifest, "manifest");
         lfsPatterns = validatePatterns(lfsPatterns);
         Objects.requireNonNull(sourceIdentity, "sourceIdentity");
-        if (!SHA256.matcher(sourceIdentity).matches()
-                || !sourceIdentity.equals(computeSourceIdentity(manifest))) {
+        if (!sourceIdentity.equals(computeSourceIdentity(manifest))) {
             throw new IllegalArgumentException("Git snapshot source identity is invalid");
         }
     }
@@ -41,6 +44,15 @@ record GitSnapshotManifest(
                 computeSourceIdentity(manifest));
     }
 
+    /** The commit message that binds a snapshot commit to its manifest. */
+    String commitMessage() {
+        return "WorldArchive snapshot\n\n"
+                + "world-id: " + manifest.worldId() + "\n"
+                + "backup-id: " + manifest.backupId() + "\n"
+                + "source-identity: " + sourceIdentity + "\n";
+    }
+
+    /** SHA-256 of the manifest's canonical text; stored snapshots depend on this exact text. */
     static String computeSourceIdentity(BackupManifest manifest) {
         Objects.requireNonNull(manifest, "manifest");
         String canonical = "worldarchive-source-v1\n"
@@ -59,30 +71,32 @@ record GitSnapshotManifest(
                 + manifest.gameVersion()
                         .map(stamp -> "gameVersion:" + stamp.name() + "\n" + stamp.dataVersion() + "\n")
                         .orElse("");
-        MessageDigest digest = Digests.sha256();
-        return Digests.hex(digest.digest(canonical.getBytes(StandardCharsets.UTF_8)));
+        return Digests.hex(Digests.sha256().digest(canonical.getBytes(StandardCharsets.UTF_8)));
     }
 
+    /** Between 1 and 128 distinct patterns, each safe to write into a Git attributes file. */
     static List<String> validatePatterns(List<String> patterns) {
         Objects.requireNonNull(patterns, "lfsPatterns");
-        if (patterns.isEmpty() || patterns.size() > 128) {
-            throw new IllegalArgumentException("Git snapshot has an invalid LFS pattern count");
+        if (patterns.isEmpty() || patterns.size() > MAXIMUM_PATTERNS) {
+            throw new IllegalArgumentException("Git LFS needs between 1 and " + MAXIMUM_PATTERNS + " patterns");
         }
         Set<String> unique = new LinkedHashSet<>();
         for (String pattern : patterns) {
-            Objects.requireNonNull(pattern, "lfsPattern");
-            if (pattern.isBlank()
-                    || pattern.length() > 256
-                    || pattern.startsWith("!")
-                    || pattern.startsWith("-")
-                    || pattern.contains("\\")
-                    || pattern.contains("..")
-                    || pattern.chars().anyMatch(Character::isWhitespace)
-                    || pattern.chars().anyMatch(Character::isISOControl)
-                    || !unique.add(pattern)) {
-                throw new IllegalArgumentException("Git snapshot has an unsafe LFS pattern");
+            if (!isSafePattern(Objects.requireNonNull(pattern, "lfsPattern")) || !unique.add(pattern)) {
+                throw new IllegalArgumentException("Git LFS pattern is unsafe or repeated: " + pattern);
             }
         }
         return List.copyOf(unique);
+    }
+
+    private static boolean isSafePattern(String pattern) {
+        return !pattern.isBlank()
+                && pattern.length() <= MAXIMUM_PATTERN_LENGTH
+                && !pattern.startsWith("!")
+                && !pattern.startsWith("-")
+                && !pattern.contains("\\")
+                && !pattern.contains("..")
+                && pattern.chars().noneMatch(character -> Character.isWhitespace(character)
+                        || Character.isISOControl(character));
     }
 }

@@ -3,38 +3,15 @@ package dev.ishaanko.worldarchive.storage.zip;
 import dev.ishaanko.worldarchive.model.BackupManifest;
 import java.nio.file.Path;
 import java.util.Objects;
-import java.util.regex.Pattern;
 
-/** A completely published ZIP archive and its integrity sidecar. */
-public record ZipBackupArtifact(
-        BackupManifest manifest,
-        Path archivePath,
-        Path checksumPath,
-        String archiveSha256) {
-    private static final Pattern SHA256 = Pattern.compile("[0-9a-f]{64}");
-
+/** A published archive of one backup; its checksum file sits next to it. */
+public record ZipBackupArtifact(BackupManifest manifest, Path archivePath) {
     public ZipBackupArtifact {
         Objects.requireNonNull(manifest, "manifest");
-        archivePath = Objects.requireNonNull(archivePath, "archivePath")
-                .toAbsolutePath()
-                .normalize();
-        checksumPath = Objects.requireNonNull(checksumPath, "checksumPath")
-                .toAbsolutePath()
-                .normalize();
-        if (!Objects.equals(archivePath.getParent(), checksumPath.getParent())) {
-            throw new IllegalArgumentException("ZIP archive and checksum must share a directory");
-        }
-        if (!checksumPath.getFileName().toString()
-                .equals(archivePath.getFileName().toString() + ".sha256")) {
-            throw new IllegalArgumentException("ZIP checksum name does not match its archive");
-        }
-        Objects.requireNonNull(archiveSha256, "archiveSha256");
-        if (!SHA256.matcher(archiveSha256).matches()) {
-            throw new IllegalArgumentException("ZIP checksum must be lowercase SHA-256");
-        }
+        archivePath = Objects.requireNonNull(archivePath, "archivePath").toAbsolutePath().normalize();
     }
 
-    /** Stable destination identifier suitable for persistence in a destination result. */
+    /** The {@code <world id>/<file name>} under which the catalog records the archive. */
     public String artifactId() {
         return manifest.worldId() + "/" + archivePath.getFileName();
     }

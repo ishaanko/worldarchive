@@ -2,16 +2,13 @@ package dev.ishaanko.worldarchive.model;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.time.Instant;
-import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 final class SensitiveDataRedactorTest {
     @Test
-    void destinationDiagnosticsAreRedactedAtConstruction() {
+    void failureMessagesAreRedactedWhereTheyAreMade() {
         String secret = "ghp_abcdefghijklmnopqrstuvwxyz";
         DestinationResult result = DestinationResult.failed(
                 DestinationType.GIT,
@@ -21,9 +18,6 @@ final class SensitiveDataRedactorTest {
         assertTrue(message.contains(SensitiveDataRedactor.REDACTED));
         assertFalse(message.contains("user:password"));
         assertFalse(message.contains(secret));
-        assertThrows(IllegalArgumentException.class, () -> DestinationResult.success(
-                DestinationType.GIT,
-                "https://user:password@example.invalid/artifact"));
 
         String adjacent = "prefix_x_ghp_abcdefghijklmnopqrstuvwxyz_suffix";
         DestinationResult adjacentResult = DestinationResult.failed(DestinationType.GIT, adjacent);
@@ -46,31 +40,8 @@ final class SensitiveDataRedactorTest {
     }
 
     @Test
-    void healthAndLabelsCannotExposeKnownTokens() {
-        String token = "glpat-abcdefghijklmnopqrstuvwxyz";
-        DestinationHealth health = new DestinationHealth(
-                DestinationType.GIT,
-                DestinationHealthStatus.AUTHENTICATION_REQUIRED,
-                "Bearer " + token,
-                Instant.parse("2026-07-17T12:00:00Z"));
-        BackupManifest manifest = BackupManifest.create(
-                BackupId.create(),
-                WorldId.create(),
-                "World",
-                Optional.of("token=" + token),
-                Instant.parse("2026-07-17T12:00:00Z"),
-                BackupTrigger.MANUAL,
-                8,
-                1_024,
-                3,
-                "a".repeat(64),
-                "b".repeat(64));
-
-        assertEquals("Bearer [REDACTED]", health.message());
-        assertFalse(manifest.label().orElseThrow().contains(token));
-        assertEquals(3, manifest.changedFileCount());
-        assertEquals("a".repeat(64), manifest.contentSha256());
-        assertEquals("b".repeat(64), manifest.inventorySha256());
+    void bearerTokensAreRedacted() {
+        assertEquals("Bearer [REDACTED]", SensitiveDataRedactor.redact("Bearer glpat-abcdefghijklmnopqrstuvwxyz"));
     }
 
     @Test

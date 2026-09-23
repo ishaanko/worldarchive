@@ -1,11 +1,14 @@
 package dev.ishaanko.worldarchive.core;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.ishaanko.worldarchive.model.BackupId;
+import dev.ishaanko.worldarchive.model.BackupOperation;
 import dev.ishaanko.worldarchive.model.DestinationType;
+import dev.ishaanko.worldarchive.model.OperationId;
+import dev.ishaanko.worldarchive.model.OperationPhase;
+import dev.ishaanko.worldarchive.model.OperationProgress;
 import dev.ishaanko.worldarchive.model.WorldId;
 import java.util.List;
 import java.util.Optional;
@@ -76,15 +79,6 @@ final class DestinationProgressAggregatorTest {
         assertEquals(1_000, aggregator.accept(
                 DestinationType.GIT,
                 progress(OperationPhase.COMPLETE, 0, 0, "Git snapshot complete")));
-    }
-
-    @Test
-    void oneDestinationDoesNotAggregate() {
-        DestinationProgressAggregator aggregator = new DestinationProgressAggregator(
-                List.of(DestinationType.ZIP),
-                800);
-
-        assertFalse(aggregator.aggregates());
     }
 
     private static OperationProgress progress(

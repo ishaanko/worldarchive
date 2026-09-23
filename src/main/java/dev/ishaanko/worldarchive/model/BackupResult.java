@@ -4,62 +4,44 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
 
-/** Aggregate result that retains every independent destination outcome. */
+/**
+ * The outcome of one backup across its destinations. The overall {@link #status()} is derived
+ * from the destinations and never stored on its own, so a change to the rules cannot make an
+ * old catalog record invalid.
+ */
 public record BackupResult(
         BackupId backupId,
         WorldId worldId,
-        BackupStatus status,
         List<DestinationResult> destinations,
         Instant completedAt) {
     public BackupResult {
         Objects.requireNonNull(backupId, "backupId");
         Objects.requireNonNull(worldId, "worldId");
-        Objects.requireNonNull(status, "status");
         destinations = List.copyOf(destinations);
         if (destinations.stream().map(DestinationResult::destination).distinct().count() != destinations.size()) {
             throw new IllegalArgumentException("Each destination may appear at most once");
         }
-        BackupStatus expected = aggregateStatus(destinations);
-        if (status != expected) {
-            throw new IllegalArgumentException("Status " + status + " does not match destination results: " + expected);
-        }
         Objects.requireNonNull(completedAt, "completedAt");
     }
 
-    public static BackupResult aggregate(
-            BackupId backupId,
-            WorldId worldId,
-            List<DestinationResult> destinations,
-            Instant completedAt) {
-        List<DestinationResult> immutableDestinations = List.copyOf(destinations);
-        return new BackupResult(
-                backupId,
-                worldId,
-                aggregateStatus(immutableDestinations),
-                immutableDestinations,
-                completedAt);
-    }
-
-    public static BackupStatus aggregateStatus(List<DestinationResult> destinations) {
-        Objects.requireNonNull(destinations, "destinations");
+    /**
+     * SUCCESS when a copy exists and nothing failed or waits; PARTIAL_SUCCESS when a copy exists
+     * but another destination failed or a remote still waits for its push; FAILED when only
+     * failures remain; SKIPPED when no destination ran.
+     */
+    public BackupStatus status() {
         boolean succeeded = destinations.stream()
                 .anyMatch(result -> result.status() == DestinationStatus.SUCCESS);
         boolean failed = destinations.stream()
                 .anyMatch(result -> result.status() == DestinationStatus.FAILED);
         boolean pendingSync = destinations.stream()
                 .anyMatch(result -> result.status() == DestinationStatus.PENDING_SYNC);
-        if (pendingSync) {
-            return BackupStatus.PARTIAL_SUCCESS;
-        }
-        if (succeeded && failed) {
+        if (pendingSync || succeeded && failed) {
             return BackupStatus.PARTIAL_SUCCESS;
         }
         if (succeeded) {
             return BackupStatus.SUCCESS;
         }
-        if (failed) {
-            return BackupStatus.FAILED;
-        }
-        return BackupStatus.SKIPPED;
+        return failed ? BackupStatus.FAILED : BackupStatus.SKIPPED;
     }
 }

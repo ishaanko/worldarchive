@@ -3,41 +3,32 @@ package dev.ishaanko.worldarchive.core;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParseException;
-import com.google.gson.JsonParser;
-import com.google.gson.JsonPrimitive;
 import dev.ishaanko.worldarchive.model.WorldId;
+import dev.ishaanko.worldarchive.support.AtomicFiles;
+import dev.ishaanko.worldarchive.support.JsonFields;
 import java.io.IOException;
-import java.math.BigDecimal;
-import java.nio.channels.FileChannel;
-import java.nio.channels.FileLock;
-import java.nio.file.Files;
-import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.locks.ReentrantLock;
 
-/** Atomic, process-safe JSON persistence for unchanged-world detection. */
-public final class FileWorldInventoryStore implements WorldInventoryStore {
-    public static final int CURRENT_SCHEMA_VERSION = 1;
+/**
+ * One JSON file per world holding the inventory of its last recorded capture. The next capture
+ * compares against it to count changed files. The coordinator writes one world's file at a time
+ * and replaces it atomically, so readers always see a whole file and no lock is needed.
+ */
+public final class FileWorldInventoryStore {
+    private static final int SCHEMA_VERSION = 1;
 
-    private static final Gson GSON = new GsonBuilder()
-            .setPrettyPrinting()
-            .disableHtmlEscaping()
-            .create();
+    private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
 
     /** A 500,000-file inventory encodes to well over the generic metadata ceiling. */
     private static final int MAXIMUM_INVENTORY_BYTES = 256 * 1_024 * 1_024;
 
-    private static final ConcurrentMap<Path, ReentrantLock> JVM_LOCKS = new ConcurrentHashMap<>();
+    private static final JsonFields<IOException> FIELDS = new JsonFields<>(IOException::new);
 
     private final Path directory;
 
@@ -47,85 +38,34 @@ public final class FileWorldInventoryStore implements WorldInventoryStore {
                 .normalize();
     }
 
-    public Path directory() {
-        return directory;
-    }
-
-    @Override
+    /** The world's last inventory, or empty when none was saved yet. A damaged file is an IOException. */
     public Optional<WorldInventory> load(WorldId worldId) throws IOException {
-        Objects.requireNonNull(worldId, "worldId");
-        return withLock(worldId, () -> {
-            Path file = file(worldId);
-            if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) {
-                return Optional.empty();
-            }
-            requireRegularFile(file, "World inventory is not a regular file");
-            try {
-                JsonElement parsed = JsonParser.parseString(AtomicFiles.readUtf8(file, MAXIMUM_INVENTORY_BYTES));
-                if (!parsed.isJsonObject()) {
-                    throw new IOException("World inventory root must be a JSON object");
-                }
-                return Optional.of(decode(worldId, parsed.getAsJsonObject()));
-            } catch (JsonParseException | IllegalArgumentException exception) {
-                throw new IOException("World inventory is malformed or invalid", exception);
-            }
-        });
-    }
-
-    @Override
-    public void save(WorldId worldId, WorldInventory inventory) throws IOException {
-        Objects.requireNonNull(worldId, "worldId");
-        Objects.requireNonNull(inventory, "inventory");
-        withLock(worldId, () -> {
-            AtomicFiles.writeUtf8(
-                    file(worldId),
-                    GSON.toJson(encode(worldId, inventory)) + "\n",
-                    MAXIMUM_INVENTORY_BYTES);
-            return null;
-        });
-    }
-
-    private <T> T withLock(WorldId worldId, IoSupplier<T> operation) throws IOException {
-        Path lockPath = lockFile(worldId);
-        ReentrantLock jvmLock = JVM_LOCKS.computeIfAbsent(lockPath, ignored -> new ReentrantLock());
-        jvmLock.lock();
+        String json;
         try {
-            createSafeDirectory();
-            if (Files.exists(lockPath, LinkOption.NOFOLLOW_LINKS)) {
-                requireRegularFile(lockPath, "World inventory lock is not a regular file");
-            }
-            try (FileChannel channel = FileChannel.open(
-                            lockPath,
-                            StandardOpenOption.CREATE,
-                            StandardOpenOption.WRITE,
-                            LinkOption.NOFOLLOW_LINKS);
-                    FileLock ignored = channel.lock()) {
-                return operation.get();
-            }
-        } finally {
-            jvmLock.unlock();
+            json = AtomicFiles.readUtf8(file(worldId), MAXIMUM_INVENTORY_BYTES);
+        } catch (NoSuchFileException exception) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(decode(worldId, FIELDS.parseObject(json, "World inventory")));
+        } catch (IllegalArgumentException exception) {
+            throw new IOException("World inventory is malformed or invalid", exception);
         }
     }
 
-    private void createSafeDirectory() throws IOException {
-        Files.createDirectories(directory);
-        if (Files.isSymbolicLink(directory)
-                || !Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) {
-            throw new IOException("World inventory directory is unsafe");
-        }
+    public void save(WorldId worldId, WorldInventory inventory) throws IOException {
+        Objects.requireNonNull(inventory, "inventory");
+        String json = GSON.toJson(encode(worldId, inventory)) + "\n";
+        AtomicFiles.writeUtf8(file(worldId), json, MAXIMUM_INVENTORY_BYTES);
     }
 
     private Path file(WorldId worldId) {
-        return directory.resolve(worldId + ".json");
-    }
-
-    private Path lockFile(WorldId worldId) {
-        return directory.resolve(worldId + ".lock");
+        return directory.resolve(Objects.requireNonNull(worldId, "worldId") + ".json");
     }
 
     private static JsonObject encode(WorldId worldId, WorldInventory inventory) {
         JsonObject root = new JsonObject();
-        root.addProperty("schemaVersion", CURRENT_SCHEMA_VERSION);
+        root.addProperty("schemaVersion", SCHEMA_VERSION);
         root.addProperty("worldId", worldId.toString());
         JsonArray files = new JsonArray();
         for (WorldInventory.Entry entry : inventory.files()) {
@@ -140,82 +80,24 @@ public final class FileWorldInventoryStore implements WorldInventoryStore {
     }
 
     private static WorldInventory decode(WorldId expectedWorldId, JsonObject root) throws IOException {
-        int schemaVersion = requiredInteger(root, "schemaVersion");
-        if (schemaVersion != CURRENT_SCHEMA_VERSION) {
+        int schemaVersion = FIELDS.requiredInt(root, "schemaVersion");
+        if (schemaVersion != SCHEMA_VERSION) {
             throw new IOException("Unsupported world inventory schema: " + schemaVersion);
         }
-        WorldId storedWorldId = WorldId.parse(requiredString(root, "worldId"));
-        if (!storedWorldId.equals(expectedWorldId)) {
+        if (!WorldId.parse(FIELDS.requiredString(root, "worldId")).equals(expectedWorldId)) {
             throw new IOException("World inventory identity does not match its file name");
         }
-        JsonArray encodedFiles = requiredArray(root, "files");
+        List<JsonObject> encodedFiles = FIELDS.requiredObjects(root, "files");
         if (encodedFiles.size() > WorldInventory.MAXIMUM_FILES) {
             throw new IOException("World inventory contains too many files");
         }
         List<WorldInventory.Entry> files = new ArrayList<>(encodedFiles.size());
-        for (JsonElement encoded : encodedFiles) {
-            if (!encoded.isJsonObject()) {
-                throw new IOException("World inventory entry must be an object");
-            }
-            JsonObject object = encoded.getAsJsonObject();
+        for (JsonObject encoded : encodedFiles) {
             files.add(new WorldInventory.Entry(
-                    requiredString(object, "path"),
-                    requiredLong(object, "size"),
-                    requiredString(object, "sha256")));
+                    FIELDS.requiredString(encoded, "path"),
+                    FIELDS.requiredLong(encoded, "size"),
+                    FIELDS.requiredString(encoded, "sha256")));
         }
         return WorldInventory.create(files);
-    }
-
-    private static void requireRegularFile(Path path, String message) throws IOException {
-        if (Files.isSymbolicLink(path) || !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
-            throw new IOException(message);
-        }
-    }
-
-    private static JsonArray requiredArray(JsonObject object, String name) throws IOException {
-        JsonElement element = object.get(name);
-        if (element == null || !element.isJsonArray()) {
-            throw new IOException("Required array is missing or invalid: " + name);
-        }
-        return element.getAsJsonArray();
-    }
-
-    private static String requiredString(JsonObject object, String name) throws IOException {
-        JsonElement element = object.get(name);
-        if (element == null
-                || !element.isJsonPrimitive()
-                || !element.getAsJsonPrimitive().isString()) {
-            throw new IOException("Required string is missing or invalid: " + name);
-        }
-        return element.getAsString();
-    }
-
-    private static int requiredInteger(JsonObject object, String name) throws IOException {
-        long value = requiredLong(object, name);
-        if (value < Integer.MIN_VALUE || value > Integer.MAX_VALUE) {
-            throw new IOException("Required integer is out of range: " + name);
-        }
-        return (int) value;
-    }
-
-    private static long requiredLong(JsonObject object, String name) throws IOException {
-        JsonElement element = object.get(name);
-        if (element == null || !element.isJsonPrimitive()) {
-            throw new IOException("Required number is missing or invalid: " + name);
-        }
-        JsonPrimitive primitive = element.getAsJsonPrimitive();
-        if (!primitive.isNumber()) {
-            throw new IOException("Required number is missing or invalid: " + name);
-        }
-        try {
-            return new BigDecimal(primitive.getAsString()).longValueExact();
-        } catch (ArithmeticException | NumberFormatException exception) {
-            throw new IOException("Required number is not an integer: " + name, exception);
-        }
-    }
-
-    @FunctionalInterface
-    private interface IoSupplier<T> {
-        T get() throws IOException;
     }
 }

@@ -5,24 +5,23 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
-/** Integrity result for one ZIP archive and its sidecar. */
-public record ZipVerification(
-        boolean valid,
-        Optional<BackupManifest> manifest,
-        long verifiedFileCount,
-        long verifiedByteCount,
-        List<String> problems) {
+/**
+ * What a full read of one archive found. A problem means the archive is damaged or is not the
+ * backup its name says; a warning, such as a missing checksum file, leaves the backup usable.
+ * The manifest is present once the archive's own manifest could be read.
+ */
+public record ZipVerification(Optional<BackupManifest> manifest, List<String> problems, List<String> warnings) {
     public ZipVerification {
-        manifest = Objects.requireNonNull(manifest, "manifest");
-        if (verifiedFileCount < 0 || verifiedByteCount < 0) {
-            throw new IllegalArgumentException("Verified counts must not be negative");
-        }
+        Objects.requireNonNull(manifest, "manifest");
         problems = List.copyOf(problems);
-        if (valid != problems.isEmpty()) {
-            throw new IllegalArgumentException("ZIP validity must match the problem list");
-        }
-        if (problems.stream().anyMatch(problem -> problem == null || problem.isBlank())) {
-            throw new IllegalArgumentException("ZIP verification problems must contain text");
-        }
+        warnings = List.copyOf(warnings);
+    }
+
+    static ZipVerification failed(String problem) {
+        return new ZipVerification(Optional.empty(), List.of(problem), List.of());
+    }
+
+    public boolean valid() {
+        return problems.isEmpty();
     }
 }

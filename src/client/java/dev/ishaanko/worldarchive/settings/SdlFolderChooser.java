@@ -1,6 +1,6 @@
 package dev.ishaanko.worldarchive.settings;
 
-import dev.ishaanko.worldarchive.WorldArchiveMetadata;
+import dev.ishaanko.worldarchive.ui.model.FolderSelectionResult;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.util.Objects;
@@ -18,33 +18,39 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Shows the SDL folder picker that ships with Minecraft. SDL requires the dialog to open on the
- * main thread and reports the choice later through a callback that may run on any thread.
+ * main thread and reports the choice through a callback that may run on any thread, including
+ * the main thread inside the call that opened the dialog.
  */
-public final class SdlFolderChooser implements NativeFolderChooser {
-    private static final Logger LOGGER = LoggerFactory.getLogger(WorldArchiveMetadata.MOD_NAME);
+public final class SdlFolderChooser {
+    private static final Logger LOGGER = LoggerFactory.getLogger("WorldArchive");
 
-    private final Executor mainThread;
+    private static final String PICKER_FAILED = "The native folder picker failed; type an absolute path instead";
+
+    private final Executor mainThreadQueue;
 
     private final LongSupplier windowHandle;
 
-    public SdlFolderChooser(Executor mainThread, LongSupplier windowHandle) {
-        this.mainThread = Objects.requireNonNull(mainThread, "mainThread");
+    /**
+     * @param mainThreadQueue queues work for the main thread and never runs it in the calling
+     *        thread, such as {@code Minecraft.schedule}
+     * @param windowHandle the game window the dialog belongs to
+     */
+    public SdlFolderChooser(Executor mainThreadQueue, LongSupplier windowHandle) {
+        this.mainThreadQueue = Objects.requireNonNull(mainThreadQueue, "mainThreadQueue");
         this.windowHandle = Objects.requireNonNull(windowHandle, "windowHandle");
     }
 
-    @Override
-    public CancellableRequest<FolderSelectionResult> chooseFolder(
-            String title,
-            Optional<Path> initialDirectory) {
+    /** Opens the dialog; the result completes when the player chooses or dismisses it. */
+    public CompletableFuture<FolderSelectionResult> chooseFolder(String title, Optional<Path> initialDirectory) {
         Objects.requireNonNull(title, "title");
         Objects.requireNonNull(initialDirectory, "initialDirectory");
         CompletableFuture<FolderSelectionResult> completion = new CompletableFuture<>();
-        mainThread.execute(() -> {
+        mainThreadQueue.execute(() -> {
             if (!completion.isDone()) {
                 show(title, initialDirectory, completion);
             }
         });
-        return new CancellableRequest<>(completion, () -> completion.cancel(false));
+        return completion;
     }
 
     private void show(
@@ -72,20 +78,19 @@ public final class SdlFolderChooser implements NativeFolderChooser {
             }
         } catch (LinkageError exception) {
             callback.free();
-            completion.complete(new FolderSelectionResult.Unavailable(
+            completion.complete(new FolderSelectionResult.Failed(
                     "Native folder selection is unavailable; type an absolute path instead"));
         } catch (RuntimeException exception) {
             callback.free();
             LOGGER.warn("The SDL folder picker could not be opened", exception);
-            completion.complete(new FolderSelectionResult.Failed(
-                    "The native folder picker failed; type an absolute path instead"));
+            completion.complete(new FolderSelectionResult.Failed(PICKER_FAILED));
         }
     }
 
     /**
      * SDL invokes this exactly once per dialog, on error, cancel, or selection. The native
-     * trampoline is released on the main thread after that invocation, never before it, so a
-     * request cancelled from the screen cannot free memory the dialog still points at.
+     * trampoline is freed by a task queued for the main thread, which runs only after this
+     * invocation has returned, even when SDL calls back inside the call that opened the dialog.
      */
     private final class DialogCallback extends SDL_DialogFileCallback {
         private final CompletableFuture<FolderSelectionResult> completion;
@@ -99,7 +104,7 @@ public final class SdlFolderChooser implements NativeFolderChooser {
             try {
                 completion.complete(read(fileList));
             } finally {
-                mainThread.execute(this::free);
+                mainThreadQueue.execute(this::free);
             }
         }
     }
@@ -108,8 +113,7 @@ public final class SdlFolderChooser implements NativeFolderChooser {
     private static FolderSelectionResult read(long fileList) {
         if (fileList == MemoryUtil.NULL) {
             LOGGER.warn("The SDL folder picker failed: {}", SDLError.SDL_GetError());
-            return new FolderSelectionResult.Failed(
-                    "The native folder picker failed; type an absolute path instead");
+            return new FolderSelectionResult.Failed(PICKER_FAILED);
         }
         long first = MemoryUtil.memGetAddress(fileList);
         if (first == MemoryUtil.NULL) {

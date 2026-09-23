@@ -1,17 +1,13 @@
 package dev.ishaanko.worldarchive.model;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 import java.util.UUID;
-import java.nio.charset.StandardCharsets;
 
 /** Opaque identity for a durable external import source. */
 public record ImportSourceId(UUID value) implements Comparable<ImportSourceId> {
     public ImportSourceId {
         Objects.requireNonNull(value, "value");
-    }
-
-    public static ImportSourceId create() {
-        return new ImportSourceId(UUID.randomUUID());
     }
 
     /** Stable identity used to make importing the same external source idempotent. */

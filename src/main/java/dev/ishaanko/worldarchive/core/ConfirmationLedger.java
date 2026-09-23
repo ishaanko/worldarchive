@@ -8,15 +8,11 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.function.Function;
 import java.util.function.Predicate;
-import java.util.function.Supplier;
 
 /**
- * Thread-safe store of short-lived, one-time confirmation entries keyed by {@code K}.
- *
- * <p>Supports both a token-keyed usage (the key itself is the confirmation token, minted by
- * {@link #putUnique}) and an entity-keyed usage with eviction (the key is a domain entity such
- * as a world, and issuing a new entry for that key replaces any previous one via {@link #put}).
- * Either way, {@link #claim} and {@link #claimMatching} remove an entry at most once.
+ * Thread-safe store of short-lived, one-time confirmations, one per key: a new entry for a key
+ * replaces the previous one, and {@link #claimMatching} removes an entry at most once. The cleanup
+ * preview keeps its plans here, one per world.
  */
 public final class ConfirmationLedger<K, V> {
     private final ConcurrentMap<K, V> entries = new ConcurrentHashMap<>();
@@ -43,25 +39,6 @@ public final class ConfirmationLedger<K, V> {
     }
 
     /**
-     * Generates keys via {@code keyGenerator} and builds a value for each candidate until one
-     * is inserted without colliding with an existing entry.
-     */
-    public Issued<K, V> putUnique(Supplier<K> keyGenerator, Function<K, V> valueFactory) {
-        K key;
-        V value;
-        do {
-            key = Objects.requireNonNull(keyGenerator.get(), "generated key");
-            value = Objects.requireNonNull(valueFactory.apply(key), "generated value");
-        } while (entries.putIfAbsent(key, value) != null);
-        return new Issued<>(key, value);
-    }
-
-    /** Removes and returns the entry at {@code key}, if any, regardless of its expiry. */
-    public Optional<V> claim(K key) {
-        return Optional.ofNullable(entries.remove(key));
-    }
-
-    /**
      * Expires stale entries as of {@code now}, then removes and returns the first remaining
      * entry whose value satisfies {@code matcher}.
      */
@@ -74,13 +51,5 @@ public final class ConfirmationLedger<K, V> {
             }
         }
         return Optional.empty();
-    }
-
-    /** A freshly minted key/value pair returned by {@link #putUnique}. */
-    public record Issued<K, V>(K key, V value) {
-        public Issued {
-            Objects.requireNonNull(key, "key");
-            Objects.requireNonNull(value, "value");
-        }
     }
 }

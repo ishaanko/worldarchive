@@ -5,11 +5,12 @@ import java.util.Optional;
 import net.minecraft.SharedConstants;
 import net.minecraft.WorldVersion;
 
-public final class RunningGameVersion {
+/** The Minecraft version that runs, which each new backup records; empty when the game cannot tell. */
+final class RunningGameVersion {
     private RunningGameVersion() {
     }
 
-    public static Optional<GameVersionStamp> current() {
+    static Optional<GameVersionStamp> current() {
         try {
             WorldVersion version = SharedConstants.getCurrentVersion();
             if (version == null) {

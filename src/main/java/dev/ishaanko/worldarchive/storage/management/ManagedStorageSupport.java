@@ -1,89 +1,46 @@
 package dev.ishaanko.worldarchive.storage.management;
 
 import dev.ishaanko.worldarchive.model.ArtifactOwnership;
-import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.BackupRecord;
 import dev.ishaanko.worldarchive.model.DestinationResult;
 import dev.ishaanko.worldarchive.model.DestinationType;
 import dev.ishaanko.worldarchive.model.SyncStatus;
-import dev.ishaanko.worldarchive.storage.zip.ZipBackupArtifact;
-import java.io.IOException;
-import java.nio.file.Files;
 import java.util.Optional;
-import java.util.concurrent.CompletionException;
-import java.util.concurrent.CompletionStage;
 
-/** Small lookups shared by the managed-storage overview, planner, and executor. */
+/** Questions about a backup's copies that the overview, the planner and the executor share. */
 final class ManagedStorageSupport {
     private ManagedStorageSupport() {
     }
 
-    static boolean managedDestination(
-            BackupRecord record,
-            DestinationType type) {
-        return destination(record, type)
-                .filter(result -> result.ownership() != ArtifactOwnership.EXTERNAL)
-                .filter(result -> result.artifactId().isPresent())
-                .isPresent();
+    static Optional<DestinationResult> destination(BackupRecord record, DestinationType type) {
+        return record.result().destinations().stream()
+                .filter(result -> result.destination() == type)
+                .findFirst();
     }
 
-    /**
-     * True when the catalog says this backup's own Git snapshot is on the configured
-     * remote. Imported snapshots are excluded: their sync status refers to the import
-     * source, which restore and verification do not search.
-     */
-    static boolean synchronizedRemoteCopy(BackupRecord record) {
-        return destination(record, DestinationType.GIT)
-                .filter(result -> result.ownership() == ArtifactOwnership.MANAGED
-                        && result.syncStatus() == SyncStatus.SYNCED)
+    /** True when the catalog lists a ZIP archive of this backup that WorldArchive owns. */
+    static boolean listsOwnZip(BackupRecord record) {
+        return destination(record, DestinationType.ZIP)
+                .filter(result -> result.ownership() != ArtifactOwnership.EXTERNAL && result.isDurable())
                 .isPresent();
     }
 
     /** True when this backup's Git snapshot is WorldArchive's own, not imported or linked. */
     static boolean ownGitSnapshot(BackupRecord record) {
         return destination(record, DestinationType.GIT)
-                .filter(result -> result.ownership() == ArtifactOwnership.MANAGED)
-                .filter(result -> result.artifactId().isPresent())
+                .filter(result -> result.ownership() == ArtifactOwnership.MANAGED && result.isDurable())
                 .isPresent();
     }
 
-    static Optional<DestinationResult> destination(
-            BackupRecord record,
-            DestinationType type) {
-        return record.result().destinations().stream()
-                .filter(result -> result.destination() == type)
-                .findFirst();
-    }
-
-    static BackupRecord record(Snapshot snapshot, BackupId backupId) {
-        return snapshot.records().stream()
-                .filter(record -> record.manifest().backupId().equals(backupId))
-                .findFirst()
-                .orElseThrow(() -> new IllegalStateException(
-                        "Snapshot does not contain cleanup record"));
-    }
-
-    static long artifactBytes(ZipBackupArtifact artifact) throws IOException {
-        return Math.addExact(
-                Files.size(artifact.archivePath()),
-                Files.size(artifact.checksumPath()));
-    }
-
-    static <T> T await(CompletionStage<T> stage) throws Exception {
-        try {
-            return stage.toCompletableFuture().get();
-        } catch (java.util.concurrent.ExecutionException exception) {
-            Throwable cause = exception.getCause();
-            if (cause instanceof Exception checked) {
-                throw checked;
-            }
-            if (cause instanceof Error error) {
-                throw error;
-            }
-            throw new CompletionException(cause);
-        } catch (InterruptedException exception) {
-            Thread.currentThread().interrupt();
-            throw exception;
-        }
+    /**
+     * True when the catalog says this backup's own Git snapshot is on the world's remote. Imported
+     * snapshots are excluded: their sync status refers to the repository they came from.
+     */
+    static boolean synchronizedRemoteCopy(BackupRecord record) {
+        return destination(record, DestinationType.GIT)
+                .filter(result -> result.ownership() == ArtifactOwnership.MANAGED
+                        && result.isDurable()
+                        && result.syncStatus() == SyncStatus.SYNCED)
+                .isPresent();
     }
 }

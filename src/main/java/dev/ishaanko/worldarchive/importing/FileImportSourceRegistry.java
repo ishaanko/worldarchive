@@ -3,32 +3,30 @@ package dev.ishaanko.worldarchive.importing;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParseException;
-import com.google.gson.JsonParser;
-import dev.ishaanko.worldarchive.core.AtomicFiles;
 import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.ImportSourceId;
 import dev.ishaanko.worldarchive.model.WorldId;
+import dev.ishaanko.worldarchive.support.AtomicFiles;
+import dev.ishaanko.worldarchive.support.JsonFields;
+import dev.ishaanko.worldarchive.support.LockedFile;
 import java.io.IOException;
-import java.nio.channels.FileChannel;
-import java.nio.channels.FileLock;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.locks.ReentrantLock;
 
-/** Process-safe JSON registry for read-only import sources. */
-public final class FileImportSourceRegistry implements ImportSourceRegistry {
+/**
+ * The repositories that Git imports came from, and which imported backup came from which, in
+ * {@code import-sources.json}. The start-up rebuild uses it to list an imported snapshot as
+ * imported, and a delete unlinks what it deleted. Changes hold the file's lock across threads
+ * and processes.
+ */
+public final class FileImportSourceRegistry {
     private static final int CURRENT_SCHEMA_VERSION = 1;
 
     private static final Gson GSON = new GsonBuilder()
@@ -36,23 +34,20 @@ public final class FileImportSourceRegistry implements ImportSourceRegistry {
             .disableHtmlEscaping()
             .create();
 
-    private static final ConcurrentMap<Path, ReentrantLock> JVM_LOCKS = new ConcurrentHashMap<>();
+    private static final JsonFields<IOException> FIELDS = new JsonFields<>(IOException::new);
+
+    private final LockedFile lock;
 
     private final Path file;
 
-    private final Path lockFile;
-
-    private final ReentrantLock jvmLock;
-
     public FileImportSourceRegistry(Path file) {
-        this.file = file.toAbsolutePath().normalize();
-        this.lockFile = this.file.resolveSibling(this.file.getFileName() + ".lock");
-        this.jvmLock = JVM_LOCKS.computeIfAbsent(this.file, ignored -> new ReentrantLock());
+        this.lock = new LockedFile(file);
+        this.file = lock.file();
     }
 
-    @Override
+    /** Adds a source, or adds the source's bindings to the one already recorded for its location. */
     public void put(ImportSource source) throws IOException {
-        withLock(() -> {
+        lock.withLock(() -> {
             Map<ImportSourceId, ImportSource> sources = readSources();
             ImportSource current = sources.get(source.id());
             if (current != null
@@ -76,32 +71,35 @@ public final class FileImportSourceRegistry implements ImportSourceRegistry {
         });
     }
 
-    @Override
     public Optional<ImportSource> find(ImportSourceId sourceId) throws IOException {
-        return withLock(() -> Optional.ofNullable(readSources().get(sourceId)));
+        return lock.withLock(() -> Optional.ofNullable(readSources().get(sourceId)));
     }
 
-    @Override
     public List<ImportSource> list() throws IOException {
-        return withLock(() -> readSources().values().stream()
+        return lock.withLock(() -> readSources().values().stream()
                 .sorted(Comparator.comparing(ImportSource::id))
                 .toList());
     }
 
-    @Override
-    public void unlink(ImportSourceId sourceId, BackupId backupId) throws IOException {
-        withLock(() -> {
+    /** Unlinks deleted backups from the sources they came from; a source left with none goes too. */
+    public void unlink(Map<BackupId, ImportSourceId> deleted) throws IOException {
+        Map<BackupId, ImportSourceId> artifacts = Map.copyOf(deleted);
+        if (artifacts.isEmpty()) {
+            return;
+        }
+        lock.withLock(() -> {
             Map<ImportSourceId, ImportSource> sources = readSources();
-            ImportSource source = sources.get(sourceId);
-            if (source == null) {
-                return null;
-            }
-            ImportSource updated = source.withoutArtifact(backupId);
-            if (updated.artifacts().isEmpty()) {
-                sources.remove(sourceId);
-            } else {
-                sources.put(sourceId, updated);
-            }
+            artifacts.forEach((backupId, sourceId) -> {
+                ImportSource source = sources.get(sourceId);
+                if (source != null) {
+                    ImportSource updated = source.withoutArtifact(backupId);
+                    if (updated.artifacts().isEmpty()) {
+                        sources.remove(sourceId);
+                    } else {
+                        sources.put(sourceId, updated);
+                    }
+                }
+            });
             writeSources(sources);
             return null;
         });
@@ -111,29 +109,21 @@ public final class FileImportSourceRegistry implements ImportSourceRegistry {
         if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) {
             return new LinkedHashMap<>();
         }
-        if (Files.isSymbolicLink(file) || !Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
-            throw new IOException("Import source registry is not a safe regular file");
-        }
         try {
-            JsonElement parsed = JsonParser.parseString(AtomicFiles.readUtf8(file));
-            if (!parsed.isJsonObject()) {
-                throw new IOException("Import source registry root must be an object");
-            }
-            JsonObject root = parsed.getAsJsonObject();
-            int schemaVersion = root.get("schemaVersion").getAsInt();
+            JsonObject root = FIELDS.parseObject(AtomicFiles.readUtf8(file), "Import source registry");
+            int schemaVersion = FIELDS.requiredInt(root, "schemaVersion");
             if (schemaVersion != CURRENT_SCHEMA_VERSION) {
                 throw new IOException("Unsupported import source registry schema: " + schemaVersion);
             }
-            JsonArray encodedSources = root.getAsJsonArray("sources");
             Map<ImportSourceId, ImportSource> sources = new LinkedHashMap<>();
-            for (JsonElement element : encodedSources) {
-                ImportSource source = decodeSource(element.getAsJsonObject());
+            for (JsonObject encoded : FIELDS.requiredObjects(root, "sources")) {
+                ImportSource source = decodeSource(encoded);
                 if (sources.putIfAbsent(source.id(), source) != null) {
                     throw new IOException("Import source registry contains duplicate source IDs");
                 }
             }
             return sources;
-        } catch (JsonParseException | IllegalArgumentException | NullPointerException exception) {
+        } catch (IllegalArgumentException exception) {
             throw new IOException("Import source registry is malformed or invalid", exception);
         }
     }
@@ -172,13 +162,12 @@ public final class FileImportSourceRegistry implements ImportSourceRegistry {
     }
 
     private static ImportSource decodeSource(JsonObject encoded) throws IOException {
-        ImportSourceId id = ImportSourceId.parse(requiredString(encoded, "id"));
-        ImportSourceMode mode = ImportSourceMode.valueOf(requiredString(encoded, "mode"));
-        String location = requiredString(encoded, "location");
-        JsonArray artifacts = encoded.getAsJsonArray("artifacts");
+        ImportSourceId id = ImportSourceId.parse(FIELDS.requiredString(encoded, "id"));
+        ImportSourceMode mode = FIELDS.requiredEnum(encoded, "mode", ImportSourceMode.class);
+        String location = FIELDS.requiredString(encoded, "location");
         Map<BackupId, ImportArtifactBinding> bindings = new LinkedHashMap<>();
-        for (JsonElement element : artifacts) {
-            ImportArtifactBinding binding = decodeBinding(element.getAsJsonObject());
+        for (JsonObject encodedBinding : FIELDS.requiredObjects(encoded, "artifacts")) {
+            ImportArtifactBinding binding = decodeBinding(encodedBinding);
             if (bindings.putIfAbsent(binding.backupId(), binding) != null) {
                 throw new IOException("Import source contains duplicate backup IDs");
             }
@@ -188,46 +177,9 @@ public final class FileImportSourceRegistry implements ImportSourceRegistry {
 
     private static ImportArtifactBinding decodeBinding(JsonObject encoded) throws IOException {
         return new ImportArtifactBinding(
-                WorldId.parse(requiredString(encoded, "worldId")),
-                BackupId.parse(requiredString(encoded, "backupId")),
-                requiredString(encoded, "locator"),
-                requiredString(encoded, "fingerprint"));
-    }
-
-    private static String requiredString(JsonObject encoded, String name) throws IOException {
-        JsonElement value = encoded.get(name);
-        if (value == null || !value.isJsonPrimitive() || !value.getAsJsonPrimitive().isString()) {
-            throw new IOException("Import source field is missing or invalid: " + name);
-        }
-        return value.getAsString();
-    }
-
-    private <T> T withLock(IoSupplier<T> operation) throws IOException {
-        jvmLock.lock();
-        try {
-            Path parent = file.getParent();
-            if (parent == null) {
-                throw new IOException("Import source registry path has no parent");
-            }
-            Files.createDirectories(parent);
-            if (Files.isSymbolicLink(lockFile)) {
-                throw new IOException("Import source registry lock must not be symbolic");
-            }
-            try (FileChannel channel = FileChannel.open(
-                            lockFile,
-                            StandardOpenOption.CREATE,
-                            StandardOpenOption.WRITE,
-                            LinkOption.NOFOLLOW_LINKS);
-                    FileLock ignored = channel.lock()) {
-                return operation.get();
-            }
-        } finally {
-            jvmLock.unlock();
-        }
-    }
-
-    @FunctionalInterface
-    private interface IoSupplier<T> {
-        T get() throws IOException;
+                WorldId.parse(FIELDS.requiredString(encoded, "worldId")),
+                BackupId.parse(FIELDS.requiredString(encoded, "backupId")),
+                FIELDS.requiredString(encoded, "locator"),
+                FIELDS.requiredString(encoded, "fingerprint"));
     }
 }

@@ -1,14 +1,14 @@
 package dev.ishaanko.worldarchive.ui;
 
+import dev.ishaanko.worldarchive.model.BackupOperation;
+import dev.ishaanko.worldarchive.ui.model.BackupWorldContext;
+import dev.ishaanko.worldarchive.ui.model.BackupWorldSelection;
 import java.lang.ref.WeakReference;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.WeakHashMap;
-import java.util.concurrent.CompletionStage;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.Supplier;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
 import net.fabricmc.fabric.api.client.screen.v1.Screens;
 import net.minecraft.client.Minecraft;
@@ -16,11 +16,15 @@ import net.minecraft.client.gui.components.AbstractWidget;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.navigation.ScreenRectangle;
-import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.worldselection.EditWorldScreen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.contents.TranslatableContents;
 
+/**
+ * Replaces the Make Backup and Backups Folder buttons of vanilla's Edit World screen with
+ * WorldArchive's Create and Backups actions for the edited world. The Edit World screen does not
+ * expose its world, so the world comes from the Select World integration's last selection.
+ */
 public final class EditWorldBackupIntegration {
     private static final String BACKUP_KEY = "selectWorld.edit.backup";
 
@@ -29,69 +33,59 @@ public final class EditWorldBackupIntegration {
     private static final String NO_WORLD_MESSAGE =
             "Open Edit World from the world list to use WorldArchive backups";
 
-    private static final String NOT_READY_MESSAGE = "Backups are not ready";
-
-    private static final AtomicBoolean REGISTERED = new AtomicBoolean();
-
+    /**
+     * Vanilla keeps the Edit World widgets when it shows the screen again, so each screen keeps
+     * the buttons it replaced across inits. Render thread only.
+     */
     private static final Map<EditWorldScreen, WeakReference<ScreenState>> STATES = new WeakHashMap<>();
-
-    private static volatile Supplier<? extends BackupClientFacade> facadeSupplier;
 
     private EditWorldBackupIntegration() {
     }
 
-    public static void register(Supplier<? extends BackupClientFacade> supplier) {
-        facadeSupplier = Objects.requireNonNull(supplier, "supplier");
-        if (REGISTERED.compareAndSet(false, true)) {
-            ScreenEvents.AFTER_INIT.register(EditWorldBackupIntegration::afterInit);
-        }
+    /** Registers the Edit World hook; the client initializer calls this once. */
+    public static void register(BackupClientFacade facade) {
+        Objects.requireNonNull(facade, "facade");
+        ScreenEvents.AFTER_INIT.register((minecraft, screen, width, height) -> {
+            if (screen instanceof EditWorldScreen editWorld) {
+                WeakReference<ScreenState> reference = STATES.get(editWorld);
+                ScreenState state = reference == null ? null : reference.get();
+                if (state == null) {
+                    state = new ScreenState(minecraft, editWorld, facade);
+                    STATES.put(editWorld, new WeakReference<>(state));
+                }
+                state.install();
+            }
+        });
     }
 
-    private static void afterInit(Minecraft minecraft, Screen screen, int width, int height) {
-        if (!(screen instanceof EditWorldScreen editWorldScreen)) {
-            return;
-        }
-        WeakReference<ScreenState> reference = STATES.get(editWorldScreen);
-        ScreenState state = reference == null ? null : reference.get();
-        if (state == null) {
-            state = new ScreenState(minecraft, editWorldScreen);
-            STATES.put(editWorldScreen, new WeakReference<>(state));
-        }
-        state.install();
-    }
-
-    private static BackupClientFacade currentFacade() {
-        Supplier<? extends BackupClientFacade> supplier = facadeSupplier;
-        if (supplier == null) {
-            throw new IllegalStateException("WorldArchive client facade has not been registered");
-        }
-        return Objects.requireNonNull(supplier.get(), "facadeSupplier result");
-    }
-
+    /** A vanilla button and the WorldArchive button shown in its place. */
     private record Slot(Button vanillaButton, Button replacement) {
         private static final Slot EMPTY = new Slot(null, null);
 
         private void mirrorBounds() {
-            if (vanillaButton == null || replacement == null) {
-                return;
+            if (vanillaButton != null && replacement != null) {
+                ScreenRectangle bounds = vanillaButton.getRectangle();
+                replacement.setRectangle(bounds.width(), bounds.height(), bounds.left(), bounds.top());
             }
-            ScreenRectangle bounds = vanillaButton.getRectangle();
-            replacement.setRectangle(bounds.width(), bounds.height(), bounds.left(), bounds.top());
         }
 
         private void apply(boolean enabled, String tooltip) {
-            if (replacement == null) {
-                return;
+            if (replacement != null) {
+                replacement.active = enabled;
+                replacement.setTooltip(Tooltip.create(Component.literal(tooltip)));
             }
-            replacement.active = enabled;
-            replacement.setTooltip(Tooltip.create(Component.literal(tooltip)));
         }
     }
 
+    /** The takeover of one Edit World screen: its replaced buttons and the edited world. */
     private static final class ScreenState {
         private final Minecraft minecraft;
 
         private final EditWorldScreen screen;
+
+        private final BackupClientFacade facade;
+
+        private final SelectedWorldResolver resolver;
 
         private Slot backupSlot = Slot.EMPTY;
 
@@ -99,88 +93,45 @@ public final class EditWorldBackupIntegration {
 
         private BackupWorldContext world;
 
-        private BackupWorldSelection selection;
-
-        private boolean active;
-
         private boolean layoutPending;
 
-        private long resolutionRevision;
-
-        private ScreenState(Minecraft minecraft, EditWorldScreen screen) {
+        private ScreenState(Minecraft minecraft, EditWorldScreen screen, BackupClientFacade facade) {
             this.minecraft = minecraft;
             this.screen = screen;
+            this.facade = Objects.requireNonNull(facade, "facade");
+            resolver = new SelectedWorldResolver(screen);
         }
 
-        private static Optional<Button> findVanillaButton(List<AbstractWidget> widgets, String key) {
-            return widgets.stream()
-                    .filter(Button.class::isInstance)
-                    .map(Button.class::cast)
-                    .filter(button -> hasKey(button.getMessage(), key))
-                    .findFirst();
-        }
-
-        private static boolean hasKey(Component message, String key) {
-            return message.getContents() instanceof TranslatableContents contents
-                    && key.equals(contents.getKey());
-        }
-
+        /** Takes the buttons over after each init and resolves the edited world again. */
         private void install() {
-            active = true;
             layoutPending = true;
-            long revision = ++resolutionRevision;
             ScreenEvents.afterTick(screen).register(ignored -> afterTick());
-            ScreenEvents.remove(screen).register(ignored -> removed());
-            selection = SelectWorldBackupIntegration.lastSelection().orElse(null);
-            BackupWorldContext remembered = SelectWorldBackupIntegration.lastResolvedWorld().orElse(null);
-            if (remembered != null) {
-                world = remembered;
-            } else if (selection == null || world == null || !world.matches(selection)) {
-                world = null;
-            }
             backupSlot = takeOver(backupSlot, BACKUP_KEY, "Make Backup", this::promptManualBackup);
             backupFolderSlot = takeOver(backupFolderSlot, BACKUP_FOLDER_KEY, "Backups", this::openBrowser);
-            if (world != null) {
-                applyWorld();
-            } else if (selection != null) {
-                disable("Loading world identity…");
-                resolveWorld(selection, revision);
-            } else {
-                applyWorld();
-            }
-        }
-
-        private void resolveWorld(BackupWorldSelection target, long revision) {
-            CompletionStage<Optional<BackupWorldContext>> resolution;
-            try {
-                resolution = Objects.requireNonNull(
-                        currentFacade().resolveWorld(target),
-                        "resolveWorld result");
-            } catch (RuntimeException exception) {
-                disable(NOT_READY_MESSAGE);
+            world = null;
+            Optional<BackupWorldSelection> selection = SelectWorldBackupIntegration.lastSelection();
+            if (selection.isEmpty()) {
+                resolver.cancel();
+                disable(NO_WORLD_MESSAGE);
                 return;
             }
-            resolution.whenComplete((resolved, throwable) -> minecraft.execute(() -> {
-                if (!active || revision != resolutionRevision || !target.equals(selection)) {
-                    return;
-                }
-                if (throwable != null || resolved == null || resolved.isEmpty()) {
-                    disable("Backups are unavailable for this world");
-                    return;
-                }
-                BackupWorldContext context = resolved.orElseThrow();
-                if (!context.matches(target)) {
-                    disable("World identity did not match the selection");
-                    return;
-                }
-                world = context;
-                applyWorld();
-            }));
+            disable("Loading world identity…");
+            resolver.resolve(facade, selection.orElseThrow(), this::enable, this::disable);
         }
 
+        /**
+         * Puts a WorldArchive button where the vanilla button with {@code key} was. After the
+         * first init the vanilla button is no longer in the widget list, so the slot remembers it.
+         */
         private Slot takeOver(Slot slot, String key, String label, Runnable action) {
             List<AbstractWidget> widgets = Screens.getWidgets(screen);
-            Button vanillaButton = findVanillaButton(widgets, key).orElse(slot.vanillaButton());
+            Button vanillaButton = widgets.stream()
+                    .filter(Button.class::isInstance)
+                    .map(Button.class::cast)
+                    .filter(button -> button.getMessage().getContents() instanceof TranslatableContents contents
+                            && key.equals(contents.getKey()))
+                    .findFirst()
+                    .orElse(slot.vanillaButton());
             if (vanillaButton == null) {
                 return Slot.EMPTY;
             }
@@ -199,44 +150,17 @@ public final class EditWorldBackupIntegration {
             return seated;
         }
 
+        /** Vanilla may lay its buttons out after the init hook; follow them once, one tick later. */
         private void afterTick() {
-            if (!active || !layoutPending) {
-                return;
+            if (layoutPending) {
+                layoutPending = false;
+                backupSlot.mirrorBounds();
+                backupFolderSlot.mirrorBounds();
             }
-            layoutPending = false;
-            backupSlot.mirrorBounds();
-            backupFolderSlot.mirrorBounds();
         }
 
-        private void removed() {
-            active = false;
-            resolutionRevision++;
-            world = null;
-            selection = null;
-            List<AbstractWidget> widgets = Screens.getWidgets(screen);
-            backupSlot = release(widgets, backupSlot);
-            backupFolderSlot = release(widgets, backupFolderSlot);
-        }
-
-        private Slot release(List<AbstractWidget> widgets, Slot slot) {
-            Button replacement = slot.replacement();
-            int index = replacement == null ? -1 : widgets.indexOf(replacement);
-            if (replacement != null) {
-                widgets.remove(replacement);
-            }
-            Button vanillaButton = slot.vanillaButton();
-            if (vanillaButton != null && !widgets.contains(vanillaButton)) {
-                widgets.add(index < 0 || index > widgets.size() ? widgets.size() : index, vanillaButton);
-            }
-            return Slot.EMPTY;
-        }
-
-        private void applyWorld() {
-            BackupWorldContext context = world;
-            if (context == null) {
-                disable(NO_WORLD_MESSAGE);
-                return;
-            }
+        private void enable(BackupWorldContext context) {
+            world = context;
             backupSlot.apply(true, "Create a WorldArchive backup of " + context.displayName());
             backupFolderSlot.apply(true, "Browse WorldArchive backups for " + context.displayName());
         }
@@ -248,35 +172,24 @@ public final class EditWorldBackupIntegration {
 
         private void promptManualBackup() {
             BackupWorldContext context = world;
-            if (!active || context == null) {
+            if (context == null) {
                 disable(NO_WORLD_MESSAGE);
-                return;
-            }
-            BackupClientFacade facade;
-            try {
-                facade = currentFacade();
-            } catch (RuntimeException exception) {
-                disable(NOT_READY_MESSAGE);
                 return;
             }
             minecraft.setScreenAndShow(new BackupCreateScreen(screen, label -> minecraft.setScreenAndShow(
                     BackupOperationScreen.backupResult(
                             screen,
+                            BackupOperation.CREATE,
                             "Creating backup",
                             listener -> facade.createManualBackup(context, label, listener)))));
         }
 
         private void openBrowser() {
-            BackupWorldContext context = world;
-            if (!active || context == null) {
+            if (world == null) {
                 disable(NO_WORLD_MESSAGE);
                 return;
             }
-            try {
-                minecraft.setScreenAndShow(new BackupBrowserScreen(screen, context, currentFacade()));
-            } catch (RuntimeException exception) {
-                disable(NOT_READY_MESSAGE);
-            }
+            minecraft.setScreenAndShow(new BackupBrowserScreen(screen, world, facade));
         }
     }
 }

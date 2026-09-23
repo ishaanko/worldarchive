@@ -9,6 +9,9 @@ public record RestoreBackupRequest(
         BackupId sourceBackupId,
         Path worldsDirectory,
         String restoredWorldName) {
+    /** The longest restored folder name in UTF-16 units; the Restore screen's name box stops here too. */
+    public static final int MAXIMUM_NAME_LENGTH = 255;
+
     public RestoreBackupRequest {
         Objects.requireNonNull(sourceBackupId, "sourceBackupId");
         worldsDirectory = Objects.requireNonNull(worldsDirectory, "worldsDirectory")
@@ -16,7 +19,7 @@ public record RestoreBackupRequest(
                 .normalize();
         Objects.requireNonNull(restoredWorldName, "restoredWorldName");
         if (restoredWorldName.isBlank()
-                || restoredWorldName.length() > 255
+                || restoredWorldName.length() > MAXIMUM_NAME_LENGTH
                 || restoredWorldName.contains("/")
                 || restoredWorldName.contains("\\")
                 || restoredWorldName.equals(".")

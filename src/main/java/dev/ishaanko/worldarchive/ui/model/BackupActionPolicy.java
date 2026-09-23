@@ -4,92 +4,91 @@ import java.util.Collections;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 
-/** Pure action policy shared by screens and screen tests. */
+/** Decides which backup-browser actions can run for the current selection, and why one cannot. */
 public final class BackupActionPolicy {
     private BackupActionPolicy() {
     }
 
     /**
-     * Evaluates every action for the current selection. Delete accepts any number of rows;
-     * restore, sync, and verify need exactly one.
+     * The reason each action cannot run, or {@link ActionDisabledReason#NONE} when it can. Delete
+     * accepts any number of backups; Restore, Sync and Verify need exactly one.
      */
-    public static Map<BackupAction, BackupActionAvailability> evaluate(
+    public static Map<BackupAction, ActionDisabledReason> evaluate(
             BackupBrowserCapabilities capabilities,
             List<BackupRow> selection) {
-        Objects.requireNonNull(capabilities, "capabilities");
-        Objects.requireNonNull(selection, "selection");
-        EnumMap<BackupAction, BackupActionAvailability> result = new EnumMap<>(BackupAction.class);
-        if (capabilities.operationInProgress()) {
-            for (BackupAction action : BackupAction.values()) {
-                result.put(action, disabled(ActionDisabledReason.OPERATION_IN_PROGRESS));
-            }
-            return Collections.unmodifiableMap(result);
+        EnumMap<BackupAction, ActionDisabledReason> reasons = new EnumMap<>(BackupAction.class);
+        for (BackupAction action : BackupAction.values()) {
+            reasons.put(action, capabilities.operationInProgress()
+                    ? ActionDisabledReason.OPERATION_IN_PROGRESS
+                    : reason(action, capabilities, selection));
         }
+        return Collections.unmodifiableMap(reasons);
+    }
 
-        result.put(
-                BackupAction.CREATE,
-                capabilities.createDestinationConfigured()
-                        ? enabled()
-                        : disabled(capabilities.sourceAvailable()
-                                ? ActionDisabledReason.NO_DESTINATION_CONFIGURED
-                                : ActionDisabledReason.SOURCE_UNAVAILABLE));
-        result.put(
-                BackupAction.OPEN_FOLDER,
-                capabilities.managedFolderAvailable()
-                        ? enabled()
-                        : disabled(ActionDisabledReason.FOLDER_UNAVAILABLE));
-        result.put(BackupAction.STORAGE, enabled());
-        result.put(BackupAction.SETTINGS, enabled());
+    private static ActionDisabledReason reason(
+            BackupAction action,
+            BackupBrowserCapabilities capabilities,
+            List<BackupRow> selection) {
+        return switch (action) {
+            case CREATE -> create(capabilities);
+            case RESTORE, VERIFY -> restoreOrVerify(selection);
+            case DELETE -> delete(selection);
+            case SYNC -> sync(capabilities, selection);
+            case OPEN_FOLDER -> capabilities.managedFolderAvailable()
+                    ? ActionDisabledReason.NONE
+                    : ActionDisabledReason.FOLDER_UNAVAILABLE;
+            case STORAGE, SETTINGS -> ActionDisabledReason.NONE;
+        };
+    }
 
+    private static ActionDisabledReason create(BackupBrowserCapabilities capabilities) {
+        if (!capabilities.sourceAvailable()) {
+            return ActionDisabledReason.SOURCE_UNAVAILABLE;
+        }
+        return capabilities.createBlock().isPresent()
+                ? ActionDisabledReason.CREATE_BLOCKED
+                : ActionDisabledReason.NONE;
+    }
+
+    private static ActionDisabledReason delete(List<BackupRow> selection) {
         if (selection.isEmpty()) {
-            disableSelectionActions(result, ActionDisabledReason.NO_SELECTION);
-            return Collections.unmodifiableMap(result);
+            return ActionDisabledReason.NO_SELECTION;
         }
-        boolean allDurable = selection.stream().allMatch(BackupRow::hasDurableCopy);
-        result.put(
-                BackupAction.DELETE,
-                allDurable ? enabled() : disabled(ActionDisabledReason.NO_DURABLE_COPY));
-        if (selection.size() > 1) {
-            result.put(BackupAction.RESTORE, disabled(ActionDisabledReason.MULTIPLE_SELECTED));
-            result.put(BackupAction.VERIFY, disabled(ActionDisabledReason.MULTIPLE_SELECTED));
-            result.put(BackupAction.SYNC, disabled(ActionDisabledReason.MULTIPLE_SELECTED));
-            return Collections.unmodifiableMap(result);
-        }
-        BackupRow row = selection.getFirst();
-        BackupActionAvailability durable = row.hasDurableCopy()
-                ? enabled()
-                : disabled(ActionDisabledReason.NO_DURABLE_COPY);
-        result.put(BackupAction.RESTORE, durable);
-        result.put(BackupAction.VERIFY, durable);
-
-        BackupActionAvailability sync;
-        if (!row.git().durable()) {
-            sync = disabled(ActionDisabledReason.NO_DURABLE_COPY);
-        } else if (!capabilities.gitRemoteConfigured()) {
-            sync = disabled(ActionDisabledReason.REMOTE_NOT_CONFIGURED);
-        } else {
-            sync = enabled();
-        }
-        result.put(BackupAction.SYNC, sync);
-        return Collections.unmodifiableMap(result);
+        return selection.stream().allMatch(BackupRow::hasDurableCopy)
+                ? ActionDisabledReason.NONE
+                : ActionDisabledReason.NO_DURABLE_COPY;
     }
 
-    private static void disableSelectionActions(
-            EnumMap<BackupAction, BackupActionAvailability> result,
-            ActionDisabledReason reason) {
-        result.put(BackupAction.RESTORE, disabled(reason));
-        result.put(BackupAction.DELETE, disabled(reason));
-        result.put(BackupAction.SYNC, disabled(reason));
-        result.put(BackupAction.VERIFY, disabled(reason));
+    private static ActionDisabledReason restoreOrVerify(List<BackupRow> selection) {
+        ActionDisabledReason count = exactlyOne(selection);
+        if (count != ActionDisabledReason.NONE) {
+            return count;
+        }
+        return selection.getFirst().hasDurableCopy()
+                ? ActionDisabledReason.NONE
+                : ActionDisabledReason.NO_DURABLE_COPY;
     }
 
-    private static BackupActionAvailability enabled() {
-        return BackupActionAvailability.available();
+    private static ActionDisabledReason sync(
+            BackupBrowserCapabilities capabilities,
+            List<BackupRow> selection) {
+        ActionDisabledReason count = exactlyOne(selection);
+        if (count != ActionDisabledReason.NONE) {
+            return count;
+        }
+        if (!selection.getFirst().git().durable()) {
+            return ActionDisabledReason.NO_DURABLE_COPY;
+        }
+        return capabilities.gitRemoteConfigured()
+                ? ActionDisabledReason.NONE
+                : ActionDisabledReason.REMOTE_NOT_CONFIGURED;
     }
 
-    private static BackupActionAvailability disabled(ActionDisabledReason reason) {
-        return BackupActionAvailability.disabled(reason);
+    private static ActionDisabledReason exactlyOne(List<BackupRow> selection) {
+        if (selection.isEmpty()) {
+            return ActionDisabledReason.NO_SELECTION;
+        }
+        return selection.size() > 1 ? ActionDisabledReason.MULTIPLE_SELECTED : ActionDisabledReason.NONE;
     }
 }

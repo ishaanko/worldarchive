@@ -10,7 +10,7 @@ This is a backup tool. A bug that corrupts a backup or touches the original worl
 
 - Restores are copy-only. They create a new world and never write into the source world.
 - The mod never deletes a backup on its own. Every cleanup goes through a user-reviewed plan, and labeled backups are always kept.
-- A destination must never read the world while it can still change. All capture work goes through `BackupCoordinator` and the save gate; do not add a path that copies world files outside that flow.
+- A destination must never read the world while it can still change. All capture work goes through `SerializedBackupCoordinator` and the save gate; do not add a path that copies world files outside that flow.
 - An operation that fails must leave the previous state intact. Report failure honestly rather than report success with content half-removed (this applies to remote deletes especially: if the remote refuses to stop exposing a backup, the delete failed).
 
 ### 2. Clean-room provenance
@@ -19,31 +19,39 @@ Another Git-based Minecraft backup mod exists ("Fast" + "Back", GPL-licensed). T
 
 ## Glossary
 
-- **world** — one single-player world directory, identified by a `WorldId` / `WorldIdentity`.
-- **capture** — the short phase that copies the world into an immutable source while saves are gated.
-- **save gate** — the mechanism that pauses autosave and world writes for the duration of a capture.
-- **destination** / **backend** — where a backup lands: a Git repository or a ZIP archive (`BackupBackend`).
-- **snapshot** — one Git commit of a world. One repository per world; an optional remote per world.
-- **archive** — one ZIP file with a SHA-256 checksum.
-- **manifest** — the metadata recorded with each backup, including the Minecraft version it was made with.
-- **catalog** — the persistent per-world index of backup records the UI reads.
-- **trigger** — what started a backup: manual, world exit, or schedule.
-- **label** — a user mark that protects a backup from cleanup.
-- **cleanup** — a user-confirmed deletion plan with a preview.
-- **import** / **recovery** — bringing old or external backups into the catalog, and restoring or deleting from it.
+- **world**: one single-player world directory, identified by a `WorldId` / `WorldIdentity`.
+- **capture**: the phase that copies the world into a private folder under `capture-temp`. It reads and hashes each file while it copies it; a capture of the open world reads every file a second time.
+- **save gate**: for the open world, the save before a capture and the autosave pause during it; autosave then goes back to how the player set it. The world exit backup captures after the final save instead.
+- **destination** / **backend**: where a backup lands: a Git repository or a ZIP archive (`BackupBackend`).
+- **snapshot**: one Git commit of a world. One repository per world; an optional remote per world.
+- **archive**: one ZIP file with a SHA-256 checksum.
+- **manifest**: the metadata recorded with each backup, including the Minecraft version it was made with.
+- **catalog**: the persistent index of backup records for all worlds (`catalog.json`) that the UI reads.
+- **inventory**: the files and hashes of a world's last backup; the next backup counts its changed files against it.
+- **trigger**: what started a backup: manual, world exit, or schedule.
+- **label**: a user mark that protects a backup from cleanup.
+- **cleanup**: a user-confirmed deletion plan with a preview.
+- **deletion mark**: an entry in `deleted-backups.txt` that keeps a deleted backup out of a catalog rebuild while any file of it is left.
+- **import** / **recovery**: bringing old or external backups into the catalog, and restoring or deleting from it.
 
 ## How a backup happens
 
-A trigger in the client runtime asks `BackupCoordinator` for a backup. The coordinator serializes operations per world and coalesces compatible concurrent triggers. The capture phase copies the world under the save gate on a capture thread; only after the capture is sealed does destination work start asynchronously. Each enabled backend (Git, ZIP) writes its artifact and returns a `DestinationResult`. The result is recorded in the catalog, which the UI screens render.
+A trigger in the runtime asks `SerializedBackupCoordinator` for a backup. For the open world, `LiveWorldBackups` has the server save, pauses autosave, and calls `prepareCapture`, which copies the world on a worker. When the copy is complete, autosave goes back to how the player set it, and `createPreparedBackup` queues the destination work. A world exit backup captures after the server's final save. A world that is not open goes through `createBackup`, which captures and then queues in the same way.
+
+The coordinator lets one capture copy a world at a time and writes the backups of one world in order, while different worlds run in parallel. It never merges triggers: each trigger makes its own backup.
+
+The capture (`FileSystemBackupCaptureFactory`) copies the world into `capture-temp` with up to four workers and hashes each file while it copies it. A capture of the open world reads and hashes every file a second time. A capture of a closed world reads a file a second time only when the file changed during the copy, or when its time is within 10 seconds of the newest file's or of the clock, or later. The caller says which kind it is (`CaptureKind`). When the world changed, it tries again and copies only the changed files. Destination work starts only after the capture is complete. Each enabled backend (`WorldGitSnapshotStore`, `ZipBackupBackend`) writes its copy from the capture and returns a `DestinationResult`. The coordinator records one `BackupRecord` in the catalog, updates the world's inventory, and deletes the capture. The UI screens render the catalog.
 
 ## Where code lives
 
 Two production source sets, split by Minecraft coupling:
 
-- `src/main` — the engine. Pure Java, zero Minecraft imports. `core` (coordinator, capture, gates), `storage/git` and `storage/zip` (backends), `storage/management` (cleanup and retention), `catalog`, `model`, `config`, `importing`, `recovery`.
-- `src/client` — the Fabric integration. `runtime` (lifecycle, save gates, scheduling), `ui` (screens), `settings`, `integration` (Mod Menu). New logic goes in `src/main` unless it needs a Minecraft class.
-- `src/test` — plain JUnit tests against `src/main` and client logic. No Minecraft runtime in tests; keep it that way by keeping logic out of `src/client`.
-- `src/main/resources/assets/worldarchive/lang` — every user-visible string. New UI text needs a lang entry, not a literal.
+- `src/main`: the engine. Pure Java, zero Minecraft imports. `core` (coordinator, capture, gates), `storage/git` and `storage/zip` (backends), `storage/management` (cleanup and retention), `catalog`, `model`, `config`, `settings` (the settings service, drafts and validation), `importing`, `recovery`, `runtime` (the service graph built from the settings, the open world's backups behind the small `LiveServer` port, and world identity), `ui/model` (screen logic without Minecraft: rows, filters, selections, summaries), and `support` (shared file, JSON, path, and async helpers; it depends on no other WorldArchive package).
+- `src/client`: the Fabric integration. `runtime` (the Fabric event adapter, toasts, navigation, and the screens' facade), `ui` (screens), `settings` (the settings screen and folder picker), `integration` (Mod Menu). New logic goes in `src/main` unless it needs a Minecraft class.
+- `src/test`: plain JUnit tests against `src/main` and client logic. No Minecraft runtime in tests; keep it that way by keeping logic out of `src/client`. The `e2e` package runs the real engine through the production `ServiceGraph` with real Git and real ZIP files (`Engine`, `TestWorld`); prefer it for backup, restore, delete, and cleanup behavior.
+- `src/main/resources/assets/worldarchive/lang`: every user-visible string. New UI text needs a lang entry, not a literal.
+
+Packages have no dependency cycles. The client `ui` package reaches the runtime and the settings only through `BackupClientFacade`.
 
 ## Build and verify
 
@@ -54,7 +62,7 @@ The gates enforce hard ceilings you should design within, not bump into:
 - 1,000 lines per Java file, 100 lines per method, cyclomatic complexity 15.
 - Every text file (including `.md` and `.yml`): no tabs, no trailing whitespace, final newline.
 
-Tests are focused. Test real behavior — capture ordering, retention math, catalog merges — not implementation detail or UI wiring. A change to backup, restore, or delete logic ships with a test for that behavior.
+Tests are focused. Test real behavior, such as capture ordering, retention math, and catalog merges, not implementation detail or UI wiring. A change to backup, restore, or delete logic ships with a test for that behavior.
 
 ## Taste
 

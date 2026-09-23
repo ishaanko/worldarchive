@@ -9,16 +9,14 @@ import dev.ishaanko.worldarchive.core.BackupBackend;
 import dev.ishaanko.worldarchive.core.BackupCapture;
 import dev.ishaanko.worldarchive.core.ConfiguredBackupDestinationSelector;
 import dev.ishaanko.worldarchive.core.CreateBackupRequest;
-import dev.ishaanko.worldarchive.core.ProgressListener;
 import dev.ishaanko.worldarchive.model.BackupTrigger;
 import dev.ishaanko.worldarchive.model.DestinationResult;
 import dev.ishaanko.worldarchive.model.DestinationType;
+import dev.ishaanko.worldarchive.model.ProgressListener;
 import dev.ishaanko.worldarchive.model.WorldId;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionStage;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -44,22 +42,22 @@ final class RuntimeDestinationSelectorTest {
         assertEquals(List.of(DestinationType.ZIP), types(selector.select(request)));
         assertTrue(selector.warning().isEmpty());
 
-        selector.gitToolsAvailable(false);
+        selector.gitTools(RuntimeDestinationSelector.GitTools.MISSING);
         assertEquals(List.of(DestinationType.ZIP), types(selector.select(request)));
         assertTrue(selector.hasConfiguredDestination(request));
         assertTrue(selector.warning().isPresent());
 
-        selector.gitToolsAvailable(true);
+        selector.gitTools(RuntimeDestinationSelector.GitTools.AVAILABLE);
         assertEquals(
                 List.of(DestinationType.GIT, DestinationType.ZIP),
                 types(selector.select(request)));
         assertTrue(selector.warning().isEmpty());
 
-        selector.gitToolsAvailable(false);
+        selector.gitTools(RuntimeDestinationSelector.GitTools.CHECK_FAILED);
         assertEquals(List.of(DestinationType.ZIP), types(selector.select(request)));
         assertTrue(selector.warning().isPresent());
 
-        selector.gitDisabled();
+        selector.gitTools(RuntimeDestinationSelector.GitTools.TURNED_OFF);
         assertEquals(List.of(DestinationType.ZIP), types(selector.select(request)));
         assertFalse(selector.warning().isPresent());
     }
@@ -76,12 +74,10 @@ final class RuntimeDestinationSelectorTest {
             }
 
             @Override
-            public CompletionStage<DestinationResult> createBackup(
+            public DestinationResult createBackup(
                     BackupCapture capture,
                     ProgressListener progressListener) {
-                return CompletableFuture.completedFuture(DestinationResult.success(
-                        destination,
-                        destination.name().toLowerCase()));
+                return DestinationResult.success(destination, destination.name().toLowerCase());
             }
         };
     }

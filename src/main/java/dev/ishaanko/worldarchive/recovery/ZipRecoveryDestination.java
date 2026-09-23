@@ -1,164 +1,123 @@
 package dev.ishaanko.worldarchive.recovery;
 
 import dev.ishaanko.worldarchive.model.ArtifactOwnership;
+import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.BackupManifest;
 import dev.ishaanko.worldarchive.model.BackupRecord;
-import dev.ishaanko.worldarchive.model.DestinationHealth;
-import dev.ishaanko.worldarchive.model.DestinationHealthStatus;
 import dev.ishaanko.worldarchive.model.DestinationResult;
+import dev.ishaanko.worldarchive.model.DestinationStatus;
 import dev.ishaanko.worldarchive.model.DestinationType;
-import dev.ishaanko.worldarchive.model.SyncStatus;
+import dev.ishaanko.worldarchive.model.SafeText;
 import dev.ishaanko.worldarchive.model.WorldId;
 import dev.ishaanko.worldarchive.storage.zip.ZipBackupStore;
 import dev.ishaanko.worldarchive.storage.zip.ZipBackupStoreResolver;
 import dev.ishaanko.worldarchive.storage.zip.ZipVerification;
+import java.io.IOException;
 import java.nio.file.Path;
-import java.time.Clock;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 
-/** Recovery adapter for independently verifiable ZIP archives. */
+/**
+ * ZIP copies: one archive per backup in the world's ZIP folder, named in the catalog by world and
+ * file name. A legacy linked archive, from an import mode that no longer exists, is treated like
+ * a managed archive whose file is missing.
+ */
 final class ZipRecoveryDestination implements RecoveryDestination {
-    /**
-     * Zip link-in-place import was removed, so a catalog entry can no longer point at
-     * an artifact WorldArchive does not own. Any record still carrying
-     * {@link ArtifactOwnership#EXTERNAL} for a ZIP destination predates that removal;
-     * it is treated exactly like a managed archive whose file is missing, using the
-     * same wording {@code ZipBackupStore} uses for that case.
-     */
-    private static final String MISSING_ARCHIVE_MESSAGE =
-            "The selected ZIP archive is missing or is not a regular file.";
+    private static final String MISSING_ARCHIVE = "The ZIP archive is missing or is not a regular file.";
 
     private final ZipBackupStoreResolver stores;
 
-    private final Clock clock;
-
-    ZipRecoveryDestination(ZipBackupStore store, Clock clock) {
-        this((ZipBackupStoreResolver) store, clock);
-    }
-
-    ZipRecoveryDestination(ZipBackupStoreResolver stores, Clock clock) {
+    ZipRecoveryDestination(ZipBackupStoreResolver stores) {
         this.stores = Objects.requireNonNull(stores, "stores");
-        this.clock = Objects.requireNonNull(clock, "clock");
     }
 
     @Override
-    public DestinationType destinationType() {
+    public DestinationType type() {
         return DestinationType.ZIP;
     }
 
     @Override
-    public VerificationOutcome verify(BackupRecord record, DestinationResult destination) {
-        if (destination.ownership() == ArtifactOwnership.EXTERNAL) {
-            return VerificationOutcome.failed(MISSING_ARCHIVE_MESSAGE);
+    public VerificationOutcome verify(BackupRecord record, DestinationResult copy) throws IOException {
+        if (copy.ownership() == ArtifactOwnership.EXTERNAL) {
+            return VerificationOutcome.failed(MISSING_ARCHIVE);
         }
-        Path archive = archivePath(record, destination);
-        ZipBackupStore store = store(record);
-        ZipVerification verification = store.verify(archive);
+        ZipVerification verification = store(record).verify(archivePath(record, copy));
         if (!verification.valid()) {
-            return VerificationOutcome.failed(verification.problems().isEmpty()
-                    ? "ZIP archive verification failed"
-                    : verification.problems().getFirst());
+            return VerificationOutcome.failed(verification.problems().getFirst());
         }
-        Optional<BackupManifest> actual = verification.manifest();
-        if (actual.isEmpty() || !actual.orElseThrow().equals(record.manifest())) {
-            return VerificationOutcome.failed("ZIP manifest does not exactly match the catalog");
+        if (verification.manifest().filter(record.manifest()::equals).isEmpty()) {
+            return VerificationOutcome.failed("The ZIP archive holds a different backup than the backup list says");
         }
-        return VerificationOutcome.verified("ZIP archive and checksum verified");
+        return verification.warnings().isEmpty()
+                ? VerificationOutcome.verified()
+                : VerificationOutcome.verifiedWithWarning(String.join(" ", verification.warnings()));
     }
 
+    /** Extracts and checks the archive in one pass; the manifest must be the record's. */
     @Override
-    public Materialization materialize(
-            BackupRecord record,
-            DestinationResult destination,
-            Path emptyTarget) throws Exception {
-        if (destination.ownership() == ArtifactOwnership.EXTERNAL) {
-            throw new BackupRecoveryException(MISSING_ARCHIVE_MESSAGE);
+    public void restore(BackupRecord record, DestinationResult copy, Path emptyStaging) throws Exception {
+        if (copy.ownership() == ArtifactOwnership.EXTERNAL) {
+            throw new BackupRecoveryException(MISSING_ARCHIVE);
         }
-        Path archive = archivePath(record, destination);
-        ZipBackupStore store = store(record);
-        store.materialize(archive, emptyTarget);
-        VerificationOutcome after = verify(record, destination);
-        if (!after.valid()) {
-            throw new BackupRecoveryException(
-                    "ZIP artifact changed during restoration: " + after.message());
+        BackupManifest restored = store(record).materialize(archivePath(record, copy), emptyStaging);
+        if (!restored.equals(record.manifest())) {
+            throw new BackupRecoveryException("The ZIP archive holds a different backup than the backup list says");
         }
-        return Materialization.preserved(emptyTarget);
     }
 
+    /**
+     * Deletes each archive and its checksum file. An archive that is already gone counts as
+     * deleted; so does one found under the name this backup gets today when the catalog's name is
+     * missing. A linked legacy archive was never WorldArchive's to delete.
+     */
     @Override
-    public boolean delete(BackupRecord record, DestinationResult destination) throws Exception {
-        if (destination.ownership() == ArtifactOwnership.EXTERNAL) {
-            // Nothing is owned in managed storage for a legacy linked record; only the
-            // catalog entry, which the caller removes, ever needs to go away.
-            return true;
-        }
-        ZipBackupStore store = store(record);
-        Path catalogArchive = archivePath(record, destination);
-        boolean removed = store.delete(catalogArchive);
-        if (!removed) {
-            Path canonicalArchive = store.root()
-                    .resolve(record.manifest().worldId().toString())
-                    .resolve(ZipBackupStore.archiveFilename(record.manifest()))
-                    .normalize();
-            if (!canonicalArchive.equals(catalogArchive)) {
-                store.delete(canonicalArchive);
+    public Map<BackupId, DestinationResult> delete(WorldId worldId, List<BackupRecord> records) {
+        Map<BackupId, DestinationResult> results = new LinkedHashMap<>();
+        for (BackupRecord record : records) {
+            DestinationResult copy = RecoverySupport.copy(record, DestinationType.ZIP).orElseThrow();
+            try {
+                if (copy.ownership() != ArtifactOwnership.EXTERNAL) {
+                    deleteArchive(record, copy);
+                }
+                results.put(record.manifest().backupId(), copy.withState(
+                        DestinationStatus.SUCCESS, Optional.empty(), copy.syncStatus()));
+            } catch (IOException | RuntimeException failure) {
+                results.put(record.manifest().backupId(), DestinationResult.failed(
+                        DestinationType.ZIP, SafeText.from(failure, "The ZIP archive could not be deleted", 1_024)));
             }
         }
-        // A safe catalog or canonical path also reconciles an already-absent managed pair.
-        return true;
+        return results;
     }
 
-    @Override
-    public DestinationResult sync(BackupRecord record, DestinationResult destination) {
-        if (destination.ownership() == ArtifactOwnership.EXTERNAL) {
-            return destination.withSync(SyncStatus.NOT_CONFIGURED);
+    private void deleteArchive(BackupRecord record, DestinationResult copy) throws IOException {
+        ZipBackupStore store = store(record);
+        Path listed = archivePath(record, copy);
+        if (!store.delete(listed)) {
+            Path current = store.root()
+                    .resolve(record.manifest().worldId().toString())
+                    .resolve(ZipBackupStore.archiveFilename(record.manifest()));
+            if (!current.equals(listed)) {
+                store.delete(current);
+            }
         }
-        archivePath(record, destination);
-        return destination.withSync(SyncStatus.NOT_CONFIGURED);
     }
 
-    @Override
-    public DestinationHealth health(Optional<WorldId> worldId) throws Exception {
-        Objects.requireNonNull(worldId, "worldId");
-        if (worldId.isPresent()) {
-            stores.store(worldId.orElseThrow()).listArchives();
-        } else {
-            stores.defaultStore().listArchives();
-        }
-        return new DestinationHealth(
-                DestinationType.ZIP,
-                DestinationHealthStatus.HEALTHY,
-                "ZIP destination is available",
-                clock.instant());
-    }
-
-    private Path archivePath(BackupRecord record, DestinationResult destination) {
-        Objects.requireNonNull(record, "record");
-        Objects.requireNonNull(destination, "destination");
-        if (destination.destination() != DestinationType.ZIP || destination.artifactId().isEmpty()) {
-            throw new BackupRecoveryException("ZIP artifact identity is missing from the catalog");
-        }
-        String artifact = destination.artifactId().orElseThrow();
+    /** The archive the catalog names, which must lie directly in the world's folder of its ZIP store. */
+    private Path archivePath(BackupRecord record, DestinationResult copy) {
         String prefix = record.manifest().worldId() + "/";
-        if (!artifact.startsWith(prefix)
-                || artifact.length() == prefix.length()
-                || artifact.indexOf('/', prefix.length()) >= 0
-                || artifact.indexOf('\\') >= 0) {
-            throw new BackupRecoveryException("ZIP artifact identity does not match the catalog");
-        }
-        String filename = artifact.substring(prefix.length());
-        String identitySuffix = record.manifest().backupId() + ".zip";
-        if (!filename.endsWith("_" + identitySuffix)
-                && !filename.endsWith(" - " + identitySuffix)) {
-            throw new BackupRecoveryException("ZIP artifact backup ID does not match the catalog");
-        }
-        Path worldDirectory = store(record).root()
-                .resolve(record.manifest().worldId().toString())
-                .normalize();
-        Path archive = worldDirectory.resolve(filename).normalize();
-        if (!archive.getParent().equals(worldDirectory)) {
-            throw new BackupRecoveryException("ZIP artifact path escapes its managed world directory");
+        String artifact = copy.artifactId().orElseThrow();
+        String filename = artifact.startsWith(prefix) ? artifact.substring(prefix.length()) : "";
+        String identity = record.manifest().backupId() + ".zip";
+        boolean ownName = (filename.endsWith("_" + identity) || filename.endsWith(" - " + identity))
+                && filename.indexOf('/') < 0
+                && filename.indexOf('\\') < 0;
+        Path folder = store(record).root().resolve(record.manifest().worldId().toString());
+        Path archive = folder.resolve(filename).normalize();
+        if (!ownName || !folder.equals(archive.getParent())) {
+            throw new BackupRecoveryException("The backup list names another ZIP archive for this backup");
         }
         return archive;
     }

@@ -1,126 +1,121 @@
 package dev.ishaanko.worldarchive.catalog;
 
-import dev.ishaanko.worldarchive.core.AtomicFiles;
 import dev.ishaanko.worldarchive.model.BackupId;
+import dev.ishaanko.worldarchive.support.AtomicFiles;
+import dev.ishaanko.worldarchive.support.LockedFile;
 import java.io.IOException;
-import java.nio.channels.FileChannel;
-import java.nio.channels.FileLock;
-import java.nio.file.Files;
-import java.nio.file.LinkOption;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
 
-/** Process-safe, atomically published set of backups explicitly deleted by the user. */
-public final class FileBackupDeletionRegistry implements BackupDeletionRegistry {
-    private static final String HEADER = "worldarchive-deleted-backups-v1";
+/**
+ * The backups the player deleted, one ID per line in {@code deleted-backups.txt}. The start-up
+ * rebuild never lists a marked backup again, even when a crash left one of its files behind; an
+ * explicit import unmarks what it imports. A delete marks its backups before it touches their
+ * files and unmarks the ones that stay listed. Reads take no lock, like the catalog's, and a
+ * damaged file is moved aside the same way.
+ */
+public final class FileBackupDeletionRegistry {
+    private static final String HEADER_PREFIX = "worldarchive-deleted-backups-v";
 
-    private static final ConcurrentMap<Path, ReentrantLock> JVM_LOCKS = new ConcurrentHashMap<>();
+    private static final String HEADER = HEADER_PREFIX + "1";
+
+    private static final int MAXIMUM_FILE_BYTES = 64 * 1_024 * 1_024;
+
+    private final LockedFile lock;
 
     private final Path file;
 
-    private final Path lockFile;
-
-    private final ReentrantLock jvmLock;
-
     public FileBackupDeletionRegistry(Path file) {
-        this.file = Objects.requireNonNull(file, "file").toAbsolutePath().normalize();
-        lockFile = this.file.resolveSibling(this.file.getFileName() + ".lock");
-        jvmLock = JVM_LOCKS.computeIfAbsent(this.file, ignored -> new ReentrantLock());
+        this.lock = new LockedFile(file);
+        this.file = lock.file();
     }
 
-    @Override
-    public boolean contains(BackupId backupId) throws IOException {
-        Objects.requireNonNull(backupId, "backupId");
-        return withLock(() -> read().contains(backupId));
+    /** The marked backups. */
+    public Set<BackupId> marked() throws IOException {
+        try {
+            return decode(DamagedFiles.read(file, MAXIMUM_FILE_BYTES));
+        } catch (DamagedFileException damaged) {
+            return lock.withLock(this::readForChange);
+        }
     }
 
-    @Override
-    public void record(BackupId backupId) throws IOException {
-        update(backupId, true);
+    public void mark(Collection<BackupId> backupIds) throws IOException {
+        List<BackupId> marks = List.copyOf(backupIds);
+        if (!marks.isEmpty()) {
+            change(values -> values.addAll(marks));
+        }
     }
 
-    @Override
-    public void restore(BackupId backupId) throws IOException {
-        update(backupId, false);
+    public void unmark(Collection<BackupId> backupIds) throws IOException {
+        List<BackupId> marks = List.copyOf(backupIds);
+        if (!marks.isEmpty()) {
+            change(values -> marks.forEach(values::remove));
+        }
     }
 
-    private void update(BackupId backupId, boolean deleted) throws IOException {
-        Objects.requireNonNull(backupId, "backupId");
-        withLock(() -> {
-            Set<BackupId> values = read();
-            boolean changed = deleted ? values.add(backupId) : values.remove(backupId);
-            if (changed) {
-                write(values);
+    /** Unmarks every backup outside {@code stored}, the backups that a complete scan found files of. */
+    public void unmarkAllExcept(Set<BackupId> stored) throws IOException {
+        Set<BackupId> kept = Set.copyOf(stored);
+        if (!kept.containsAll(marked())) {
+            change(values -> values.retainAll(kept));
+        }
+    }
+
+    private void change(Consumer<Set<BackupId>> edit) throws IOException {
+        lock.withLock(() -> {
+            Set<BackupId> before = readForChange();
+            Set<BackupId> after = new HashSet<>(before);
+            edit.accept(after);
+            if (!after.equals(before)) {
+                write(after);
             }
             return null;
         });
     }
 
-    private Set<BackupId> read() throws IOException {
-        if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) {
+    private Set<BackupId> readForChange() throws IOException {
+        try {
+            return decode(DamagedFiles.read(file, MAXIMUM_FILE_BYTES));
+        } catch (DamagedFileException damaged) {
+            DamagedFiles.moveAside(file, damaged);
             return new HashSet<>();
         }
-        if (Files.isSymbolicLink(file) || !Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
-            throw new IOException("Backup deletion registry is not a safe regular file");
-        }
-        List<String> lines = AtomicFiles.readUtf8(file).lines().toList();
-        if (lines.isEmpty() || !HEADER.equals(lines.getFirst())) {
-            throw new IOException("Backup deletion registry has an unsupported format");
-        }
+    }
+
+    private Set<BackupId> decode(Optional<String> text) throws IOException {
         Set<BackupId> values = new HashSet<>();
+        if (text.isEmpty()) {
+            return values;
+        }
+        List<String> lines = text.get().lines().toList();
+        String header = lines.isEmpty() ? "" : lines.getFirst();
+        if (!header.equals(HEADER)) {
+            if (header.startsWith(HEADER_PREFIX)) {
+                throw new IOException("The deleted-backup list " + file + " was written by a newer version of"
+                        + " WorldArchive. Update WorldArchive to use it.");
+            }
+            throw new DamagedFileException("The deleted-backup list does not start with its header", null);
+        }
         try {
             for (String line : lines.subList(1, lines.size())) {
-                if (!line.isBlank() && !values.add(BackupId.parse(line))) {
-                    throw new IOException("Backup deletion registry contains duplicate IDs");
+                if (!line.isBlank()) {
+                    values.add(BackupId.parse(line));
                 }
             }
-        } catch (IllegalArgumentException exception) {
-            throw new IOException("Backup deletion registry contains an invalid ID", exception);
+        } catch (IllegalArgumentException invalid) {
+            throw new DamagedFileException("The deleted-backup list holds an invalid backup ID", invalid);
         }
         return values;
     }
 
     private void write(Set<BackupId> values) throws IOException {
-        StringBuilder content = new StringBuilder(HEADER).append("\n");
-        values.stream().sorted().forEach(value -> content
-                .append(value)
-                .append("\n"));
-        AtomicFiles.writeUtf8(file, content.toString());
-    }
-
-    private <T> T withLock(IoSupplier<T> operation) throws IOException {
-        jvmLock.lock();
-        try {
-            Path parent = file.getParent();
-            if (parent == null) {
-                throw new IOException("Backup deletion registry has no parent directory");
-            }
-            Files.createDirectories(parent);
-            if (Files.isSymbolicLink(lockFile)) {
-                throw new IOException("Backup deletion registry lock must not be symbolic");
-            }
-            try (FileChannel channel = FileChannel.open(
-                            lockFile,
-                            StandardOpenOption.CREATE,
-                            StandardOpenOption.WRITE,
-                            LinkOption.NOFOLLOW_LINKS);
-                    FileLock ignored = channel.lock()) {
-                return operation.get();
-            }
-        } finally {
-            jvmLock.unlock();
-        }
-    }
-
-    @FunctionalInterface
-    private interface IoSupplier<T> {
-        T get() throws IOException;
+        StringBuilder content = new StringBuilder(HEADER).append('\n');
+        values.stream().sorted().forEach(value -> content.append(value).append('\n'));
+        AtomicFiles.writeUtf8(file, content.toString(), MAXIMUM_FILE_BYTES);
     }
 }

@@ -1,19 +1,20 @@
 package dev.ishaanko.worldarchive.core;
 
+import dev.ishaanko.worldarchive.config.DestinationTriggerConfig;
 import dev.ishaanko.worldarchive.config.WorldArchiveConfig;
-import dev.ishaanko.worldarchive.config.TriggerConfig;
 import dev.ishaanko.worldarchive.config.WorldConfig;
-import dev.ishaanko.worldarchive.model.BackupTrigger;
 import dev.ishaanko.worldarchive.model.DestinationType;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.function.Supplier;
 
-/** Applies current global, per-world, destination, and trigger gates to registered backends. */
+/**
+ * Picks the registered destinations that the current settings allow for a request: the trigger
+ * must be on globally and for the destination, and the world must not be turned off.
+ */
 public final class ConfiguredBackupDestinationSelector implements BackupDestinationSelector {
     private final Supplier<WorldArchiveConfig> configuration;
 
@@ -23,10 +24,8 @@ public final class ConfiguredBackupDestinationSelector implements BackupDestinat
             Supplier<WorldArchiveConfig> configuration,
             List<BackupBackend> backends) {
         this.configuration = Objects.requireNonNull(configuration, "configuration");
-        Objects.requireNonNull(backends, "backends");
         EnumMap<DestinationType, BackupBackend> registered = new EnumMap<>(DestinationType.class);
         for (BackupBackend backend : backends) {
-            Objects.requireNonNull(backend, "backend");
             if (registered.putIfAbsent(backend.destinationType(), backend) != null) {
                 throw new IllegalArgumentException("Each backup destination may be registered only once");
             }
@@ -34,43 +33,45 @@ public final class ConfiguredBackupDestinationSelector implements BackupDestinat
         this.backends = Map.copyOf(registered);
     }
 
+    /**
+     * The destinations to write, in type order.
+     *
+     * @throws IllegalArgumentException when the settings bind this world's identity to another folder
+     */
     @Override
     public List<BackupBackend> select(CreateBackupRequest request) {
-        Objects.requireNonNull(request, "request");
         WorldArchiveConfig config = Objects.requireNonNull(configuration.get(), "configuration result");
-        Optional<WorldConfig> configuredWorld = config.worlds().stream()
-                        .filter(world -> world.worldId().equals(request.worldId()))
-                        .findFirst();
-        if (configuredWorld.isPresent()
-                && !configuredWorld.orElseThrow().path().equals(request.worldDirectory())) {
-            throw new IllegalArgumentException(
-                    "World identity is configured for a different source folder");
-        }
-        if (!globallyEnabled(config.triggers(), request.trigger())
-                || configuredWorld.map(world -> !world.enabled()).orElse(false)) {
+        if (!worldEnabled(config, request) || !config.triggers().enabledFor(request.trigger())) {
             return List.of();
         }
-        List<BackupBackend> selected = new ArrayList<>(DestinationType.values().length);
-        BackupBackend git = backends.get(DestinationType.GIT);
-        if (git != null
-                && config.git().enabled()
-                && config.git().triggers().enabledFor(request.trigger())) {
-            selected.add(git);
-        }
-        BackupBackend zip = backends.get(DestinationType.ZIP);
-        if (zip != null
-                && config.zip().enabled()
-                && config.zip().triggers().enabledFor(request.trigger())) {
-            selected.add(zip);
-        }
+        List<BackupBackend> selected = new ArrayList<>(backends.size());
+        addIfEnabled(selected, DestinationType.GIT, config.git().enabled(), config.git().triggers(), request);
+        addIfEnabled(selected, DestinationType.ZIP, config.zip().enabled(), config.zip().triggers(), request);
         return List.copyOf(selected);
     }
 
-    private static boolean globallyEnabled(TriggerConfig config, BackupTrigger trigger) {
-        return switch (trigger) {
-            case MANUAL -> config.manualEnabled();
-            case WORLD_EXIT -> config.worldExitEnabled();
-            case SCHEDULED -> config.scheduledEnabled();
-        };
+    private void addIfEnabled(
+            List<BackupBackend> selected,
+            DestinationType destination,
+            boolean enabled,
+            DestinationTriggerConfig triggers,
+            CreateBackupRequest request) {
+        BackupBackend backend = backends.get(destination);
+        if (backend != null && enabled && triggers.enabledFor(request.trigger())) {
+            selected.add(backend);
+        }
+    }
+
+    private static boolean worldEnabled(WorldArchiveConfig config, CreateBackupRequest request) {
+        for (WorldConfig world : config.worlds()) {
+            if (world.worldId().equals(request.worldId())) {
+                if (!world.path().equals(request.worldDirectory())) {
+                    throw new IllegalArgumentException(
+                            "World identity is configured for a different source folder");
+                }
+                return world.enabled();
+            }
+        }
+        return true;
     }
 }
