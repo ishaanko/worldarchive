@@ -13,7 +13,11 @@ import dev.ishaanko.worldarchive.model.BackupTrigger;
 import dev.ishaanko.worldarchive.model.WorldId;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -60,7 +64,7 @@ final class RetentionPlannerTest {
                 List.of(automatic, manualLight, manualHeavy, labeled, safety),
                 new StoragePolicy(1_000, 1, 0, 0),
                 ZoneOffset.UTC,
-                Optional.of(safety.manifest().backupId()));
+                safety.manifest().backupId());
 
         assertTrue(protectedIds.contains(manualHeavy.manifest().backupId()));
         assertTrue(protectedIds.contains(labeled.manifest().backupId()));
@@ -82,7 +86,7 @@ final class RetentionPlannerTest {
                 List.of(dayZero, dayOne, weekOne, weekTwo, monthOne, removable),
                 new StoragePolicy(1_000, 2, 2, 1),
                 ZoneOffset.UTC,
-                Optional.empty());
+                dayZero.manifest().backupId());
 
         assertEquals(
                 Set.of(
@@ -93,6 +97,35 @@ final class RetentionPlannerTest {
                         monthOne.manifest().backupId()),
                 protectedIds);
         assertFalse(protectedIds.contains(removable.manifest().backupId()));
+    }
+
+    /**
+     * Days are the player's local days, also across a daylight saving change: a backup made late
+     * in the evening belongs to that evening's day, not to the next UTC day.
+     */
+    @Test
+    void keepsTheSevenMostRecentLocalDaysAcrossADaylightSavingChange() {
+        ZoneId newYork = ZoneId.of("America/New_York");
+        List<BackupRecord> records = new ArrayList<>();
+        Set<BackupId> expected = new HashSet<>();
+        LocalDate lastDay = LocalDate.of(2026, 11, 4);
+        for (LocalDate day = LocalDate.of(2026, 10, 25); !day.isAfter(lastDay); day = day.plusDays(1)) {
+            BackupRecord morning = record("morning " + day, day.atTime(8, 0).atZone(newYork).toInstant().toString(),
+                    BackupTrigger.SCHEDULED, 5, Optional.empty());
+            BackupRecord evening = record("evening " + day, day.atTime(22, 30).atZone(newYork).toInstant().toString(),
+                    BackupTrigger.SCHEDULED, 1, Optional.empty());
+            records.add(morning);
+            records.add(evening);
+            if (day.isAfter(lastDay.minusDays(7))) {
+                expected.add(morning.manifest().backupId());
+            }
+        }
+        BackupId newestMorning = records.get(records.size() - 2).manifest().backupId();
+
+        Set<BackupId> protectedIds = RetentionPlanner.protectedBackups(
+                records, new StoragePolicy(1_000, 7, 0, 0), newYork, newestMorning);
+
+        assertEquals(expected, protectedIds);
     }
 
     @Test
@@ -160,10 +193,11 @@ final class RetentionPlannerTest {
                 100,
                 changedFileCount,
                 "a".repeat(64),
-                "b".repeat(64));
+                "b".repeat(64),
+                Optional.empty());
         return new BackupRecord(
                 manifest,
-                BackupResult.aggregate(
+                new BackupResult(
                         backupId,
                         WORLD_ID,
                         List.of(),

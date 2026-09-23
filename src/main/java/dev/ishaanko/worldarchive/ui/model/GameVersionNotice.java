@@ -27,7 +27,7 @@ public record GameVersionNotice(GameVersionNoticeLevel level, String message) {
         GameVersionStamp stamp = backup.get();
         if (running.isEmpty()) {
             return new GameVersionNotice(
-                    GameVersionNoticeLevel.MATCHED,
+                    GameVersionNoticeLevel.UNKNOWN,
                     "Made with Minecraft " + stamp.displayName() + ".");
         }
         GameVersionStamp current = running.get();
@@ -48,9 +48,5 @@ public record GameVersionNotice(GameVersionNoticeLevel level, String message) {
                 "Made with Minecraft " + stamp.displayName()
                         + ", which is newer than " + current.displayName()
                         + ". The restored copy may not open in this version.");
-    }
-
-    public boolean isWarning() {
-        return level == GameVersionNoticeLevel.DOWNGRADE;
     }
 }

@@ -1,7 +1,7 @@
 package dev.ishaanko.worldarchive.storage.management;
 
-import dev.ishaanko.worldarchive.core.OperationId;
 import dev.ishaanko.worldarchive.model.BackupId;
+import dev.ishaanko.worldarchive.model.OperationId;
 import dev.ishaanko.worldarchive.model.WorldId;
 import java.time.Instant;
 import java.util.List;
@@ -14,7 +14,6 @@ public record CleanupPlan(
         WorldId worldId,
         Instant expiresAt,
         long currentBytes,
-        long budgetBytes,
         long targetBytes,
         List<CleanupItem> items,
         Set<BackupId> protectedBackups,
@@ -25,7 +24,7 @@ public record CleanupPlan(
         Objects.requireNonNull(confirmationToken, "confirmationToken");
         Objects.requireNonNull(worldId, "worldId");
         Objects.requireNonNull(expiresAt, "expiresAt");
-        if (currentBytes < 0 || budgetBytes < 0 || targetBytes < 0) {
+        if (currentBytes < 0 || targetBytes < 0) {
             throw new IllegalArgumentException("Cleanup plan sizes must not be negative");
         }
         items = List.copyOf(Objects.requireNonNull(items, "items"));
@@ -38,13 +37,5 @@ public record CleanupPlan(
         if (fingerprint.isBlank()) {
             throw new IllegalArgumentException("Cleanup fingerprint must not be blank");
         }
-    }
-
-    public long estimatedReclaimableBytes() {
-        long total = 0;
-        for (CleanupItem item : items) {
-            total = Math.addExact(total, item.estimatedReclaimableBytes());
-        }
-        return total;
     }
 }

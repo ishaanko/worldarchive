@@ -2,13 +2,8 @@ package dev.ishaanko.worldarchive.core;
 
 import java.util.List;
 
-/** Resolves an immutable destination plan for one create request. */
+/** Chooses the destinations of one backup request; each destination type appears at most once. */
 @FunctionalInterface
 public interface BackupDestinationSelector {
     List<BackupBackend> select(CreateBackupRequest request);
-
-    static BackupDestinationSelector fixed(List<BackupBackend> destinations) {
-        List<BackupBackend> fixed = List.copyOf(destinations);
-        return ignored -> fixed;
-    }
 }

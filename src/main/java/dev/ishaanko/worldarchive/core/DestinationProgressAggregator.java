@@ -1,6 +1,8 @@
 package dev.ishaanko.worldarchive.core;
 
 import dev.ishaanko.worldarchive.model.DestinationType;
+import dev.ishaanko.worldarchive.model.OperationPhase;
+import dev.ishaanko.worldarchive.model.OperationProgress;
 import java.util.Collection;
 import java.util.Map;
 import java.util.Objects;

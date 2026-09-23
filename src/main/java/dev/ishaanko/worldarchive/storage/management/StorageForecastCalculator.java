@@ -23,16 +23,10 @@ public final class StorageForecastCalculator {
             Instant now,
             List<StorageSample> history) {
         if (!policy.budgetEnabled()) {
-            return new StorageForecast(
-                    StorageForecast.State.DISABLED,
-                    OptionalLong.empty(),
-                    0);
+            return new StorageForecast(StorageForecast.State.DISABLED, OptionalLong.empty());
         }
         if (currentBytes >= policy.budgetBytes()) {
-            return new StorageForecast(
-                    StorageForecast.State.REACHED,
-                    OptionalLong.empty(),
-                    0);
+            return new StorageForecast(StorageForecast.State.REACHED, OptionalLong.empty());
         }
         Instant cutoff = now.minus(WINDOW);
         List<StorageSample> samples = history.stream()
@@ -45,24 +39,15 @@ public final class StorageForecastCalculator {
                                 samples.getFirst().measuredAt(),
                                 samples.getLast().measuredAt())
                         .compareTo(MINIMUM_SPAN) < 0) {
-            return new StorageForecast(
-                    StorageForecast.State.LEARNING,
-                    OptionalLong.empty(),
-                    0);
+            return new StorageForecast(StorageForecast.State.LEARNING, OptionalLong.empty());
         }
         double slope = medianPairwiseSlope(samples);
         if (slope <= 0) {
-            return new StorageForecast(
-                    StorageForecast.State.STABLE,
-                    OptionalLong.empty(),
-                    0);
+            return new StorageForecast(StorageForecast.State.STABLE, OptionalLong.empty());
         }
         long remaining = policy.budgetBytes() - currentBytes;
         long days = Math.max(1, (long) Math.ceil(remaining / slope));
-        return new StorageForecast(
-                StorageForecast.State.ESTIMATED,
-                OptionalLong.of(days),
-                slope);
+        return new StorageForecast(StorageForecast.State.ESTIMATED, OptionalLong.of(days));
     }
 
     private static double medianPairwiseSlope(List<StorageSample> samples) {

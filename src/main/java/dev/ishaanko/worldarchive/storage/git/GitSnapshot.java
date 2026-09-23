@@ -4,17 +4,17 @@ import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.WorldId;
 import java.time.Instant;
 import java.util.Objects;
-import java.util.regex.Pattern;
 
-/** One independently addressable parentless snapshot ref. */
+/**
+ * One backup's snapshot in its world's repository: the ref that names it, the commit it points
+ * at, and that commit's time. New snapshot commits have no parent; imported and older ones may.
+ */
 public record GitSnapshot(
         WorldId worldId,
         BackupId backupId,
         String refName,
         String commitId,
         Instant committedAt) {
-    private static final Pattern OBJECT_ID = Pattern.compile("[0-9a-f]{40}");
-
     public GitSnapshot {
         Objects.requireNonNull(worldId, "worldId");
         Objects.requireNonNull(backupId, "backupId");
@@ -24,7 +24,7 @@ public record GitSnapshot(
         if (!refName.equals(refName(worldId, backupId))) {
             throw new IllegalArgumentException("Snapshot ref does not match its identities");
         }
-        if (!OBJECT_ID.matcher(commitId).matches()) {
+        if (!GitRepository.isObjectId(commitId)) {
             throw new IllegalArgumentException("Snapshot commit is not a SHA-1 object ID");
         }
     }

@@ -3,123 +3,66 @@ package dev.ishaanko.worldarchive.runtime;
 import dev.ishaanko.worldarchive.importing.BackupImportService;
 import dev.ishaanko.worldarchive.importing.ImportPreview;
 import dev.ishaanko.worldarchive.importing.ImportSummary;
+import dev.ishaanko.worldarchive.model.BackupId;
+import dev.ishaanko.worldarchive.model.SafeText;
 import dev.ishaanko.worldarchive.settings.ClientSettingsAccess;
 import java.nio.file.Path;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.function.Function;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-/** Keeps preview tokens bound to the immutable runtime state that prepared them. */
+/**
+ * The {@link BackupImportService} of the backup screens. Previews come from the current state and
+ * hold nothing. An import runs on the current state under a work permit: a preview made before a
+ * settings change is unknown there, so the import is refused and the player previews again.
+ */
 final class RuntimeBackupImportService implements BackupImportService {
-    private final WorldArchiveRuntime runtime;
+    private static final Logger LOGGER = LoggerFactory.getLogger("WorldArchive");
 
-    private final ConcurrentMap<UUID, OwnedPreview> owners = new ConcurrentHashMap<>();
+    private final StateCalls calls;
 
-    RuntimeBackupImportService(WorldArchiveRuntime runtime) {
-        this.runtime = Objects.requireNonNull(runtime, "runtime");
+    RuntimeBackupImportService(StateCalls calls) {
+        this.calls = Objects.requireNonNull(calls, "calls");
     }
 
     @Override
     public CompletionStage<ImportPreview> previewZip(Path folder) {
-        return preview(service -> service.previewZip(folder));
+        return calls.withState(state -> state.imports().previewZip(folder));
     }
 
     @Override
     public CompletionStage<ImportPreview> previewGit(String remote) {
-        return preview(service -> service.previewGit(remote));
+        return calls.withState(state -> state.imports().previewGit(remote));
     }
 
     @Override
     public CompletionStage<ImportPreview> previewLocal() {
-        return preview(BackupImportService::previewLocal);
+        return calls.withState(state -> state.imports().previewLocal());
     }
 
     @Override
-    public CompletionStage<ImportSummary> execute(UUID token) {
-        return executeOwned(token, service -> service.execute(token));
-    }
-
-    @Override
-    public CompletionStage<ImportSummary> execute(UUID token, Set<dev.ishaanko.worldarchive.model.BackupId> selected) {
-        Objects.requireNonNull(selected, "selected");
-        return executeOwned(token, service -> service.execute(token, selected));
-    }
-
-    private CompletionStage<ImportSummary> executeOwned(
-            UUID token,
-            java.util.function.Function<BackupImportService, CompletionStage<ImportSummary>> execution) {
-        OwnedPreview owner = owners.remove(Objects.requireNonNull(token, "token"));
-        if (owner == null) {
-            return CompletableFuture.failedFuture(
-                    new IllegalArgumentException("Import preview is missing, expired, or already used"));
-        }
-        try {
-            CompletionStage<ImportSummary> imported = execution.apply(owner.service());
-            imported.whenComplete((ignored, throwable) -> owner.permit().close());
-            return imported.thenCompose(summary -> ClientSettingsAccess
-                    .connectWorldRemotes(summary.connections())
-                    .thenApply(ignored -> summary));
-        } catch (RuntimeException | Error exception) {
-            owner.permit().close();
-            throw exception;
-        }
+    public CompletionStage<ImportSummary> execute(UUID token, Set<BackupId> selected) {
+        return connectRemotes(calls.withPermit(state -> state.imports().execute(token, selected)));
     }
 
     @Override
     public CompletionStage<Void> discard(UUID token) {
-        OwnedPreview owner = owners.remove(Objects.requireNonNull(token, "token"));
-        if (owner == null) {
-            return CompletableFuture.completedFuture(null);
-        }
-        try {
-            CompletionStage<Void> discarded = owner.service().discard(token);
-            discarded.whenComplete((ignored, throwable) -> owner.permit().close());
-            return discarded;
-        } catch (RuntimeException | Error exception) {
-            owner.permit().close();
-            throw exception;
-        }
+        return calls.withState(state -> state.imports().discard(token));
     }
 
-    @Override
-    public CompletionStage<ImportSummary> rebuildLocal() {
-        return runtime.withBackupPermit(() -> current().rebuildLocal());
-    }
-
-    private BackupImportService current() {
-        return runtime.requireCurrentState().imports();
-    }
-
-    private CompletionStage<ImportPreview> preview(
-            Function<BackupImportService, CompletionStage<ImportPreview>> operation) {
-        RuntimeConfigurationGate.Permit permit = runtime.configurationGate().enterBackup();
-        try {
-            BackupImportService service = current();
-            CompletionStage<ImportPreview> preview = operation.apply(service);
-            return preview.whenComplete((result, throwable) -> {
-                if (throwable != null || result == null) {
-                    permit.close();
-                } else {
-                    owners.put(result.token(), new OwnedPreview(service, permit));
-                }
-            });
-        } catch (RuntimeException | Error exception) {
-            permit.close();
-            throw exception;
-        }
-    }
-
-    private record OwnedPreview(
-            BackupImportService service,
-            RuntimeConfigurationGate.Permit permit) {
-        private OwnedPreview {
-            Objects.requireNonNull(service, "service");
-            Objects.requireNonNull(permit, "permit");
-        }
+    /** Gives each imported world the remote its backups came from; the import succeeded even when that fails. */
+    private static CompletionStage<ImportSummary> connectRemotes(CompletionStage<ImportSummary> imported) {
+        return imported.thenCompose(summary -> ClientSettingsAccess.service()
+                .connectWorldRemotes(summary.connections())
+                .handle((ignored, failure) -> {
+                    if (failure != null) {
+                        LOGGER.warn("The backups were imported, but their Git remote could not be saved: {}",
+                                SafeText.from(failure, "no reason was given", 300));
+                    }
+                    return summary;
+                }));
     }
 }

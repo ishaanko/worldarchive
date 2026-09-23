@@ -1,18 +1,12 @@
 package dev.ishaanko.worldarchive.settings;
 
-import dev.ishaanko.worldarchive.model.SensitiveDataRedactor;
 import java.util.Objects;
 
-/** Credential-safe status for one tool or destination component. */
+/** The state of one tool or folder in the settings footer, with a short message for its tooltip. */
 public record SettingsHealthItem(SettingsHealthStatus status, String message) {
     public SettingsHealthItem {
         Objects.requireNonNull(status, "status");
-        message = SensitiveDataRedactor.redact(Objects.requireNonNull(message, "message")).strip();
-        if (message.isEmpty()
-                || message.length() > 512
-                || message.chars().anyMatch(Character::isISOControl)) {
-            throw new IllegalArgumentException("Settings health message is invalid");
-        }
+        Objects.requireNonNull(message, "message");
     }
 
     public static SettingsHealthItem unchecked() {
@@ -21,5 +15,9 @@ public record SettingsHealthItem(SettingsHealthStatus status, String message) {
 
     public static SettingsHealthItem disabled() {
         return new SettingsHealthItem(SettingsHealthStatus.DISABLED, "disabled");
+    }
+
+    public static SettingsHealthItem unconfigured() {
+        return new SettingsHealthItem(SettingsHealthStatus.UNCONFIGURED, "not configured");
     }
 }

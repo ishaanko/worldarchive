@@ -1,124 +1,101 @@
 package dev.ishaanko.worldarchive.core;
 
+import dev.ishaanko.worldarchive.core.WorldTree.FileState;
+import dev.ishaanko.worldarchive.core.WorldTree.Folder;
+import dev.ishaanko.worldarchive.core.WorldTree.SourceFile;
 import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.BackupManifest;
+import dev.ishaanko.worldarchive.model.CaptureProgressListener;
 import dev.ishaanko.worldarchive.model.GameVersionStamp;
+import dev.ishaanko.worldarchive.support.Digests;
+import dev.ishaanko.worldarchive.support.Observers;
+import dev.ishaanko.worldarchive.support.PortablePath;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InterruptedIOException;
 import java.io.OutputStream;
-import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
-import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardOpenOption;
-import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
 import java.security.MessageDigest;
+import java.time.DateTimeException;
+import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
-/** Copies a stable world view into private outside-world staging. */
-public final class FileSystemBackupCaptureFactory implements BackupCaptureFactory {
-    // A live world can write a handful of small files (player data, level.dat,
-    // POI data) even while chunk autosaving is paused. A capture that observed a
-    // change starts over; the writes are rare, so a retry almost always succeeds.
-    private static final int MAXIMUM_CAPTURE_ATTEMPTS = 3;
+/**
+ * Copies a world into a private folder outside it and proves the copy matches the world. A live
+ * world can still write a few files while autosave is paused, so a capture that sees a change
+ * tries again, up to three times, and then throws {@link CaptureChangedException}. A retry keeps
+ * every copy whose file did not change.
+ *
+ * <p>Each file is read once while it is copied and hashed, and checked again afterwards. A
+ * capture of the open world reads and hashes every file a second time, because the game can still
+ * write one within a single timestamp tick. A capture of a closed world checks each file with a
+ * direct stat and reads it a second time only when its state changed, or when its time is within
+ * ten seconds of the newest file's or of the clock when the file was copied, or later: timestamps
+ * are coarse, so only an older file is certain to show a later write in its timestamp. Up to four
+ * workers copy and check files at once.</p>
+ */
+public final class FileSystemBackupCaptureFactory {
+    private static final int MAXIMUM_ATTEMPTS = 3;
+
+    private static final Duration RECENT = Duration.ofSeconds(10);
+
+    private static final int WORKERS = Math.min(4, Runtime.getRuntime().availableProcessors());
 
     private final CaptureWorkspace workspace;
 
-    private final SourceCaptureObserver observer;
-
     private final Optional<GameVersionStamp> gameVersion;
 
-    public FileSystemBackupCaptureFactory(Path captureDirectory) {
-        this(captureDirectory, SourceCaptureObserver.NONE);
-    }
+    private final SourceCaptureObserver observer;
 
+    /**
+     * Captures go below {@code captureDirectory}, which must be outside every world. Each manifest
+     * records {@code gameVersion}, the version of the running game when it is known. Production
+     * passes {@link SourceCaptureObserver#NONE}; tests use the observer to change a world mid-copy.
+     */
     public FileSystemBackupCaptureFactory(
             Path captureDirectory,
+            Optional<GameVersionStamp> gameVersion,
             SourceCaptureObserver observer) {
-        this(captureDirectory, observer, Optional.empty());
-    }
-
-    public FileSystemBackupCaptureFactory(
-            Path captureDirectory,
-            Optional<GameVersionStamp> gameVersion) {
-        this(captureDirectory, SourceCaptureObserver.NONE, gameVersion);
-    }
-
-    public FileSystemBackupCaptureFactory(
-            Path captureDirectory,
-            SourceCaptureObserver observer,
-            Optional<GameVersionStamp> gameVersion) {
         this.workspace = new CaptureWorkspace(captureDirectory);
-        this.observer = Objects.requireNonNull(observer, "observer");
         this.gameVersion = Objects.requireNonNull(gameVersion, "gameVersion");
+        this.observer = Objects.requireNonNull(observer, "observer");
     }
 
-    @Override
+    /**
+     * Copies the world of {@code request} and returns the private copy, which the caller closes.
+     * {@code kind} says whether the game may still write the world. Interrupting the calling
+     * thread stops the copy and deletes it.
+     */
     public CapturedBackup capture(
             CreateBackupRequest request,
+            CaptureKind kind,
             BackupId backupId,
             Instant createdAt,
             Optional<WorldInventory> previousInventory,
             CaptureProgressListener progressListener)
             throws IOException, InterruptedException {
-        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(kind, "kind");
         Objects.requireNonNull(backupId, "backupId");
         Objects.requireNonNull(createdAt, "createdAt");
         Objects.requireNonNull(previousInventory, "previousInventory");
         Objects.requireNonNull(progressListener, "progressListener");
-        SourceChangedException lastChange = null;
-        for (int attempt = 0; attempt < MAXIMUM_CAPTURE_ATTEMPTS; attempt++) {
-            requireNotInterrupted();
-            try {
-                return captureOnce(
-                        request,
-                        backupId,
-                        createdAt,
-                        previousInventory,
-                        progressListener);
-            } catch (SourceChangedException exception) {
-                lastChange = exception;
-            }
-        }
-        throw lastChange;
-    }
-
-    private CapturedBackup captureOnce(
-            CreateBackupRequest request,
-            BackupId backupId,
-            Instant createdAt,
-            Optional<WorldInventory> previousInventory,
-            CaptureProgressListener progressListener)
-            throws IOException, InterruptedException {
-        Path source = request.worldDirectory();
-        CaptureWorkspace.Lease lease = workspace.open(source);
-        Path staging = lease.path();
+        Path world = realWorld(request.worldDirectory());
+        CaptureWorkspace.Lease lease = workspace.open(world);
         try {
-            TreeSnapshot before = TreeSnapshot.scan(source);
-            createDirectories(staging, before.directories());
-            List<WorldInventory.Entry> inventoryEntries = copyFiles(
-                    staging,
-                    before,
-                    progressListener);
-            TreeSnapshot after = TreeSnapshot.scan(source);
-            before.requireStableMatch(after);
-            proveSourceContentMatchesCapture(before, inventoryEntries);
-            WorldInventory inventory = WorldInventory.create(inventoryEntries);
-            long changedFiles = previousInventory
-                    .map(inventory::changedFilesSince)
-                    .orElse(inventory.fileCount());
+            WorldInventory inventory = new Copy(world, kind, lease.path(), progressListener).untilStable();
             BackupManifest manifest = BackupManifest.create(
                     backupId,
                     request.worldId(),
@@ -128,431 +105,242 @@ public final class FileSystemBackupCaptureFactory implements BackupCaptureFactor
                     request.trigger(),
                     inventory.fileCount(),
                     inventory.byteCount(),
-                    changedFiles,
+                    previousInventory.map(inventory::changedFilesSince).orElse(inventory.fileCount()),
                     inventory.contentSha256(),
                     inventory.inventorySha256(),
                     gameVersion);
-            lease.seal();
-            return new CapturedBackup(
-                    new BackupCapture(staging, manifest),
-                    inventory,
-                    lease::close);
+            return new CapturedBackup(new BackupCapture(lease.path(), manifest, inventory), lease::close);
         } catch (IOException | InterruptedException | RuntimeException | Error failure) {
             lease.closeAfterFailure(failure);
             throw failure;
         }
     }
 
-    private List<WorldInventory.Entry> copyFiles(
-            Path staging,
-            TreeSnapshot snapshot,
-            CaptureProgressListener progressListener)
-            throws IOException, InterruptedException {
-        List<WorldInventory.Entry> inventory = new ArrayList<>(snapshot.files().size());
-        long completed = 0;
-        safeProgress(progressListener, 0, snapshot.byteCount());
-        for (SourceFile file : snapshot.files()) {
-            requireNotInterrupted();
-            observer.beforeFileCopy(Path.of(file.portablePath()));
-            Path target = PortableWorldPath.resolveInside(staging, file.portablePath());
-            CopyResult copied = copyFile(file.path(), target);
-            observer.afterFileCopy(Path.of(file.portablePath()));
-            if (copied.size() != file.fingerprint().size()) {
-                throw new SourceChangedException(
-                        "World file changed size while it was being captured: "
-                                + file.portablePath());
+    /**
+     * Deletes the captures that ended game instances left behind, such as after a crash. The
+     * runtime calls it once at startup on a worker thread; captures of running instances are kept.
+     */
+    public void removeAbandonedCaptures() throws IOException {
+        workspace.removeAbandoned();
+    }
+
+    /** The world folder with links above it resolved; links inside it are still refused. */
+    private static Path realWorld(Path world) throws IOException {
+        try {
+            return world.toRealPath();
+        } catch (NoSuchFileException exception) {
+            throw new IOException("The world folder " + world + " does not exist", exception);
+        }
+    }
+
+    /** One capture: the private folder and the copy of each file made so far, kept across attempts. */
+    private final class Copy {
+        private final Path world;
+
+        private final CaptureKind kind;
+
+        private final Path staging;
+
+        private final CaptureProgressListener listener;
+
+        private final Map<String, CopiedFile> copies = new ConcurrentHashMap<>();
+
+        private final Set<String> stagedFolders = new HashSet<>();
+
+        private Copy(Path world, CaptureKind kind, Path staging, CaptureProgressListener listener) {
+            this.world = world;
+            this.kind = kind;
+            this.staging = staging;
+            this.listener = listener;
+        }
+
+        private WorldInventory untilStable() throws IOException, InterruptedException {
+            CaptureChangedException lastChange = null;
+            for (int attempt = 0; attempt < MAXIMUM_ATTEMPTS; attempt++) {
+                try {
+                    return attempt();
+                } catch (CaptureChangedException exception) {
+                    lastChange = exception;
+                }
             }
-            inventory.add(new WorldInventory.Entry(
-                    file.portablePath(),
-                    copied.size(),
-                    copied.sha256()));
-            completed = Math.addExact(completed, copied.size());
-            safeProgress(progressListener, completed, snapshot.byteCount());
+            throw lastChange;
         }
-        return inventory;
-    }
 
-    private static void proveSourceContentMatchesCapture(
-            TreeSnapshot snapshot,
-            List<WorldInventory.Entry> inventory)
-            throws IOException {
-        Map<String, WorldInventory.Entry> capturedByPath = new HashMap<>();
-        for (WorldInventory.Entry entry : inventory) {
-            capturedByPath.put(entry.path(), entry);
+        private WorldInventory attempt() throws IOException, InterruptedException {
+            WorldTree before = WorldTree.scan(world);
+            matchFolders(before);
+            ByteProgress progress = new ByteProgress(listener, before.byteCount());
+            ParallelWork.forEach(before.files(), WORKERS, file -> copyIfStale(file, progress));
+            before.requireUnchanged(WorldTree.scan(world));
+            FileTime newestWindow = recentSince(before.newestModified());
+            ParallelWork.forEach(before.files(), WORKERS, file -> verify(file, newestWindow));
+            return WorldInventory.create(before.files().stream()
+                    .map(file -> copies.get(file.portablePath()).entry(file.portablePath()))
+                    .toList());
         }
-        for (SourceFile file : snapshot.files()) {
-            file.requireStableAttributes();
-            CopyResult current = hashFile(file.path());
-            file.requireStableAttributes();
-            WorldInventory.Entry captured = capturedByPath.get(file.portablePath());
-            if (captured == null
-                    || current.size() != captured.size()
-                    || !current.sha256().equals(captured.sha256())) {
-                throw new SourceChangedException(
-                        "World file contents changed while its private capture was being created: "
-                                + file.portablePath());
+
+        /** Removes copies of files and folders that the world no longer has, and creates new folders. */
+        private void matchFolders(WorldTree tree) throws IOException {
+            Set<String> files = new HashSet<>();
+            tree.files().forEach(file -> files.add(file.portablePath()));
+            for (String copied : List.copyOf(copies.keySet())) {
+                if (!files.contains(copied)) {
+                    Files.deleteIfExists(PortablePath.resolveInside(staging, copied));
+                    copies.remove(copied);
+                }
+            }
+            Set<String> folders = new HashSet<>();
+            tree.folders().forEach(folder -> folders.add(folder.portablePath()));
+            List<String> removed = stagedFolders.stream()
+                    .filter(folder -> !folders.contains(folder))
+                    .sorted(Comparator.reverseOrder())
+                    .toList();
+            for (String folder : removed) {
+                CaptureWorkspace.deleteTree(PortablePath.resolveInside(staging, folder));
+                stagedFolders.remove(folder);
+            }
+            for (Folder folder : tree.folders()) {
+                if (!folder.portablePath().isEmpty() && stagedFolders.add(folder.portablePath())) {
+                    Files.createDirectory(PortablePath.resolveInside(staging, folder.portablePath()));
+                }
             }
         }
-    }
 
-    private static void createDirectories(Path staging, List<SourceDirectory> directories)
-            throws IOException {
-        for (SourceDirectory directory : directories) {
-            if (!directory.portablePath().isEmpty()) {
-                Files.createDirectory(PortableWorldPath.resolveInside(
-                        staging,
-                        directory.portablePath()));
+        /** Copies the file unless an earlier attempt copied it and it has not changed since. */
+        private void copyIfStale(SourceFile file, ByteProgress progress)
+                throws IOException, InterruptedException {
+            CopiedFile existing = copies.get(file.portablePath());
+            if (existing != null && existing.source().equals(FileState.read(file))) {
+                progress.add(existing.size());
+                return;
             }
+            // The copy overwrites the staged file, so no entry may vouch for it until the new copy is complete.
+            copies.remove(file.portablePath());
+            Path relative = Path.of(file.portablePath());
+            observer.beforeFileCopy(relative);
+            Instant statedAt = Instant.now();
+            FileState source = FileState.read(file);
+            Digest copied;
+            try (InputStream input = Files.newInputStream(file.path(), LinkOption.NOFOLLOW_LINKS);
+                    OutputStream output = Files.newOutputStream(
+                            PortablePath.resolveInside(staging, file.portablePath()),
+                            StandardOpenOption.CREATE,
+                            StandardOpenOption.TRUNCATE_EXISTING,
+                            StandardOpenOption.WRITE,
+                            LinkOption.NOFOLLOW_LINKS)) {
+                copied = copyAndHash(input, output);
+            } catch (NoSuchFileException exception) {
+                throw file.path().toString().equals(exception.getFile())
+                        ? WorldTree.changed("\"" + file.portablePath() + "\" disappeared")
+                        : exception;
+            }
+            observer.afterFileCopy(relative);
+            if (copied.size() != source.size()) {
+                throw WorldTree.changed("\"" + file.portablePath() + "\" was written");
+            }
+            copies.put(file.portablePath(), new CopiedFile(source, statedAt, copied.size(), copied.sha256()));
+            progress.add(copied.size());
+        }
+
+        /**
+         * Trusts the copy of a closed world's file when the file's state is unchanged and its time
+         * is not recent; reads the file again otherwise, and always in the open world. A mismatch
+         * drops the copy, so the next attempt copies it again.
+         *
+         * @param newestWindow ten seconds before the newest file's time
+         */
+        private void verify(SourceFile file, FileTime newestWindow) throws IOException {
+            CopiedFile copy = copies.get(file.portablePath());
+            Instant statedAt = Instant.now();
+            FileState now = FileState.read(file);
+            if (kind == CaptureKind.CLOSED_WORLD && now.equals(copy.source()) && !copy.recent(newestWindow)) {
+                return;
+            }
+            Digest current;
+            try (InputStream input = Files.newInputStream(file.path(), LinkOption.NOFOLLOW_LINKS)) {
+                current = copyAndHash(input, OutputStream.nullOutputStream());
+            } catch (NoSuchFileException exception) {
+                throw WorldTree.changed("\"" + file.portablePath() + "\" disappeared");
+            }
+            if (!FileState.read(file).equals(now) || !current.matches(copy)) {
+                copies.remove(file.portablePath());
+                throw WorldTree.changed("\"" + file.portablePath() + "\" was written");
+            }
+            copies.put(file.portablePath(), new CopiedFile(now, statedAt, copy.size(), copy.sha256()));
         }
     }
 
-    private static CopyResult copyFile(Path source, Path target) throws IOException {
-        try (InputStream input = Files.newInputStream(source, LinkOption.NOFOLLOW_LINKS);
-                OutputStream output = Files.newOutputStream(
-                        target,
-                        StandardOpenOption.CREATE_NEW,
-                        StandardOpenOption.WRITE)) {
-            return copyAndHash(input, output);
+    /** Ten seconds before the newest file; an extreme timestamp counts every file as recent. */
+    private static FileTime recentSince(FileTime newest) {
+        try {
+            return FileTime.from(newest.toInstant().minus(RECENT));
+        } catch (DateTimeException exception) {
+            return FileTime.fromMillis(Long.MIN_VALUE);
         }
     }
 
-    private static CopyResult hashFile(Path source) throws IOException {
-        try (InputStream input = Files.newInputStream(source, LinkOption.NOFOLLOW_LINKS)) {
-            return copyAndHash(input, OutputStream.nullOutputStream());
-        }
-    }
-
-    private static CopyResult copyAndHash(InputStream input, OutputStream output) throws IOException {
+    private static Digest copyAndHash(InputStream input, OutputStream output) throws IOException {
         MessageDigest digest = Digests.sha256();
         byte[] buffer = new byte[Digests.COPY_BUFFER_BYTES];
         long size = 0;
         int read;
         while ((read = input.read(buffer)) >= 0) {
-            requireNotInterrupted();
-            if (read == 0) {
-                continue;
+            if (Thread.currentThread().isInterrupted()) {
+                throw new InterruptedIOException("World capture was interrupted");
             }
             output.write(buffer, 0, read);
             digest.update(buffer, 0, read);
-            try {
-                size = Math.addExact(size, read);
-            } catch (ArithmeticException exception) {
-                throw new IOException("World file size overflowed capture accounting", exception);
-            }
+            size += read;
             if (size > WorldInventory.MAXIMUM_BYTES) {
-                throw new IOException("World file exceeds the capture size limit");
+                throw new IOException("A world file is larger than WorldArchive can back up");
             }
         }
-        return new CopyResult(size, Digests.hex(digest.digest()));
+        return new Digest(size, Digests.hex(digest.digest()));
     }
 
-    private static void safeProgress(
-            CaptureProgressListener listener,
-            long completed,
-            long total) {
-        try {
-            listener.onProgress(completed, total);
-        } catch (RuntimeException ignored) {
-            // Observers cannot invalidate a correctly captured source tree.
+    /** The size and SHA-256 of bytes read from a file. */
+    private record Digest(long size, String sha256) {
+        boolean matches(CopiedFile copy) {
+            return size == copy.size() && sha256.equals(copy.sha256());
         }
     }
 
-    private static void requireNotInterrupted() throws InterruptedIOException {
-        if (Thread.currentThread().isInterrupted()) {
-            throw new InterruptedIOException("World capture was interrupted");
+    /** A copied file, with the state its source had just before the copy and the clock when that state was read. */
+    private record CopiedFile(FileState source, Instant statedAt, long size, String sha256) {
+        /**
+         * Whether a later write can still hide in the file's timestamp: its time is at or after
+         * {@code newestWindow}, or within ten seconds of the clock when its state was read, or later.
+         * The clock covers a file dated in the future, which moves the newest time ahead.
+         */
+        boolean recent(FileTime newestWindow) {
+            FileTime modified = source.modified();
+            return modified.compareTo(newestWindow) >= 0
+                    || modified.toInstant().compareTo(statedAt.minus(RECENT)) >= 0;
+        }
+
+        WorldInventory.Entry entry(String portablePath) {
+            return new WorldInventory.Entry(portablePath, size, sha256);
         }
     }
 
-    private static void requireSafeDirectory(Path path, String message) throws IOException {
-        BasicFileAttributes attributes = Files.readAttributes(
-                path,
-                BasicFileAttributes.class,
-                LinkOption.NOFOLLOW_LINKS);
-        if (!FileSystemSafety.isOrdinaryDirectory(path, attributes)) {
-            throw new IOException(message);
-        }
-    }
+    /** Reports copied bytes in increasing order, although several workers copy at once. */
+    private static final class ByteProgress {
+        private final CaptureProgressListener listener;
 
-    private static void requireSafeFile(Path path, BasicFileAttributes attributes) throws IOException {
-        if (!FileSystemSafety.isOrdinaryRegularFile(path, attributes)) {
-            throw new IOException("World source contains a link or special file");
-        }
-    }
+        private final long total;
 
-    private record TreeSnapshot(
-            List<SourceDirectory> directories,
-            List<SourceFile> files,
-            long byteCount) {
-        private TreeSnapshot {
-            directories = List.copyOf(directories);
-            files = List.copyOf(files);
-            if (byteCount < 0) {
-                throw new IllegalArgumentException("Source snapshot byte count is negative");
-            }
+        // Guarded by this.
+        private long completed;
+
+        private ByteProgress(CaptureProgressListener listener, long total) {
+            this.listener = listener;
+            this.total = total;
+            Observers.safely(() -> listener.onProgress(0, total));
         }
 
-        private static TreeSnapshot scan(Path source) throws IOException {
-            requireNotInterrupted();
-            ScanVisitor visitor = new ScanVisitor(source);
-            Files.walkFileTree(source, visitor);
-            visitor.directories.sort(Comparator
-                    .comparingInt((SourceDirectory value) -> depth(value.portablePath()))
-                    .thenComparing(SourceDirectory::portablePath));
-            visitor.files.sort(Comparator.comparing(SourceFile::portablePath));
-            return new TreeSnapshot(visitor.directories, visitor.files, visitor.byteCount);
+        private synchronized void add(long bytes) {
+            completed = Math.min(total, completed + bytes);
+            Observers.safely(() -> listener.onProgress(completed, total));
         }
-
-        private static int depth(String portablePath) {
-            if (portablePath.isEmpty()) {
-                return 0;
-            }
-            return (int) portablePath.chars().filter(character -> character == '/').count() + 1;
-        }
-
-        private void requireStableMatch(TreeSnapshot current) throws IOException {
-            if (byteCount != current.byteCount
-                    || !directories.equals(current.directories)
-                    || files.size() != current.files.size()) {
-                throw new SourceChangedException(
-                        "World tree changed while its private capture was being created");
-            }
-            for (int index = 0; index < files.size(); index++) {
-                SourceFile expected = files.get(index);
-                SourceFile observed = current.files.get(index);
-                if (!expected.hasSameStableFile(observed)) {
-                    throw new SourceChangedException(
-                            "World tree changed while its private capture was being created");
-                }
-            }
-        }
-    }
-
-    private static final class ScanVisitor extends SimpleFileVisitor<Path> {
-        private final Path source;
-
-        private final List<SourceDirectory> directories = new ArrayList<>();
-
-        private final List<SourceFile> files = new ArrayList<>();
-
-        private final Map<String, EntryKind> collisionKinds = new HashMap<>();
-
-        private final Set<String> observedPortablePaths = new HashSet<>();
-
-        private long byteCount;
-
-        private ScanVisitor(Path source) {
-            this.source = source;
-        }
-
-        @Override
-        public FileVisitResult preVisitDirectory(Path directory, BasicFileAttributes attributes)
-                throws IOException {
-            requireNotInterrupted();
-            Path relative = source.relativize(directory);
-            if (!relative.toString().isEmpty() && isExcluded(relative)) {
-                return FileVisitResult.SKIP_SUBTREE;
-            }
-            requireSafeDirectory(directory, "World source contains a link or special directory");
-            String portable = relative.toString().isEmpty() ? "" : portable(relative);
-            if (!portable.isEmpty()) {
-                register(portable, EntryKind.DIRECTORY);
-            }
-            directories.add(new SourceDirectory(
-                    directory,
-                    portable,
-                    DirectoryFingerprint.create(attributes)));
-            requireCapacity();
-            return FileVisitResult.CONTINUE;
-        }
-
-        @Override
-        public FileVisitResult visitFile(Path file, BasicFileAttributes attributes) throws IOException {
-            requireNotInterrupted();
-            Path relative = source.relativize(file);
-            if (isExcluded(relative) || isSessionLock(relative)) {
-                return FileVisitResult.CONTINUE;
-            }
-            requireSafeFile(file, attributes);
-            String portable = portable(relative);
-            register(portable, EntryKind.FILE);
-            files.add(new SourceFile(file, portable, FileFingerprint.create(attributes)));
-            try {
-                byteCount = Math.addExact(byteCount, attributes.size());
-            } catch (ArithmeticException exception) {
-                throw new IOException("World size overflowed capture accounting", exception);
-            }
-            if (byteCount > WorldInventory.MAXIMUM_BYTES) {
-                throw new IOException("World is too large to capture");
-            }
-            requireCapacity();
-            return FileVisitResult.CONTINUE;
-        }
-
-        @Override
-        public FileVisitResult visitFileFailed(Path file, IOException exception) throws IOException {
-            throw new IOException("A world source entry could not be read", exception);
-        }
-
-        @Override
-        public FileVisitResult postVisitDirectory(Path directory, IOException exception) throws IOException {
-            if (exception != null) {
-                throw new IOException("The world source could not be traversed", exception);
-            }
-            return FileVisitResult.CONTINUE;
-        }
-
-        private void register(String portable, EntryKind kind) throws IOException {
-            if (!observedPortablePaths.add(portable)) {
-                throw new IOException("World contains a duplicate portable path");
-            }
-            String[] segments = portable.split("/");
-            StringBuilder prefix = new StringBuilder();
-            for (int index = 0; index < segments.length; index++) {
-                if (!prefix.isEmpty()) {
-                    prefix.append('/');
-                }
-                prefix.append(segments[index]);
-                String key = PortableWorldPath.collisionKey(prefix.toString());
-                EntryKind expected = index == segments.length - 1 ? kind : EntryKind.DIRECTORY;
-                EntryKind previous = collisionKinds.putIfAbsent(key, expected);
-                if (previous != null && (previous != expected || index == segments.length - 1)) {
-                    throw new IOException("World contains paths that collide on another platform");
-                }
-            }
-        }
-
-        private void requireCapacity() throws IOException {
-            if (files.size() > WorldInventory.MAXIMUM_FILES
-                    || directories.size() > WorldInventory.MAXIMUM_FILES) {
-                throw new IOException("World contains too many entries");
-            }
-        }
-
-        private static String portable(Path relative) throws IOException {
-            try {
-                return PortableWorldPath.fromRelativePath(relative);
-            } catch (IllegalArgumentException exception) {
-                throw new IOException("World contains a path that cannot be restored safely", exception);
-            }
-        }
-
-        private static boolean isExcluded(Path relative) {
-            return relative.getNameCount() > 0
-                    && relative.getName(0).toString().equalsIgnoreCase(".worldarchive");
-        }
-
-        private static boolean isSessionLock(Path relative) {
-            return relative.getNameCount() == 1
-                    && relative.getFileName().toString().equalsIgnoreCase("session.lock");
-        }
-    }
-
-    private record SourceDirectory(
-            Path path,
-            String portablePath,
-            DirectoryFingerprint fingerprint) {
-        private SourceDirectory {
-            Objects.requireNonNull(path, "path");
-            Objects.requireNonNull(portablePath, "portablePath");
-            Objects.requireNonNull(fingerprint, "fingerprint");
-        }
-    }
-
-    private record SourceFile(
-            Path path,
-            String portablePath,
-            FileFingerprint fingerprint) {
-        private SourceFile {
-            Objects.requireNonNull(path, "path");
-            Objects.requireNonNull(portablePath, "portablePath");
-            Objects.requireNonNull(fingerprint, "fingerprint");
-        }
-
-        private void requireStableAttributes() throws IOException {
-            BasicFileAttributes current = Files.readAttributes(
-                    path,
-                    BasicFileAttributes.class,
-                    LinkOption.NOFOLLOW_LINKS);
-            requireSafeFile(path, current);
-            FileFingerprint currentFingerprint = FileFingerprint.create(current);
-            if (!fingerprint.hasSameStableAttributes(currentFingerprint)) {
-                throw changedFileException();
-            }
-        }
-
-        private boolean hasSameStableFile(SourceFile other) {
-            return path.equals(other.path)
-                    && portablePath.equals(other.portablePath)
-                    && fingerprint.hasSameStableAttributes(other.fingerprint);
-        }
-
-        private IOException changedFileException() {
-            return new SourceChangedException(
-                    "World file changed while its private capture was being created: "
-                            + portablePath);
-        }
-    }
-
-    private record FileFingerprint(
-            Object fileKey,
-            long size,
-            FileTime creationTime) {
-        private FileFingerprint {
-            if (size < 0) {
-                throw new IllegalArgumentException("Source fingerprint size is negative");
-            }
-            Objects.requireNonNull(creationTime, "creationTime");
-        }
-
-        private static FileFingerprint create(BasicFileAttributes attributes) {
-            return new FileFingerprint(
-                    attributes.fileKey(),
-                    attributes.size(),
-                    identityCreationTime(attributes));
-        }
-
-        private boolean hasSameStableAttributes(FileFingerprint other) {
-            return Objects.equals(fileKey, other.fileKey)
-                    && size == other.size
-                    && creationTime.equals(other.creationTime);
-        }
-
-    }
-
-    /** Directory mtimes are deferred on Windows; identity and membership remain authoritative. */
-    private record DirectoryFingerprint(
-            Object fileKey,
-            FileTime creationTime) {
-        private DirectoryFingerprint {
-            Objects.requireNonNull(creationTime, "creationTime");
-        }
-
-        private static DirectoryFingerprint create(BasicFileAttributes attributes) {
-            return new DirectoryFingerprint(
-                    attributes.fileKey(),
-                    identityCreationTime(attributes));
-        }
-    }
-
-    /** macOS may move birth time backwards when an older modification time is applied. */
-    private static final boolean IGNORE_CREATION_TIME = System.getProperty("os.name").startsWith("Mac");
-
-    private static FileTime identityCreationTime(BasicFileAttributes attributes) {
-        return IGNORE_CREATION_TIME ? FileTime.fromMillis(0) : attributes.creationTime();
-    }
-
-    private record CopyResult(long size, String sha256) {
-    }
-
-    /** The live world wrote a file mid-capture; the capture restarts from scratch. */
-    private static final class SourceChangedException extends IOException {
-        private SourceChangedException(String message) {
-            super(message);
-        }
-    }
-
-    private enum EntryKind {
-        DIRECTORY,
-        FILE
     }
 }

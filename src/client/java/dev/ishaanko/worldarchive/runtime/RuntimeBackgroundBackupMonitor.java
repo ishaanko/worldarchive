@@ -1,289 +1,189 @@
 package dev.ishaanko.worldarchive.runtime;
 
-import dev.ishaanko.worldarchive.WorldArchiveMetadata;
-import dev.ishaanko.worldarchive.core.ProgressListener;
-import dev.ishaanko.worldarchive.model.BackupResult;
-import dev.ishaanko.worldarchive.ui.model.ProgressState;
+import dev.ishaanko.worldarchive.model.OperationProgress;
+import dev.ishaanko.worldarchive.model.SafeText;
 import java.io.IOException;
-import java.nio.file.Path;
-import java.time.Duration;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.CancellationException;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenMouseEvents;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.network.chat.Component;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/** Tracks background backups and reports their results to the client. */
-final class RuntimeBackgroundBackupMonitor {
-    private static final Logger LOGGER =
-            LoggerFactory.getLogger(WorldArchiveMetadata.MOD_NAME);
+/**
+ * Shows the player what background backups do: a toast with progress and a Cancel button for each
+ * world-exit backup, then its outcome; a chat line for a scheduled backup's warning; and at the next
+ * start, as a toast, the notice of a backup the game closed on. A notice that arrives while the game
+ * closes is kept for that next start instead.
+ */
+final class RuntimeBackgroundBackupMonitor implements BackgroundReports {
+    private static final Logger LOGGER = LoggerFactory.getLogger("WorldArchive");
 
     private static final int LEFT_MOUSE_BUTTON = 0;
 
     private final Minecraft minecraft;
 
-    private final RuntimeNoticeStore noticeStore;
+    private final RuntimeNoticeStore notices;
 
-    private final BooleanSupplier closed;
+    private final BooleanSupplier closing;
 
-    private final BiConsumer<String, Throwable> failureLogger;
+    /** The toasts whose Cancel button a click may press. Render thread only. */
+    private final Set<BackupProgressToast> cancellable = ConcurrentHashMap.newKeySet();
 
-    private final Set<CompletableFuture<BackupResult>> exitWork =
-            ConcurrentHashMap.newKeySet();
+    private final AtomicBoolean keptNoticeShown = new AtomicBoolean();
 
-    private final AtomicReference<Optional<String>> warning =
-            new AtomicReference<>(Optional.empty());
-
-    private final AtomicReference<Optional<String>> retainedWarning =
-            new AtomicReference<>(Optional.empty());
-
-    private final AtomicBoolean retainedWarningShown = new AtomicBoolean();
-
-    // One progress toast per tracked backup, keyed by that backup's result future,
-    // so overlapping backups each finish their own toast.
-    private final ConcurrentMap<Object, BackupProgressToast> activeToasts =
-            new ConcurrentHashMap<>();
-
-    RuntimeBackgroundBackupMonitor(
-            Minecraft minecraft,
-            Path noticeFile,
-            BooleanSupplier closed,
-            BiConsumer<String, Throwable> failureLogger) {
+    RuntimeBackgroundBackupMonitor(Minecraft minecraft, RuntimeNoticeStore notices, BooleanSupplier closing) {
         this.minecraft = Objects.requireNonNull(minecraft, "minecraft");
-        this.noticeStore = new RuntimeNoticeStore(
-                Objects.requireNonNull(noticeFile, "noticeFile"));
-        this.closed = Objects.requireNonNull(closed, "closed");
-        this.failureLogger = Objects.requireNonNull(failureLogger, "failureLogger");
-        try {
-            retainedWarning.set(noticeStore.load());
-        } catch (IOException exception) {
-            LOGGER.warn("Stored background backup notice could not be loaded");
-        }
-        ScreenEvents.AFTER_INIT.register(this::routeScreenClicks);
+        this.notices = Objects.requireNonNull(notices, "notices");
+        this.closing = Objects.requireNonNull(closing, "closing");
     }
 
-    // Toasts get no input of their own, so every screen forwards its clicks to the
-    // active progress toasts. A click on a Cancel button is consumed here.
-    private void routeScreenClicks(Minecraft ignored, Screen screen, int width, int height) {
-        ScreenMouseEvents.allowMouseClick(screen)
-                .register((ignoredScreen, event) -> !clickToast(event));
+    /** Routes screen clicks to the toasts, and shows the notice kept from the last session once a screen is up. */
+    void register() {
+        // Toasts get no input of their own; a click on a Cancel button is consumed here.
+        ScreenEvents.AFTER_INIT.register((client, screen, width, height) -> ScreenMouseEvents.allowMouseClick(screen)
+                .register((ignoredScreen, event) -> !clickToast(event)));
+        ClientTickEvents.END_CLIENT_TICK.register(client -> showKeptNotice());
+    }
+
+    @Override
+    public ExitReport exitStarted(Runnable cancel) {
+        ExitToast report = new ExitToast(cancel);
+        onRenderThread(report::show);
+        return report;
+    }
+
+    @Override
+    public void exitNotMade(Notice notice) {
+        if (closing.getAsBoolean()) {
+            keep(notice);
+        } else {
+            onRenderThread(() -> showOutcome(null, notice));
+        }
+    }
+
+    @Override
+    public void scheduledWarning(Notice notice) {
+        onRenderThread(() -> minecraft.gui.chatListener().handleSystemMessage(
+                Component.translatable("screen.worldarchive.notice.chat", text(notice)).withStyle(ChatFormatting.YELLOW),
+                false));
+    }
+
+    /** Keeps a notice for the next start, because the game closes before the player could read it. */
+    void keep(Notice notice) {
+        try {
+            notices.keep(notice);
+        } catch (IOException failure) {
+            LOGGER.warn("A notice for the next start could not be kept: {}",
+                    SafeText.from(failure, "no reason was given", 300));
+        }
+    }
+
+    /** Text the player reads for a notice, in the game's language. */
+    static Component text(Notice notice) {
+        return Component.translatable(notice.key(), notice.arguments().toArray());
     }
 
     private boolean clickToast(MouseButtonEvent event) {
-        if (event.button() != LEFT_MOUSE_BUTTON || closed.getAsBoolean()) {
+        if (event.button() != LEFT_MOUSE_BUTTON || closing.getAsBoolean()) {
             return false;
         }
-        for (BackupProgressToast toast : activeToasts.values()) {
-            if (toast.mouseClicked(event.x(), event.y())) {
+        for (BackupProgressToast toast : cancellable) {
+            if (shown(toast) && toast.mouseClicked(event.x(), event.y())) {
                 return true;
             }
         }
         return false;
     }
 
-    Optional<String> warning() {
-        return warning.get();
-    }
-
-    void trackExit(CompletableFuture<BackupResult> result) {
-        Objects.requireNonNull(result, "result");
-        exitWork.add(result);
-        result.whenComplete((value, throwable) -> {
-            observeExitResult(result, value, throwable);
-            exitWork.remove(result);
-        });
-    }
-
-    boolean awaitExitWork(Duration timeout) {
-        Objects.requireNonNull(timeout, "timeout");
-        if (timeout.isNegative()) {
-            throw new IllegalArgumentException("timeout must not be negative");
+    /** The first time a screen is up, without the loading overlay, shows the notice the last session kept. */
+    private void showKeptNotice() {
+        if (minecraft.gui.overlay() != null || minecraft.gui.screen() == null
+                || !keptNoticeShown.compareAndSet(false, true)) {
+            return;
         }
-        long remainingNanos = timeout.toNanos();
-        long deadline = System.nanoTime() + remainingNanos;
-        boolean interrupted = false;
         try {
-            while (!exitWork.isEmpty()) {
-                CompletableFuture<?>[] work =
-                        exitWork.toArray(CompletableFuture[]::new);
-                if (work.length == 0) {
-                    return true;
-                }
-                try {
-                    CompletableFuture.allOf(work).get(
-                            remainingNanos,
-                            TimeUnit.NANOSECONDS);
-                } catch (ExecutionException | CancellationException exception) {
-                    // A completed failure still counts as settled exit work.
-                } catch (TimeoutException exception) {
-                    return false;
-                } catch (InterruptedException exception) {
-                    interrupted = true;
-                    return false;
-                }
-                remainingNanos = deadline - System.nanoTime();
-                if (remainingNanos <= 0 && !exitWork.isEmpty()) {
-                    return false;
-                }
-            }
-            return true;
-        } finally {
-            if (interrupted) {
-                Thread.currentThread().interrupt();
-            }
+            notices.showKept(notice -> showOutcome(null, notice));
+        } catch (IOException failure) {
+            LOGGER.warn("The notice kept from the last session could not be read: {}",
+                    SafeText.from(failure, "no reason was given", 300));
         }
     }
 
-    void observeScheduledResult(BackupResult result, Throwable throwable) {
-        Optional<String> current =
-                BackgroundBackupWarnings.scheduled(result, throwable);
-        warning.set(current);
-        if (current.isPresent() && !closed.getAsBoolean()) {
+    /**
+     * Finishes {@code toast} with the outcome. A toast the toast manager no longer shows, because
+     * the player left a world since, is replaced by a new one, so the outcome is always seen.
+     */
+    private void showOutcome(BackupProgressToast toast, Notice notice) {
+        BackupProgressToast target = toast;
+        if (target != null) {
+            cancellable.remove(target);
+        }
+        if (target == null || !shown(target)) {
+            target = new BackupProgressToast(minecraft, text(notice));
+            minecraft.gui.toastManager().addToast(target);
+        }
+        target.finish(text(notice), notice.severity());
+    }
+
+    /** True while the toast manager shows or queues the toast. */
+    private boolean shown(BackupProgressToast toast) {
+        return minecraft.gui.toastManager().getToast(BackupProgressToast.class, toast) == toast;
+    }
+
+    private void onRenderThread(Runnable task) {
+        if (!closing.getAsBoolean()) {
             minecraft.execute(() -> {
-                if (!closed.getAsBoolean()) {
-                    showClientWarning(current.orElseThrow());
+                if (!closing.getAsBoolean()) {
+                    task.run();
                 }
             });
         }
     }
 
-    void observeExitResult(BackupResult result, Throwable throwable) {
-        observeExitResult(null, result, throwable);
-    }
+    /** The toast of one world-exit backup; progress may arrive before the render thread made the toast. */
+    private final class ExitToast implements ExitReport {
+        private final Runnable cancel;
 
-    private void observeExitResult(
-            Object progressKey,
-            BackupResult result,
-            Throwable throwable) {
-        if (BackgroundBackupWarnings.isCancellation(throwable)) {
-            LOGGER.info("World-exit backup was cancelled");
-        } else if (throwable != null) {
-            failureLogger.accept(
-                    "World-exit backup did not complete",
-                    throwable);
-        } else if (result == null) {
-            LOGGER.warn("World-exit backup completed without a result");
+        private volatile BackupProgressToast toast;
+
+        private ExitToast(Runnable cancel) {
+            this.cancel = Objects.requireNonNull(cancel, "cancel");
         }
-        Optional<String> current =
-                BackgroundBackupWarnings.worldExit(result, throwable);
-        BackgroundBackupWarnings.ExitNotice notice =
-                BackgroundBackupWarnings.worldExitNotice(result, throwable);
-        try {
-            if (current.isPresent()) {
-                noticeStore.retain(current.orElseThrow());
-            } else {
-                noticeStore.clear();
+
+        private void show() {
+            BackupProgressToast created = new BackupProgressToast(
+                    minecraft, text(BackgroundNotices.exitStarted()), cancel);
+            toast = created;
+            cancellable.add(created);
+            minecraft.gui.toastManager().addToast(created);
+        }
+
+        @Override
+        public void onProgress(OperationProgress progress) {
+            BackupProgressToast current = toast;
+            if (current != null) {
+                current.progress(progress);
             }
-        } catch (IOException exception) {
-            failureLogger.accept(
-                    "World-exit backup notice could not be stored",
-                    exception);
         }
-        warning.set(current);
-        enqueueBackupNotice(progressKey, notice);
-    }
 
-    void showRetainedWarning() {
-        if (closed.getAsBoolean()) {
-            return;
-        }
-        Optional<String> retained = retainedWarning.get();
-        if (retained.isEmpty()
-                || !retainedWarningShown.compareAndSet(false, true)) {
-            return;
-        }
-        showClientWarning(retained.orElseThrow());
-        retainedWarning.compareAndSet(retained, Optional.empty());
-        try {
-            noticeStore.clear();
-        } catch (IOException exception) {
-            failureLogger.accept(
-                    "Background backup notice could not be cleared",
-                    exception);
-        }
-    }
-
-    /**
-     * Shows the persistent progress toast for an unattended backup that just started.
-     * {@code cancel} is run when the user presses the toast's Cancel button.
-     */
-    void beginBackupProgress(String message, Object progressKey, Runnable cancel) {
-        Objects.requireNonNull(progressKey, "progressKey");
-        Objects.requireNonNull(cancel, "cancel");
-        if (closed.getAsBoolean()) {
-            return;
-        }
-        minecraft.execute(() -> {
-            if (closed.getAsBoolean()) {
+        @Override
+        public void finished(Notice notice) {
+            if (closing.getAsBoolean()) {
+                if (notice.severity() != Notice.Severity.SUCCESS) {
+                    keep(notice);
+                }
                 return;
             }
-            BackupProgressToast toast = new BackupProgressToast(minecraft, message, cancel);
-            activeToasts.put(progressKey, toast);
-            minecraft.gui.toastManager().addToast(toast);
-        });
-    }
-
-    /** Feeds that backup's progress toast; safe to call from any worker thread. */
-    ProgressListener backupProgressListener(Object progressKey) {
-        Objects.requireNonNull(progressKey, "progressKey");
-        return progress -> {
-            BackupProgressToast toast = activeToasts.get(progressKey);
-            if (toast != null) {
-                ProgressState state = ProgressState.from(progress);
-                toast.progress(state.message(), state.fraction());
-            }
-        };
-    }
-
-    private void enqueueBackupNotice(
-            Object progressKey,
-            BackgroundBackupWarnings.ExitNotice notice) {
-        if (closed.getAsBoolean()) {
-            return;
+            onRenderThread(() -> showOutcome(toast, notice));
         }
-        minecraft.execute(() -> {
-            if (!closed.getAsBoolean()) {
-                showBackupNotice(progressKey, notice);
-            }
-        });
-    }
-
-    private void showClientWarning(String message) {
-        minecraft.gui.chatListener().handleSystemMessage(
-                Component.literal("WorldArchive: " + message)
-                        .withStyle(ChatFormatting.YELLOW),
-                false);
-    }
-
-    /** Finishes that backup's progress toast, or shows the outcome on its own toast. */
-    private void showBackupNotice(
-            Object progressKey,
-            BackgroundBackupWarnings.ExitNotice notice) {
-        BackupProgressToast toast = progressKey == null
-                ? null
-                : activeToasts.remove(progressKey);
-        if (toast == null) {
-            toast = new BackupProgressToast(minecraft, notice.message());
-            minecraft.gui.toastManager().addToast(toast);
-        }
-        toast.finish(notice.message(), notice.severity());
     }
 }

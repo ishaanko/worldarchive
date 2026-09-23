@@ -4,23 +4,20 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import dev.ishaanko.worldarchive.config.WorldArchiveConfig;
-import dev.ishaanko.worldarchive.config.GitDestinationConfig;
+import dev.ishaanko.worldarchive.config.DefaultDestinations;
+import dev.ishaanko.worldarchive.config.StoragePolicy;
 import dev.ishaanko.worldarchive.config.TriggerConfig;
+import dev.ishaanko.worldarchive.config.WorldArchiveConfig;
 import dev.ishaanko.worldarchive.config.WorldConfig;
-import dev.ishaanko.worldarchive.config.ZipDestinationConfig;
-import dev.ishaanko.worldarchive.model.DestinationHealth;
-import dev.ishaanko.worldarchive.model.DestinationHealthStatus;
+import dev.ishaanko.worldarchive.model.BackupTrigger;
 import dev.ishaanko.worldarchive.model.DestinationType;
 import dev.ishaanko.worldarchive.model.WorldId;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Instant;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
-import java.util.UUID;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -33,91 +30,65 @@ class SettingsDraftTest {
         WorldArchiveConfig resolvedDefaults = resolvedDefaults();
         SettingsDraft draft = SettingsDraft.from(resolvedDefaults);
         assertTrue(draft.validate(List.of()).isValid());
-        assertTrue(draft.gitManualEnabled());
-        assertTrue(draft.gitWorldExitEnabled());
-        assertFalse(draft.gitScheduledEnabled());
-        assertTrue(draft.zipManualEnabled());
-        assertTrue(draft.zipWorldExitEnabled());
-        assertFalse(draft.zipScheduledEnabled());
+        assertTrue(draft.trigger(DestinationType.GIT, BackupTrigger.MANUAL));
+        assertTrue(draft.trigger(DestinationType.ZIP, BackupTrigger.WORLD_EXIT));
+        assertFalse(draft.trigger(DestinationType.ZIP, BackupTrigger.SCHEDULED));
         assertEquals("30", draft.scheduleInterval());
 
         draft.setGitEnabled(false);
         draft.setZipEnabled(false);
 
-        SettingsValidation validation = draft.validate(List.of());
-        assertTrue(validation.isValid());
-        assertFalse(validation.config().orElseThrow().git().enabled());
-        assertFalse(validation.config().orElseThrow().zip().enabled());
-        assertEquals(
-                resolvedDefaults.git().repository(),
-                validation.config().orElseThrow().git().repository());
-        assertEquals(
-                resolvedDefaults.zip().destination(),
-                validation.config().orElseThrow().zip().destination());
+        WorldArchiveConfig config = draft.validate(List.of()).config().orElseThrow();
+        assertFalse(config.git().enabled());
+        assertFalse(config.zip().enabled());
+        assertEquals(resolvedDefaults.git().repository(), config.git().repository());
+        assertEquals(resolvedDefaults.zip().destination(), config.zip().destination());
     }
 
     @Test
-    void foldsLegacyGlobalGatesIntoVisibleChoicesAndDerivesPersistedGlobals() {
+    void foldsGlobalGatesIntoEachDestinationAndDerivesTheGlobals() {
         WorldArchiveConfig defaults = resolvedDefaults();
-        WorldArchiveConfig legacyGates = new WorldArchiveConfig(
-                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
-                new TriggerConfig(false, true, false, 45),
-                defaults.git(),
-                defaults.zip(),
-                defaults.worlds());
-        SettingsDraft draft = SettingsDraft.from(legacyGates);
+        SettingsDraft draft = SettingsDraft.from(new WorldArchiveConfig(
+                new TriggerConfig(false, true, false, 45), defaults.git(), defaults.zip(), defaults.worlds()));
 
-        assertFalse(draft.gitManualEnabled());
-        assertTrue(draft.gitWorldExitEnabled());
-        assertFalse(draft.gitScheduledEnabled());
-        assertFalse(draft.zipManualEnabled());
-        assertTrue(draft.zipWorldExitEnabled());
-        assertFalse(draft.zipScheduledEnabled());
+        assertFalse(draft.trigger(DestinationType.GIT, BackupTrigger.MANUAL));
+        assertTrue(draft.trigger(DestinationType.GIT, BackupTrigger.WORLD_EXIT));
+        assertFalse(draft.trigger(DestinationType.ZIP, BackupTrigger.MANUAL));
 
-        draft.setScheduleInterval("45");
-        draft.setGitManualEnabled(false);
-        draft.setGitWorldExitEnabled(true);
-        draft.setGitScheduledEnabled(false);
-        draft.setZipManualEnabled(true);
-        draft.setZipWorldExitEnabled(false);
-        draft.setZipScheduledEnabled(true);
-
+        draft.setTrigger(DestinationType.ZIP, BackupTrigger.MANUAL, true);
+        draft.setTrigger(DestinationType.ZIP, BackupTrigger.WORLD_EXIT, false);
+        draft.setTrigger(DestinationType.ZIP, BackupTrigger.SCHEDULED, true);
         WorldArchiveConfig config = draft.validate(List.of()).config().orElseThrow();
 
-        assertTrue(config.triggers().manualEnabled());
-        assertTrue(config.triggers().worldExitEnabled());
-        assertTrue(config.triggers().scheduledEnabled());
-        assertEquals(45, config.triggers().scheduleIntervalMinutes());
+        assertEquals(new TriggerConfig(true, true, true, 45), config.triggers());
         assertFalse(config.git().triggers().manualEnabled());
         assertTrue(config.git().triggers().worldExitEnabled());
-        assertFalse(config.git().triggers().scheduledEnabled());
         assertTrue(config.zip().triggers().manualEnabled());
         assertFalse(config.zip().triggers().worldExitEnabled());
         assertTrue(config.zip().triggers().scheduledEnabled());
     }
 
     @Test
-    void rejectsDestinationNestedInsideKnownWorld() throws IOException {
+    void rejectsADestinationInsideAWorldEvenWhileItIsOff() throws IOException {
         Path world = Files.createDirectory(temporaryDirectory.resolve("world"));
-        Path nested = world.resolve("backups");
         SettingsDraft draft = SettingsDraft.from(resolvedDefaults());
-        draft.setZipDestination(nested.toString());
+        draft.setZipEnabled(false);
+        draft.setZipDestination(world.resolve("backups").toString());
 
         SettingsValidation validation = draft.validate(List.of(world));
 
         assertFalse(validation.isValid());
-        assertTrue(validation.issue(SettingsField.ZIP_DESTINATION).orElseThrow()
-                .contains("must not be inside"));
+        assertTrue(validation.issue(SettingsField.ZIP_DESTINATION).orElseThrow().contains("must not be inside"));
     }
 
     @Test
-    void acceptsOrdinaryExternalAndDesktopSyncedFolders() throws IOException {
+    void acceptsExternalFoldersAWorldRemoteAndAFolderThatIsNotThereYet() throws IOException {
         Path world = Files.createDirectory(temporaryDirectory.resolve("world"));
-        Path syncedFolder = Files.createDirectory(temporaryDirectory.resolve("OneDrive"));
+        Path external = Files.createDirectory(temporaryDirectory.resolve("OneDrive"));
         SettingsDraft draft = draftWithWorld(world);
         WorldId worldId = draft.base().worlds().getFirst().worldId();
-        draft.setGitRepository(syncedFolder.resolve("git-store").toString());
-        draft.setZipDestination(syncedFolder.resolve("archives").toString());
+        draft.setGitRepository(external.resolve("git-store").toString());
+        draft.setZipDestination(temporaryDirectory.resolve("unplugged-drive/archives").toString());
         draft.setGitRemoteName("backup-origin");
         draft.setWorldRemoteUrl(worldId, "https://example.com/user/forever-world.git");
         draft.setGitLfsPatterns("*.mca, *.dat, *.nbt");
@@ -125,11 +96,13 @@ class SettingsDraftTest {
         SettingsValidation validation = draft.validate(List.of(world));
 
         assertTrue(validation.isValid(), () -> validation.issues().toString());
-        assertEquals(3, validation.config().orElseThrow().git().lfsPatterns().size());
+        WorldArchiveConfig config = validation.config().orElseThrow();
+        assertEquals(List.of("*.mca", "*.dat", "*.nbt"), config.git().lfsPatterns());
+        assertEquals(Optional.of("https://example.com/user/forever-world.git"), config.worlds().getFirst().remoteUrl());
     }
 
     @Test
-    void rejectsCredentialBearingRemoteAndInvalidSchedule() {
+    void rejectsACredentialInARemoteAndAnInvalidSchedule() {
         SettingsDraft draft = draftWithWorld(temporaryDirectory.resolve("credential-world"));
         WorldId worldId = draft.base().worlds().getFirst().worldId();
         draft.setWorldRemoteUrl(worldId, "https://user:password@example.com/worlds.git");
@@ -138,211 +111,95 @@ class SettingsDraftTest {
         SettingsValidation validation = draft.validate(List.of());
 
         assertFalse(validation.isValid());
-        assertTrue(validation.issue(SettingsField.WORLD_REMOTE_URL).isPresent());
+        assertTrue(validation.issue(worldId, SettingsField.WORLD_REMOTE_URL).isPresent());
         assertTrue(validation.issue(SettingsField.SCHEDULE_INTERVAL).isPresent());
     }
 
     @Test
-    void acceptsPlainRemoteForOneWorld() {
-        SettingsDraft draft = draftWithWorld(temporaryDirectory.resolve("plain-remote-world"));
-        WorldId worldId = draft.base().worlds().getFirst().worldId();
-        draft.setWorldRemoteUrl(worldId, "https://example.com/user/forever-world.git");
+    void eachWorldKeepsItsOwnProblems() {
+        WorldId first = WorldId.create();
+        WorldId second = WorldId.create();
+        SettingsDraft draft = SettingsDraft.from(resolvedDefaults().withWorlds(List.of(
+                WorldConfig.defaults(first, temporaryDirectory.resolve("first")),
+                WorldConfig.defaults(second, temporaryDirectory.resolve("second")))));
+        draft.setWorldRemoteUrl(first, "https://example.com/first.git?token=1");
+        draft.setWorldZipOverride(second, true);
+        draft.setWorldZipDestination(second, "relative/zips");
 
         SettingsValidation validation = draft.validate(List.of());
 
-        assertTrue(validation.isValid(), () -> validation.issues().toString());
-        assertEquals(
-                "https://example.com/user/forever-world.git",
-                validation.config().orElseThrow().worlds().getFirst().remoteUrl().orElseThrow());
+        assertTrue(validation.issue(first, SettingsField.WORLD_REMOTE_URL).isPresent());
+        assertTrue(validation.issue(first, SettingsField.WORLD_ZIP_DESTINATION).isEmpty());
+        assertTrue(validation.issue(second, SettingsField.WORLD_ZIP_DESTINATION).isPresent());
+        assertTrue(validation.issue(second, SettingsField.WORLD_REMOTE_URL).isEmpty());
+        assertEquals(Set.of(first, second), validation.invalidWorlds());
     }
 
     @Test
-    void rejectsRegularFileAsDestination() throws IOException {
+    void rejectsARegularFileAsADestination() throws IOException {
         Path file = Files.writeString(temporaryDirectory.resolve("not-a-folder"), "data");
         SettingsDraft draft = SettingsDraft.from(resolvedDefaults());
         draft.setZipDestination(file.toString());
 
         SettingsValidation validation = draft.validate(List.of());
 
-        assertFalse(validation.isValid());
         assertTrue(validation.issue(SettingsField.ZIP_DESTINATION).orElseThrow().contains("not a folder"));
     }
 
     @Test
-    void disabledDestinationStillRejectsAndDoesNotHideRecursivePath() throws IOException {
-        Path world = Files.createDirectory(temporaryDirectory.resolve("paused-world"));
-        SettingsDraft draft = SettingsDraft.from(resolvedDefaults());
-        draft.setZipEnabled(false);
-        draft.setZipDestination(world.resolve("archives").toString());
-
-        SettingsValidation validation = draft.validate(List.of(world));
-
-        assertFalse(validation.isValid());
-        assertTrue(validation.issue(SettingsField.ZIP_DESTINATION).orElseThrow()
-                .contains("must not be inside"));
-    }
-
-    @Test
-    void destinationChangesInvalidateOnlyTheirPersistedHealth() {
-        SettingsDefaults defaults = new SettingsDefaults(temporaryDirectory.resolve("worldarchive"));
-        WorldArchiveConfig base = defaults.resolve(WorldArchiveConfig.defaults());
-        Instant checkedAt = Instant.parse("2026-07-17T12:00:00Z");
-        DestinationHealth healthyGit = new DestinationHealth(
-                DestinationType.GIT,
-                DestinationHealthStatus.HEALTHY,
-                "Git and LFS are ready",
-                checkedAt);
-        DestinationHealth healthyZip = new DestinationHealth(
-                DestinationType.ZIP,
-                DestinationHealthStatus.HEALTHY,
-                "ZIP folder is ready",
-                checkedAt);
-        Path worldPath = temporaryDirectory.resolve("health-world");
-        WorldId worldId = WorldId.create();
-        WorldArchiveConfig checked = new WorldArchiveConfig(
-                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
-                base.triggers(),
-                new GitDestinationConfig(
-                        true,
-                        base.git().repository(),
-                        base.git().remoteName(),
-                        Optional.empty(),
-                        base.git().triggers(),
-                        base.git().lfsPatterns(),
-                        healthyGit),
-                new ZipDestinationConfig(
-                        true,
-                        base.zip().destination(),
-                        base.zip().triggers(),
-                        healthyZip),
-                List.of(new WorldConfig(worldId, true, worldPath)));
-        SettingsDraft draft = SettingsDraft.from(checked);
-
-        draft.setWorldRemoteUrl(worldId, "https://example.com/health-world.git");
-
-        assertEquals(DestinationHealthStatus.UNCONFIGURED, draft.gitHealth().status());
-        assertEquals(DestinationHealthStatus.HEALTHY, draft.zipHealth().status());
-
-        draft.setZipDestination(temporaryDirectory.resolve("other-archives").toString());
-
-        assertEquals(DestinationHealthStatus.UNCONFIGURED, draft.zipHealth().status());
-    }
-
-    @Test
-    void validationIssuesRedactCredentialBearingDiagnostics() {
-        SettingsValidation validation = new SettingsValidation(
-                Optional.empty(),
-                Map.of(SettingsField.DESTINATIONS, "Authorization: Bearer abcdefghijklmnop"));
-
-        assertEquals(
-                "Authorization: Bearer [REDACTED]",
-                validation.firstIssue().orElseThrow());
-    }
-
-    @Test
-    void retainsWorldIdentityWhileChangingEnablementAndResettingDefaults() throws IOException {
+    void defaultsKeepWhereBackupsAreAndSwitchEveryWorldBackOn() throws IOException {
         Path world = Files.createDirectory(temporaryDirectory.resolve("world"));
-        WorldId worldId = new WorldId(UUID.randomUUID());
-        WorldArchiveConfig productDefaults = resolvedDefaults();
-        WorldArchiveConfig config = new WorldArchiveConfig(
-                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
-                productDefaults.triggers(),
-                productDefaults.git(),
-                productDefaults.zip(),
-                List.of(new WorldConfig(worldId, true, world)));
-        SettingsDraft draft = SettingsDraft.from(config);
-        draft.setWorldEnabled(worldId, false);
-
-        assertFalse(draft.validate(List.of(world)).config().orElseThrow().worlds().getFirst().enabled());
-
-        SettingsDraft defaults = SettingsDraft.defaultsKeepingWorlds(config);
-        assertTrue(defaults.validate(List.of(world)).config().orElseThrow().worlds().getFirst().enabled());
-        assertEquals(worldId, defaults.base().worlds().getFirst().worldId());
-    }
-
-    @Test
-    void validatesAndPreservesPerWorldZipOverride() throws IOException {
-        Path world = Files.createDirectory(temporaryDirectory.resolve("override-world"));
-        Path override = Files.createDirectory(temporaryDirectory.resolve("override-zips"));
+        Path customZips = Files.createDirectory(temporaryDirectory.resolve("custom-zips"));
+        Path worldZips = Files.createDirectory(temporaryDirectory.resolve("world-zips"));
         WorldId worldId = WorldId.create();
         WorldArchiveConfig defaults = resolvedDefaults();
-        SettingsDraft draft = SettingsDraft.from(new WorldArchiveConfig(
-                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
-                defaults.triggers(),
+        WorldArchiveConfig saved = new WorldArchiveConfig(
+                new TriggerConfig(true, false, true, 90),
                 defaults.git(),
-                defaults.zip(),
-                List.of(new WorldConfig(worldId, true, world))));
+                defaults.zip().withDestination(Optional.of(customZips)),
+                List.of(new WorldConfig(worldId, false, world, Optional.of("https://example.com/w.git"),
+                        Optional.of(worldZips), StoragePolicy.defaults())));
 
-        draft.setWorldZipDestination(worldId, override.toString());
+        WorldArchiveConfig reset = SettingsDraft.from(saved).withDefaults()
+                .validate(List.of(world)).config().orElseThrow();
 
-        WorldConfig validated = draft.validate(List.of(world))
-                .config().orElseThrow().worlds().getFirst();
-        assertEquals(override.toRealPath(), validated.zipDestination().orElseThrow());
-        assertEquals(
-                validated.zipDestination(),
-                SettingsDraft.defaultsKeepingWorlds(
-                                draft.validate(List.of(world)).config().orElseThrow())
-                        .base().worlds().getFirst().zipDestination());
+        assertEquals(TriggerConfig.defaults(), reset.triggers());
+        assertEquals(Optional.of(customZips.toRealPath()), reset.zip().destination());
+        WorldConfig resetWorld = reset.worlds().getFirst();
+        assertTrue(resetWorld.enabled());
+        assertEquals(Optional.of("https://example.com/w.git"), resetWorld.remoteUrl());
+        assertEquals(Optional.of(worldZips.toRealPath()), resetWorld.zipDestination());
     }
 
     @Test
-    void preservesHiddenLegacyGitStorageAcrossValidationAndDefaults() throws IOException {
-        Path legacyRepository = Files.createDirectory(temporaryDirectory.resolve("legacy-shared.git"));
-        WorldArchiveConfig resolved = resolvedDefaults();
-        GitDestinationConfig git = resolved.git();
-        WorldArchiveConfig migrated = new WorldArchiveConfig(
-                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
-                resolved.triggers(),
-                new GitDestinationConfig(
-                        git.enabled(),
-                        git.repository(),
-                        git.remoteName(),
-                        git.remoteUrl(),
-                        git.triggers(),
-                        git.lfsPatterns(),
-                        git.health(),
-                        Optional.of(legacyRepository),
-                        Optional.of("https://example.invalid/legacy.git")),
-                resolved.zip(),
-                resolved.worlds());
+    void theZipBoxRemembersTheWorldFolderWhenItIsUnticked() {
+        WorldId worldId = WorldId.create();
+        SettingsDraft draft = SettingsDraft.from(resolvedDefaults().withWorlds(List.of(
+                WorldConfig.defaults(worldId, temporaryDirectory.resolve("world")))));
+        String worldFolder = temporaryDirectory.resolve("world-zips").toString();
 
-        WorldArchiveConfig validated = SettingsDraft.from(migrated)
-                .validate(List.of())
-                .config()
-                .orElseThrow();
-        SettingsDraft reset = SettingsDraft.defaultsKeepingWorlds(
-                migrated,
-                new SettingsDefaults(temporaryDirectory.resolve("new-defaults")));
+        draft.setWorldZipOverride(worldId, true);
+        assertEquals(draft.zipDestination(), draft.worldZipDestination(worldId));
+        draft.setWorldZipDestination(worldId, worldFolder);
+        draft.setWorldZipOverride(worldId, false);
+        assertEquals("", draft.worldZipDestination(worldId));
+        assertTrue(draft.validate(List.of()).config().orElseThrow().worlds().getFirst().zipDestination().isEmpty());
+        draft.setWorldZipOverride(worldId, true);
 
-        assertEquals(legacyRepository.toRealPath(), validated.git().legacyRepository().orElseThrow());
-        assertEquals(
-                migrated.git().legacyRemoteUrl(),
-                validated.git().legacyRemoteUrl());
-        assertEquals(
-                migrated.git().legacyRepository(),
-                reset.base().git().legacyRepository());
-        assertEquals(
-                migrated.git().legacyRemoteUrl(),
-                reset.base().git().legacyRemoteUrl());
+        assertEquals(worldFolder, draft.worldZipDestination(worldId));
     }
 
     private WorldArchiveConfig resolvedDefaults() {
         try {
-            return new SettingsDefaults(temporaryDirectory.resolve("worldarchive"))
+            return new DefaultDestinations(temporaryDirectory.resolve("worldarchive"))
                     .resolve(WorldArchiveConfig.defaults())
-                    .validateDestinations(List.of());
+                    .canonicalize();
         } catch (IOException exception) {
             throw new AssertionError(exception);
         }
     }
 
     private SettingsDraft draftWithWorld(Path world) {
-        WorldArchiveConfig defaults = resolvedDefaults();
-        return SettingsDraft.from(new WorldArchiveConfig(
-                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
-                defaults.triggers(),
-                defaults.git(),
-                defaults.zip(),
-                List.of(new WorldConfig(WorldId.create(), true, world))));
+        return SettingsDraft.from(resolvedDefaults().withWorlds(List.of(WorldConfig.defaults(WorldId.create(), world))));
     }
 }

@@ -6,7 +6,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.ImportSourceId;
 import dev.ishaanko.worldarchive.model.WorldId;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -16,55 +18,51 @@ final class FileImportSourceRegistryTest {
     Path temporaryDirectory;
 
     @Test
-    void roundTripsAndUnlinksExternalArtifactsWithoutTouchingTheirFolder() throws Exception {
-        // ZIP_LINK sources are no longer created (zip link-in-place import was
-        // removed), but a registry written by an older release may still contain
-        // one; the registry must keep decoding and unlinking it correctly.
-        Path linkedFolder = temporaryDirectory.resolve("linked").toAbsolutePath().normalize();
-        java.nio.file.Files.createDirectories(linkedFolder);
-        BackupId backupId = BackupId.create();
+    void aRepositoryCollectsItsImportedBackupsAndGoesWhenTheLastIsUnlinked() throws Exception {
+        Path file = temporaryDirectory.resolve("sources.json");
+        ImportSourceId sourceId = ImportSourceId.derived("https://example.invalid/world.git");
         WorldId worldId = WorldId.create();
-        ImportSourceId sourceId = ImportSourceId.derived("ZIP_LINK\0" + linkedFolder);
-        ImportSource source = new ImportSource(
-                sourceId,
-                ImportSourceMode.ZIP_LINK,
-                linkedFolder.toString(),
-                Map.of(
-                        backupId,
-                        new ImportArtifactBinding(
-                                worldId,
-                                backupId,
-                                "nested/archive.zip",
-                                "a".repeat(64))));
-        FileImportSourceRegistry registry = new FileImportSourceRegistry(
-                temporaryDirectory.resolve("sources.json"));
+        BackupId first = BackupId.create();
+        BackupId second = BackupId.create();
+        FileImportSourceRegistry registry = new FileImportSourceRegistry(file);
 
-        registry.put(source);
+        String location = "https://example.invalid/world.git";
+        registry.put(ImportSource.git(sourceId, location, Map.of(first, binding(worldId, first))));
+        registry.put(ImportSource.git(sourceId, location, Map.of(second, binding(worldId, second))));
 
-        assertEquals(source, registry.find(sourceId).orElseThrow());
-        assertEquals(source, new FileImportSourceRegistry(
-                temporaryDirectory.resolve("sources.json")).list().getFirst());
-        registry.unlink(sourceId, backupId);
-        assertTrue(registry.find(sourceId).isEmpty());
-        assertTrue(java.nio.file.Files.isDirectory(linkedFolder));
+        ImportSource merged = new FileImportSourceRegistry(file).find(sourceId).orElseThrow();
+        assertEquals(ImportSourceMode.GIT_FULL_DOWNLOAD, merged.mode());
+        assertEquals(Map.of(first, binding(worldId, first), second, binding(worldId, second)), merged.artifacts());
+        registry.unlink(Map.of(first, sourceId));
+        assertEquals(List.of(second), List.copyOf(registry.find(sourceId).orElseThrow().artifacts().keySet()));
+        registry.unlink(Map.of(second, sourceId));
+        assertTrue(registry.list().isEmpty());
     }
 
     @Test
-    void stableSourceIdentityIsIdempotent() {
-        assertEquals(
-                ImportSourceId.derived("same source"),
-                ImportSourceId.derived("same source"));
-    }
+    void aLinkedFolderFromAnOlderReleaseStillDecodesAsItWasWritten() throws Exception {
+        Path file = temporaryDirectory.resolve("sources.json");
+        Files.writeString(file, """
+                {
+                  "schemaVersion": 1,
+                  "sources": [
+                    {
+                      "id": "5b4a3928-1706-4f5e-8d4c-3b2a19087f6e",
+                      "mode": "ZIP_LINK",
+                      "location": "C:\\\\Users\\\\bob\\\\zips",
+                      "artifacts": []
+                    }
+                  ]
+                }
+                """);
 
-    @Test
-    void keepsALegacyLinkedFolderFromStoredDataAsWritten() {
-        // A registry synced from another platform may hold a path this platform cannot
-        // parse; the retired ZIP_LINK mode is never resolved, so the text is kept as it is.
-        ImportSource legacy = new ImportSource(
-                ImportSourceId.create(),
-                ImportSourceMode.ZIP_LINK,
-                "C:\\Users\\bob\\zips",
-                Map.of());
+        ImportSource legacy = new FileImportSourceRegistry(file).list().getFirst();
+
+        assertEquals(ImportSourceMode.ZIP_LINK, legacy.mode());
         assertEquals("C:\\Users\\bob\\zips", legacy.location());
+    }
+
+    private static ImportArtifactBinding binding(WorldId worldId, BackupId backupId) {
+        return new ImportArtifactBinding(worldId, backupId, "refs/heads/backups/" + backupId, "a".repeat(40));
     }
 }

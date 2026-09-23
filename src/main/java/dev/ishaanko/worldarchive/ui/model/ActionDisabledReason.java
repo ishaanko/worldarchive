@@ -1,11 +1,12 @@
 package dev.ishaanko.worldarchive.ui.model;
 
-/** Stable reason a browser action cannot currently run. */
+/** Why a backup-browser action cannot run; {@link #NONE} when it can. */
 public enum ActionDisabledReason {
     NONE,
     OPERATION_IN_PROGRESS,
     SOURCE_UNAVAILABLE,
-    NO_DESTINATION_CONFIGURED,
+    /** The world folder is there, but the settings let no new backup be made; see {@link BackupBrowserCapabilities#createBlock}. */
+    CREATE_BLOCKED,
     NO_SELECTION,
     MULTIPLE_SELECTED,
     NO_DURABLE_COPY,

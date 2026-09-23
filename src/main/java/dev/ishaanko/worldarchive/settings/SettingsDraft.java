@@ -1,38 +1,58 @@
 package dev.ishaanko.worldarchive.settings;
 
-import dev.ishaanko.worldarchive.config.WorldArchiveConfig;
 import dev.ishaanko.worldarchive.config.DestinationTriggerConfig;
 import dev.ishaanko.worldarchive.config.GitDestinationConfig;
 import dev.ishaanko.worldarchive.config.PathSafety;
+import dev.ishaanko.worldarchive.config.RemoteUrlPolicy;
 import dev.ishaanko.worldarchive.config.TriggerConfig;
+import dev.ishaanko.worldarchive.config.WorldArchiveConfig;
 import dev.ishaanko.worldarchive.config.WorldConfig;
 import dev.ishaanko.worldarchive.config.ZipDestinationConfig;
-import dev.ishaanko.worldarchive.model.DestinationHealth;
-import dev.ishaanko.worldarchive.model.SensitiveDataRedactor;
+import dev.ishaanko.worldarchive.model.BackupTrigger;
+import dev.ishaanko.worldarchive.model.DestinationType;
+import dev.ishaanko.worldarchive.model.SafeText;
 import dev.ishaanko.worldarchive.model.WorldId;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
-import java.nio.file.LinkOption;
 import java.nio.file.Path;
-import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
+import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.UnaryOperator;
 
-/** Mutable presentation model that validates every settings entry point identically. */
+/**
+ * What the settings screen edits: every setting as the player typed it. {@link #validate}
+ * checks the text and builds the configuration to save; {@link #changes} turns that into a
+ * change that applies only what the player edited, so a change saved meanwhile by a world
+ * registration or another game window is kept. Not thread-safe: hand a {@link #copy} to
+ * another thread.
+ */
 public final class SettingsDraft {
+    private static final int MESSAGE_LIMIT = 512;
+
+    private static final String GIT_REPOSITORY_LABEL = "Git repository root";
+
+    private static final String ZIP_FOLDER_LABEL = "ZIP folder";
+
+    private static final String REQUIRED_WHILE_ENABLED = " is required while this destination is enabled";
+
+    private static final String UNCHECKED_DESTINATION = "The destination path could not be validated";
+
     private final WorldArchiveConfig base;
 
-    private final Map<WorldId, Boolean> worldEnabled;
+    private final Map<DestinationType, EnumSet<BackupTrigger>> triggers = new EnumMap<>(DestinationType.class);
 
-    private final Map<WorldId, String> worldRemoteUrls;
-
-    private final Map<WorldId, String> worldZipDestinations;
+    private final Map<WorldId, WorldEdit> worlds = new LinkedHashMap<>();
 
     private String scheduleInterval;
 
@@ -42,403 +62,304 @@ public final class SettingsDraft {
 
     private String gitRemoteName;
 
-    private boolean gitManualEnabled;
-
-    private boolean gitWorldExitEnabled;
-
-    private boolean gitScheduledEnabled;
-
     private String gitLfsPatterns;
 
     private boolean zipEnabled;
 
     private String zipDestination;
 
-    private boolean zipManualEnabled;
-
-    private boolean zipWorldExitEnabled;
-
-    private boolean zipScheduledEnabled;
-
-    private DestinationHealth gitHealth;
-
-    private DestinationHealth zipHealth;
-
-    private SettingsDraft(WorldArchiveConfig config) {
-        base = Objects.requireNonNull(config, "config");
-        scheduleInterval = Integer.toString(config.triggers().scheduleIntervalMinutes());
-        gitEnabled = config.git().enabled();
-        gitRepository = config.git().repository().map(Path::toString).orElse("");
-        gitRemoteName = config.git().remoteName();
-        gitManualEnabled = config.triggers().manualEnabled()
-                && config.git().triggers().manualEnabled();
-        gitWorldExitEnabled = config.triggers().worldExitEnabled()
-                && config.git().triggers().worldExitEnabled();
-        gitScheduledEnabled = config.triggers().scheduledEnabled()
-                && config.git().triggers().scheduledEnabled();
-        gitLfsPatterns = String.join(", ", config.git().lfsPatterns());
-        zipEnabled = config.zip().enabled();
-        zipDestination = config.zip().destination().map(Path::toString).orElse("");
-        zipManualEnabled = config.triggers().manualEnabled()
-                && config.zip().triggers().manualEnabled();
-        zipWorldExitEnabled = config.triggers().worldExitEnabled()
-                && config.zip().triggers().worldExitEnabled();
-        zipScheduledEnabled = config.triggers().scheduledEnabled()
-                && config.zip().triggers().scheduledEnabled();
-        gitHealth = config.git().health();
-        zipHealth = config.zip().health();
-        worldEnabled = new LinkedHashMap<>();
-        worldRemoteUrls = new LinkedHashMap<>();
-        worldZipDestinations = new LinkedHashMap<>();
-        config.worlds().forEach(world -> {
-            worldEnabled.put(world.worldId(), world.enabled());
-            worldRemoteUrls.put(world.worldId(), world.remoteUrl().orElse(""));
-            worldZipDestinations.put(
-                    world.worldId(),
-                    world.zipDestination().map(Path::toString).orElse(""));
-        });
+    /**
+     * @param base the settings the screen opened with
+     * @param values the settings the fields start from
+     */
+    private SettingsDraft(WorldArchiveConfig base, WorldArchiveConfig values) {
+        this.base = Objects.requireNonNull(base, "base");
+        scheduleInterval = Integer.toString(values.triggers().scheduleIntervalMinutes());
+        gitEnabled = values.git().enabled();
+        gitRepository = pathText(values.git().repository());
+        gitRemoteName = values.git().remoteName();
+        gitLfsPatterns = String.join(", ", values.git().lfsPatterns());
+        zipEnabled = values.zip().enabled();
+        zipDestination = pathText(values.zip().destination());
+        triggers.put(DestinationType.GIT, enabledTriggers(values.triggers(), values.git().triggers()));
+        triggers.put(DestinationType.ZIP, enabledTriggers(values.triggers(), values.zip().triggers()));
+        values.worlds().forEach(world -> worlds.put(world.worldId(), new WorldEdit(world)));
     }
 
     private SettingsDraft(SettingsDraft source) {
         base = source.base;
-        worldEnabled = new LinkedHashMap<>(source.worldEnabled);
-        worldRemoteUrls = new LinkedHashMap<>(source.worldRemoteUrls);
-        worldZipDestinations = new LinkedHashMap<>(source.worldZipDestinations);
         scheduleInterval = source.scheduleInterval;
         gitEnabled = source.gitEnabled;
         gitRepository = source.gitRepository;
         gitRemoteName = source.gitRemoteName;
-        gitManualEnabled = source.gitManualEnabled;
-        gitWorldExitEnabled = source.gitWorldExitEnabled;
-        gitScheduledEnabled = source.gitScheduledEnabled;
         gitLfsPatterns = source.gitLfsPatterns;
         zipEnabled = source.zipEnabled;
         zipDestination = source.zipDestination;
-        zipManualEnabled = source.zipManualEnabled;
-        zipWorldExitEnabled = source.zipWorldExitEnabled;
-        zipScheduledEnabled = source.zipScheduledEnabled;
-        gitHealth = source.gitHealth;
-        zipHealth = source.zipHealth;
+        source.triggers.forEach((destination, enabled) -> triggers.put(destination, EnumSet.copyOf(enabled)));
+        source.worlds.forEach((worldId, edit) -> worlds.put(worldId, new WorldEdit(edit)));
     }
 
     public static SettingsDraft from(WorldArchiveConfig config) {
-        return new SettingsDraft(config);
+        return new SettingsDraft(config, config);
+    }
+
+    /**
+     * Product defaults for every setting except where backups are kept: the Git repository
+     * folder, the ZIP folder, and each world's remote and ZIP folder stay as saved, so existing
+     * backups stay reachable. Every world is switched back on.
+     */
+    public SettingsDraft withDefaults() {
+        WorldArchiveConfig defaults = WorldArchiveConfig.defaults();
+        return new SettingsDraft(base, defaults
+                .withGit(defaults.git().withRepository(base.git().repository()))
+                .withZip(defaults.zip().withDestination(base.zip().destination()))
+                .withWorlds(base.worlds().stream().map(world -> world.withEnabled(true)).toList()));
     }
 
     public SettingsDraft copy() {
         return new SettingsDraft(this);
     }
 
-    /** Restores product defaults without losing discovered per-world identities and paths. */
-    public static SettingsDraft defaultsKeepingWorlds(WorldArchiveConfig current) {
-        Objects.requireNonNull(current, "current");
-        WorldArchiveConfig defaults = WorldArchiveConfig.defaults();
-        GitDestinationConfig git = new GitDestinationConfig(
-                defaults.git().enabled(),
-                current.git().repository(),
-                defaults.git().remoteName(),
-                defaults.git().remoteUrl(),
-                defaults.git().triggers(),
-                defaults.git().lfsPatterns(),
-                defaults.git().health(),
-                defaults.git().legacyRepository(),
-                defaults.git().legacyRemoteUrl());
-        ZipDestinationConfig zip = new ZipDestinationConfig(
-                defaults.zip().enabled(),
-                current.zip().destination(),
-                defaults.zip().triggers(),
-                defaults.zip().health());
-        return resetToDefaults(current, enableAllWorlds(current.worlds()), git, zip, defaults.triggers());
-    }
-
-    public static SettingsDraft defaultsKeepingWorlds(
-            WorldArchiveConfig current,
-            SettingsDefaults defaults) {
-        Objects.requireNonNull(current, "current");
-        Objects.requireNonNull(defaults, "defaults");
-        List<WorldConfig> worlds = enableAllWorlds(current.worlds());
-        WorldArchiveConfig reset = defaults.defaultsKeepingWorlds(worlds);
-        return resetToDefaults(current, worlds, reset.git(), reset.zip(), reset.triggers());
+    /** The settings the screen opened with. */
+    public WorldArchiveConfig base() {
+        return base;
     }
 
     /**
-     * Applies the shared reset policy: every world force-enabled, and the git destination's
-     * hidden legacy repository/URL carried over from {@code current} regardless of where the
-     * rest of the git and zip destinations were resolved from.
+     * Checks every field and builds the configuration to save. A folder must be absolute, must
+     * not be a file, and must not be inside a world: a configured world or one of
+     * {@code knownWorldPaths}. Whether a folder can be reached right now is not checked here;
+     * the health footer warns about that, and saving still works.
      */
-    private static SettingsDraft resetToDefaults(
-            WorldArchiveConfig current,
-            List<WorldConfig> worlds,
-            GitDestinationConfig git,
-            ZipDestinationConfig zip,
-            TriggerConfig triggers) {
-        return new SettingsDraft(new WorldArchiveConfig(
-                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
-                triggers,
-                withLegacyGitFields(git, current.git()),
-                zip,
-                worlds));
-    }
-
-    private static List<WorldConfig> enableAllWorlds(List<WorldConfig> worlds) {
-        return worlds.stream()
-                .map(world -> new WorldConfig(
-                        world.worldId(),
-                        true,
-                        world.path(),
-                        world.remoteUrl(),
-                        world.zipDestination(),
-                        world.storagePolicy()))
-                .toList();
-    }
-
-    private static GitDestinationConfig withLegacyGitFields(
-            GitDestinationConfig fresh,
-            GitDestinationConfig current) {
-        return new GitDestinationConfig(
-                fresh.enabled(),
-                fresh.repository(),
-                fresh.remoteName(),
-                fresh.remoteUrl(),
-                fresh.triggers(),
-                fresh.lfsPatterns(),
-                fresh.health(),
-                current.legacyRepository(),
-                current.legacyRemoteUrl());
-    }
-
-    /** Builds a config only when fields, permissions, and recursive-destination rules all pass. */
     public SettingsValidation validate(Collection<Path> knownWorldPaths) {
-        Objects.requireNonNull(knownWorldPaths, "knownWorldPaths");
-        Map<SettingsField, String> issues = new LinkedHashMap<>();
-        int interval = parseScheduleInterval(issues);
-        List<Path> sourceWorlds = collectWorldPaths(knownWorldPaths);
-        Optional<Path> repository = validatePath(
-                gitRepository,
-                gitEnabled,
-                "Git repository root",
-                SettingsField.GIT_REPOSITORY,
-                sourceWorlds,
-                issues);
-        Optional<Path> archiveDirectory = validatePath(
-                zipDestination,
-                zipEnabled,
-                "ZIP folder",
-                SettingsField.ZIP_DESTINATION,
-                sourceWorlds,
-                issues);
-        List<String> patterns = parseLfsPatterns(issues);
-        List<WorldConfig> worlds = updatedWorlds(sourceWorlds, issues);
-
-        GitDestinationConfig git = null;
-        if (!issues.containsKey(SettingsField.GIT_REPOSITORY)
-                && !issues.containsKey(SettingsField.GIT_LFS_PATTERNS)) {
-            git = buildGitConfig(repository, patterns, issues);
+        Map<SettingsField, String> issues = new EnumMap<>(SettingsField.class);
+        List<Path> sourceWorlds = sourceWorlds(knownWorldPaths, issues);
+        int interval = scheduleIntervalMinutes(issues);
+        Optional<Path> repository = folder(gitRepository, GIT_REPOSITORY_LABEL, sourceWorlds,
+                issue -> issues.put(SettingsField.GIT_REPOSITORY, issue));
+        if (gitEnabled && gitRepository.isBlank()) {
+            issues.put(SettingsField.GIT_REPOSITORY, GIT_REPOSITORY_LABEL + REQUIRED_WHILE_ENABLED);
         }
-        ZipDestinationConfig zip = new ZipDestinationConfig(
-                zipEnabled,
-                archiveDirectory,
-                new DestinationTriggerConfig(
-                        zipManualEnabled,
-                        zipWorldExitEnabled,
-                        zipScheduledEnabled),
-                zipHealth);
-
-        if (!issues.isEmpty() || git == null) {
-            return new SettingsValidation(Optional.empty(), issues);
+        Optional<Path> zipFolder = folder(zipDestination, ZIP_FOLDER_LABEL, sourceWorlds,
+                issue -> issues.put(SettingsField.ZIP_DESTINATION, issue));
+        if (zipEnabled && zipDestination.isBlank()) {
+            issues.put(SettingsField.ZIP_DESTINATION, ZIP_FOLDER_LABEL + REQUIRED_WHILE_ENABLED);
         }
-        WorldArchiveConfig candidate = new WorldArchiveConfig(
-                WorldArchiveConfig.CURRENT_SCHEMA_VERSION,
+        problem(() -> GitDestinationConfig.validateRemoteName(gitRemoteName))
+                .ifPresent(issue -> issues.put(SettingsField.GIT_REMOTE_NAME, issue));
+        List<String> patterns = lfsPatterns();
+        problem(() -> GitDestinationConfig.validateLfsPatterns(patterns))
+                .ifPresent(issue -> issues.put(SettingsField.GIT_LFS_PATTERNS, issue));
+        Map<WorldId, Map<SettingsField, String>> worldIssues = new LinkedHashMap<>();
+        List<WorldConfig> editedWorlds = editedWorlds(sourceWorlds, worldIssues);
+        if (!issues.isEmpty() || !worldIssues.isEmpty()) {
+            return SettingsValidation.invalid(issues, worldIssues);
+        }
+        return SettingsValidation.valid(new WorldArchiveConfig(
                 new TriggerConfig(
-                        gitManualEnabled || zipManualEnabled,
-                        gitWorldExitEnabled || zipWorldExitEnabled,
-                        gitScheduledEnabled || zipScheduledEnabled,
+                        anyDestination(BackupTrigger.MANUAL),
+                        anyDestination(BackupTrigger.WORLD_EXIT),
+                        anyDestination(BackupTrigger.SCHEDULED),
                         interval),
-                git,
-                zip,
-                worlds);
+                new GitDestinationConfig(
+                        gitEnabled, repository, gitRemoteName, destinationTriggers(DestinationType.GIT), patterns),
+                new ZipDestinationConfig(zipEnabled, zipFolder, destinationTriggers(DestinationType.ZIP)),
+                editedWorlds));
+    }
+
+    /**
+     * The player's edits as a change to the settings as they are when the save runs: each value
+     * that differs from what the screen opened with replaces the current one, and every other
+     * value stays as it is now. {@code edited} is the configuration {@link #validate} built.
+     */
+    public UnaryOperator<WorldArchiveConfig> changes(WorldArchiveConfig edited) {
+        Objects.requireNonNull(edited, "edited");
+        WorldArchiveConfig opened = base;
+        return current -> merge(opened, edited, current);
+    }
+
+    private static WorldArchiveConfig merge(
+            WorldArchiveConfig opened,
+            WorldArchiveConfig edited,
+            WorldArchiveConfig current) {
+        TriggerConfig openedTriggers = opened.triggers();
+        TriggerConfig editedTriggers = edited.triggers();
+        TriggerConfig currentTriggers = current.triggers();
+        GitDestinationConfig openedGit = opened.git();
+        GitDestinationConfig editedGit = edited.git();
+        GitDestinationConfig currentGit = current.git();
+        ZipDestinationConfig openedZip = opened.zip();
+        ZipDestinationConfig editedZip = edited.zip();
+        ZipDestinationConfig currentZip = current.zip();
+        return new WorldArchiveConfig(
+                new TriggerConfig(
+                        pick(openedTriggers, editedTriggers, currentTriggers, TriggerConfig::manualEnabled),
+                        pick(openedTriggers, editedTriggers, currentTriggers, TriggerConfig::worldExitEnabled),
+                        pick(openedTriggers, editedTriggers, currentTriggers, TriggerConfig::scheduledEnabled),
+                        pick(openedTriggers, editedTriggers, currentTriggers, TriggerConfig::scheduleIntervalMinutes)),
+                new GitDestinationConfig(
+                        pick(openedGit, editedGit, currentGit, GitDestinationConfig::enabled),
+                        pick(openedGit, editedGit, currentGit, GitDestinationConfig::repository),
+                        pick(openedGit, editedGit, currentGit, GitDestinationConfig::remoteName),
+                        pick(openedGit, editedGit, currentGit, GitDestinationConfig::triggers),
+                        pick(openedGit, editedGit, currentGit, GitDestinationConfig::lfsPatterns)),
+                new ZipDestinationConfig(
+                        pick(openedZip, editedZip, currentZip, ZipDestinationConfig::enabled),
+                        pick(openedZip, editedZip, currentZip, ZipDestinationConfig::destination),
+                        pick(openedZip, editedZip, currentZip, ZipDestinationConfig::triggers)),
+                current.worlds().stream().map(world -> mergeWorld(opened, edited, world)).toList());
+    }
+
+    /** A world keeps its current folder and storage policy; only the fields the screen edits can change. */
+    private static WorldConfig mergeWorld(WorldArchiveConfig opened, WorldArchiveConfig edited, WorldConfig current) {
+        Optional<WorldConfig> before = opened.world(current.worldId());
+        Optional<WorldConfig> after = edited.world(current.worldId());
+        if (before.isEmpty() || after.isEmpty()) {
+            return current;
+        }
+        return current
+                .withEnabled(pick(before.get(), after.get(), current, WorldConfig::enabled))
+                .withRemoteUrl(pick(before.get(), after.get(), current, WorldConfig::remoteUrl))
+                .withZipDestination(pick(before.get(), after.get(), current, WorldConfig::zipDestination));
+    }
+
+    /** The edited value when the player changed it, otherwise the current one. */
+    private static <R, T> T pick(R opened, R edited, R current, Function<R, T> field) {
+        T mine = field.apply(edited);
+        return mine.equals(field.apply(opened)) ? field.apply(current) : mine;
+    }
+
+    /** The folders destinations must stay out of, canonical and each once. */
+    private List<Path> sourceWorlds(Collection<Path> knownWorldPaths, Map<SettingsField, String> issues) {
+        List<Path> sourceWorlds = new ArrayList<>(knownWorldPaths);
+        base.worlds().forEach(world -> sourceWorlds.add(world.path()));
         try {
-            return new SettingsValidation(
-                    Optional.of(candidate.validateDestinations(sourceWorlds)),
-                    Map.of());
+            return PathSafety.canonicalizeAll(sourceWorlds);
         } catch (IOException exception) {
-            issues.put(SettingsField.DESTINATIONS, safePathMessage(exception));
-            return new SettingsValidation(Optional.empty(), issues);
+            issues.put(SettingsField.DESTINATIONS, SafeText.from(exception, UNCHECKED_DESTINATION, MESSAGE_LIMIT));
+            return List.of();
         }
     }
 
-    private GitDestinationConfig buildGitConfig(
-            Optional<Path> repository,
-            List<String> patterns,
-            Map<SettingsField, String> issues) {
-        String remoteName = gitRemoteName;
-        try {
-            return new GitDestinationConfig(
-                    gitEnabled,
-                    repository,
-                    remoteName,
-                    Optional.empty(),
-                    new DestinationTriggerConfig(
-                            gitManualEnabled,
-                            gitWorldExitEnabled,
-                            gitScheduledEnabled),
-                    patterns,
-                    gitHealth,
-                    base.git().legacyRepository(),
-                    base.git().legacyRemoteUrl());
-        } catch (IllegalArgumentException exception) {
-            SettingsField field = exception.getMessage().contains("remote name")
-                    ? SettingsField.GIT_REMOTE_NAME
-                    : SettingsField.GIT_LFS_PATTERNS;
-            issues.put(field, exception.getMessage());
-            return null;
-        }
-    }
-
-    private int parseScheduleInterval(Map<SettingsField, String> issues) {
-        try {
-            int interval = Integer.parseInt(scheduleInterval.strip());
-            if (interval < 1 || interval > TriggerConfig.MAXIMUM_SCHEDULE_INTERVAL_MINUTES) {
-                throw new NumberFormatException("out of range");
-            }
-            return interval;
-        } catch (NumberFormatException exception) {
+    private int scheduleIntervalMinutes(Map<SettingsField, String> issues) {
+        Optional<Integer> interval = parsedInterval().filter(TriggerConfig::isValidInterval);
+        if (interval.isEmpty()) {
             issues.put(SettingsField.SCHEDULE_INTERVAL, "Use a whole number from 1 to "
                     + TriggerConfig.MAXIMUM_SCHEDULE_INTERVAL_MINUTES + " minutes");
             return TriggerConfig.DEFAULT_SCHEDULE_INTERVAL_MINUTES;
         }
+        return interval.get();
     }
 
-    private List<Path> collectWorldPaths(Collection<Path> knownWorldPaths) {
-        List<Path> paths = new ArrayList<>(knownWorldPaths.size() + base.worlds().size());
-        for (Path path : knownWorldPaths) {
-            paths.add(Objects.requireNonNull(path, "knownWorldPath"));
+    private Optional<Integer> parsedInterval() {
+        try {
+            return Optional.of(Integer.parseInt(scheduleInterval.strip()));
+        } catch (NumberFormatException exception) {
+            return Optional.empty();
         }
-        base.worlds().forEach(world -> paths.add(world.path()));
-        return List.copyOf(paths);
     }
 
-    private static Optional<Path> validatePath(
-            String value,
-            boolean enabled,
-            String label,
-            SettingsField field,
-            Collection<Path> worldPaths,
-            Map<SettingsField, String> issues) {
-        if (value.isBlank()) {
-            if (enabled) {
-                issues.put(field, label + " is required while this destination is enabled");
+    private List<String> lfsPatterns() {
+        return Arrays.stream(gitLfsPatterns.split("[,\\r\\n]+"))
+                .map(String::strip)
+                .filter(pattern -> !pattern.isEmpty())
+                .toList();
+    }
+
+    private List<WorldConfig> editedWorlds(
+            List<Path> sourceWorlds,
+            Map<WorldId, Map<SettingsField, String>> worldIssues) {
+        List<WorldConfig> edited = new ArrayList<>(base.worlds().size());
+        for (WorldConfig world : base.worlds()) {
+            WorldEdit edit = edit(world.worldId());
+            String code = world.worldId().displayCode();
+            Map<SettingsField, String> issues = new EnumMap<>(SettingsField.class);
+            Optional<Path> zipFolder = folder(edit.zipDestination, "ZIP override for world " + code, sourceWorlds,
+                    issue -> issues.put(SettingsField.WORLD_ZIP_DESTINATION, issue));
+            Optional<String> remoteUrl = remoteUrl(edit.remoteUrl, code,
+                    issue -> issues.put(SettingsField.WORLD_REMOTE_URL, issue));
+            if (!issues.isEmpty()) {
+                worldIssues.put(world.worldId(), issues);
             }
+            edited.add(world.withEnabled(edit.enabled).withRemoteUrl(remoteUrl).withZipDestination(zipFolder));
+        }
+        return edited;
+    }
+
+    /**
+     * The canonical folder a field names; empty when the field is blank or has a problem. A
+     * problem is reported to {@code issue}.
+     */
+    private static Optional<Path> folder(String value, String label, List<Path> sourceWorlds, Consumer<String> issue) {
+        if (value.isBlank()) {
+            return Optional.empty();
+        }
+        Path path;
+        try {
+            path = Path.of(SettingsPaths.expandHome(value));
+        } catch (InvalidPathException exception) {
+            issue.accept(label + " is not a valid filesystem path");
+            return Optional.empty();
+        }
+        if (!path.isAbsolute()) {
+            issue.accept(label + " must be an absolute path");
             return Optional.empty();
         }
         try {
-            Path path = Path.of(SettingsPaths.expandHome(value));
-            if (!path.isAbsolute()) {
-                issues.put(field, label + " must be an absolute path");
-                return Optional.empty();
-            }
-            Path destination = PathSafety.requireOutsideWorlds(path, worldPaths);
-            Optional<String> accessIssue = directoryAccessIssue(destination);
-            if (accessIssue.isPresent()) {
-                issues.put(field, label + " " + accessIssue.get());
+            Path destination = PathSafety.requireOutsideWorlds(path, sourceWorlds);
+            if (PathSafety.nearestExisting(destination).filter(existing -> !Files.isDirectory(existing)).isPresent()) {
+                issue.accept(label + " or its nearest existing parent is not a folder");
                 return Optional.empty();
             }
             return Optional.of(destination);
-        } catch (InvalidPathException exception) {
-            issues.put(field, label + " is not a valid filesystem path");
         } catch (IOException exception) {
-            issues.put(field, safePathMessage(exception));
+            issue.accept(SafeText.from(exception, UNCHECKED_DESTINATION, MESSAGE_LIMIT));
+            return Optional.empty();
         }
-        return Optional.empty();
     }
 
-    private static Optional<String> directoryAccessIssue(Path destination) throws IOException {
-        Path existing = destination;
-        while (existing != null && !Files.exists(existing, LinkOption.NOFOLLOW_LINKS)) {
-            existing = existing.getParent();
+    private static Optional<String> remoteUrl(String value, String worldCode, Consumer<String> issue) {
+        if (value.isBlank()) {
+            return Optional.empty();
         }
-        if (existing == null) {
-            return Optional.of("has no accessible parent folder");
-        }
-        Path realExisting = existing.toRealPath();
-        if (!Files.isDirectory(realExisting)) {
-            return Optional.of("or its nearest existing parent is not a folder");
-        }
-        if (!Files.isReadable(realExisting)) {
-            return Optional.of("is not readable");
-        }
-        if (!Files.isWritable(realExisting)) {
-            return Optional.of("is not writable");
-        }
-        return Optional.empty();
-    }
-
-    private List<String> parseLfsPatterns(Map<SettingsField, String> issues) {
-        List<String> patterns = List.of(gitLfsPatterns.split("[,\\r\\n]+"));
-        patterns = patterns.stream().map(String::strip).filter(pattern -> !pattern.isEmpty()).toList();
         try {
-            new GitDestinationConfig(
-                    false,
-                    Optional.empty(),
-                    GitDestinationConfig.DEFAULT_REMOTE_NAME,
-                    Optional.empty(),
-                    DestinationTriggerConfig.defaults(),
-                    patterns,
-                    gitHealth);
-            return patterns;
+            return Optional.of(RemoteUrlPolicy.validateConfiguredPlain(value));
         } catch (IllegalArgumentException exception) {
-            issues.put(SettingsField.GIT_LFS_PATTERNS, exception.getMessage());
-            return GitDestinationConfig.DEFAULT_LFS_PATTERNS;
+            issue.accept("Git remote for world " + worldCode + " is invalid: " + exception.getMessage());
+            return Optional.empty();
         }
     }
 
-    private List<WorldConfig> updatedWorlds(
-            Collection<Path> sourceWorlds,
-            Map<SettingsField, String> issues) {
-        List<WorldConfig> worlds = new ArrayList<>(base.worlds().size());
-        for (WorldConfig world : base.worlds()) {
-            String remoteUrl = worldRemoteUrls.getOrDefault(world.worldId(), "");
-            String zipDestination = worldZipDestinations.getOrDefault(world.worldId(), "");
-            Optional<Path> archiveDirectory = validatePath(
-                    zipDestination,
-                    false,
-                    "ZIP override for world " + world.worldId().displayCode(),
-                    SettingsField.WORLD_ZIP_DESTINATION,
-                    sourceWorlds,
-                    issues);
-            try {
-                worlds.add(new WorldConfig(
-                        world.worldId(),
-                        worldEnabled.getOrDefault(world.worldId(), world.enabled()),
-                        world.path(),
-                        remoteUrl.isBlank() ? Optional.empty() : Optional.of(remoteUrl),
-                        archiveDirectory,
-                        world.storagePolicy()));
-            } catch (IllegalArgumentException exception) {
-                issues.put(
-                        SettingsField.WORLD_REMOTE_URL,
-                        "Git remote for world " + world.worldId().displayCode()
-                                + " is invalid: " + exception.getMessage());
-                worlds.add(world);
+    private static Optional<String> problem(Runnable check) {
+        try {
+            check.run();
+            return Optional.empty();
+        } catch (IllegalArgumentException exception) {
+            return Optional.of(exception.getMessage());
+        }
+    }
+
+    /** A trigger shows as on for a destination only when both the global and the destination switch allow it. */
+    private static EnumSet<BackupTrigger> enabledTriggers(TriggerConfig global, DestinationTriggerConfig destination) {
+        EnumSet<BackupTrigger> enabled = EnumSet.noneOf(BackupTrigger.class);
+        for (BackupTrigger trigger : BackupTrigger.values()) {
+            if (global.enabledFor(trigger) && destination.enabledFor(trigger)) {
+                enabled.add(trigger);
             }
         }
-        return List.copyOf(worlds);
+        return enabled;
     }
 
-    private static String safePathMessage(IOException exception) {
-        String message = exception.getMessage();
-        if (message == null || message.isBlank()) {
-            return "The destination path could not be validated";
-        }
-        String redacted = SensitiveDataRedactor.redact(message).strip();
-        if (redacted.isEmpty() || redacted.chars().anyMatch(Character::isISOControl)) {
-            return "The destination path could not be validated";
-        }
-        return redacted.length() <= 512 ? redacted : redacted.substring(0, 512);
+    private DestinationTriggerConfig destinationTriggers(DestinationType destination) {
+        return new DestinationTriggerConfig(
+                trigger(destination, BackupTrigger.MANUAL),
+                trigger(destination, BackupTrigger.WORLD_EXIT),
+                trigger(destination, BackupTrigger.SCHEDULED));
     }
 
-    public WorldArchiveConfig base() {
-        return base;
+    /** The global switch of a trigger is on while any destination uses it. */
+    private boolean anyDestination(BackupTrigger trigger) {
+        return triggers.values().stream().anyMatch(enabled -> enabled.contains(trigger));
     }
 
     public String scheduleInterval() {
@@ -454,10 +375,7 @@ public final class SettingsDraft {
     }
 
     public void setGitEnabled(boolean enabled) {
-        if (gitEnabled != enabled) {
-            gitEnabled = enabled;
-            resetGitHealth();
-        }
+        gitEnabled = enabled;
     }
 
     public String gitRepository() {
@@ -465,11 +383,7 @@ public final class SettingsDraft {
     }
 
     public void setGitRepository(String value) {
-        String next = Objects.requireNonNull(value, "value");
-        if (!gitRepository.equals(next)) {
-            gitRepository = next;
-            resetGitHealth();
-        }
+        gitRepository = Objects.requireNonNull(value, "value");
     }
 
     public String gitRemoteName() {
@@ -477,35 +391,7 @@ public final class SettingsDraft {
     }
 
     public void setGitRemoteName(String value) {
-        String next = Objects.requireNonNull(value, "value");
-        if (!gitRemoteName.equals(next)) {
-            gitRemoteName = next;
-            resetGitHealth();
-        }
-    }
-
-    public boolean gitManualEnabled() {
-        return gitManualEnabled;
-    }
-
-    public void setGitManualEnabled(boolean enabled) {
-        gitManualEnabled = enabled;
-    }
-
-    public boolean gitWorldExitEnabled() {
-        return gitWorldExitEnabled;
-    }
-
-    public void setGitWorldExitEnabled(boolean enabled) {
-        gitWorldExitEnabled = enabled;
-    }
-
-    public boolean gitScheduledEnabled() {
-        return gitScheduledEnabled;
-    }
-
-    public void setGitScheduledEnabled(boolean enabled) {
-        gitScheduledEnabled = enabled;
+        gitRemoteName = Objects.requireNonNull(value, "value");
     }
 
     public String gitLfsPatterns() {
@@ -513,11 +399,7 @@ public final class SettingsDraft {
     }
 
     public void setGitLfsPatterns(String value) {
-        String next = Objects.requireNonNull(value, "value");
-        if (!gitLfsPatterns.equals(next)) {
-            gitLfsPatterns = next;
-            resetGitHealth();
-        }
+        gitLfsPatterns = Objects.requireNonNull(value, "value");
     }
 
     public boolean zipEnabled() {
@@ -525,10 +407,7 @@ public final class SettingsDraft {
     }
 
     public void setZipEnabled(boolean enabled) {
-        if (zipEnabled != enabled) {
-            zipEnabled = enabled;
-            resetZipHealth();
-        }
+        zipEnabled = enabled;
     }
 
     public String zipDestination() {
@@ -536,116 +415,119 @@ public final class SettingsDraft {
     }
 
     public void setZipDestination(String value) {
-        String next = Objects.requireNonNull(value, "value");
-        if (!zipDestination.equals(next)) {
-            zipDestination = next;
-            resetZipHealth();
+        zipDestination = Objects.requireNonNull(value, "value");
+    }
+
+    /** Whether a trigger starts backups to a destination. */
+    public boolean trigger(DestinationType destination, BackupTrigger trigger) {
+        return triggers.get(Objects.requireNonNull(destination, "destination"))
+                .contains(Objects.requireNonNull(trigger, "trigger"));
+    }
+
+    public void setTrigger(DestinationType destination, BackupTrigger trigger, boolean enabled) {
+        EnumSet<BackupTrigger> destinationTriggers = triggers.get(Objects.requireNonNull(destination, "destination"));
+        if (enabled) {
+            destinationTriggers.add(Objects.requireNonNull(trigger, "trigger"));
+        } else {
+            destinationTriggers.remove(Objects.requireNonNull(trigger, "trigger"));
         }
-    }
-
-    public boolean zipManualEnabled() {
-        return zipManualEnabled;
-    }
-
-    public void setZipManualEnabled(boolean enabled) {
-        zipManualEnabled = enabled;
-    }
-
-    public boolean zipWorldExitEnabled() {
-        return zipWorldExitEnabled;
-    }
-
-    public void setZipWorldExitEnabled(boolean enabled) {
-        zipWorldExitEnabled = enabled;
-    }
-
-    public boolean zipScheduledEnabled() {
-        return zipScheduledEnabled;
-    }
-
-    public void setZipScheduledEnabled(boolean enabled) {
-        zipScheduledEnabled = enabled;
     }
 
     public boolean worldEnabled(WorldId worldId) {
-        return worldEnabled.getOrDefault(Objects.requireNonNull(worldId, "worldId"), true);
+        return edit(worldId).enabled;
     }
 
     public void setWorldEnabled(WorldId worldId, boolean enabled) {
-        if (!worldEnabled.containsKey(Objects.requireNonNull(worldId, "worldId"))) {
-            throw new IllegalArgumentException("Unknown world configuration: " + worldId);
-        }
-        worldEnabled.put(worldId, enabled);
+        edit(worldId).enabled = enabled;
     }
 
     public String worldRemoteUrl(WorldId worldId) {
-        String value = worldRemoteUrls.get(Objects.requireNonNull(worldId, "worldId"));
-        if (value == null) {
-            throw new IllegalArgumentException("Unknown world configuration: " + worldId);
-        }
-        return value;
+        return edit(worldId).remoteUrl;
     }
 
     public void setWorldRemoteUrl(WorldId worldId, String remoteUrl) {
-        WorldId id = Objects.requireNonNull(worldId, "worldId");
-        if (!worldRemoteUrls.containsKey(id)) {
-            throw new IllegalArgumentException("Unknown world configuration: " + id);
+        edit(worldId).remoteUrl = Objects.requireNonNull(remoteUrl, "remoteUrl");
+    }
+
+    /** Whether the world uses its own ZIP folder instead of the one on the ZIP tab. */
+    public boolean worldZipOverride(WorldId worldId) {
+        return edit(worldId).zipOverride;
+    }
+
+    /**
+     * Ticking the box starts from the folder typed before it was last unticked, or else from the
+     * ZIP tab's folder. Unticking it clears the world's folder and remembers it.
+     */
+    public void setWorldZipOverride(WorldId worldId, boolean override) {
+        WorldEdit edit = edit(worldId);
+        if (override == edit.zipOverride) {
+            return;
         }
-        String next = Objects.requireNonNull(remoteUrl, "remoteUrl");
-        if (!worldRemoteUrls.get(id).equals(next)) {
-            worldRemoteUrls.put(id, next);
-            resetGitHealth();
+        edit.zipOverride = override;
+        if (override) {
+            edit.zipDestination = edit.rememberedZipDestination.isEmpty()
+                    ? zipDestination
+                    : edit.rememberedZipDestination;
+        } else {
+            edit.rememberedZipDestination = edit.zipDestination;
+            edit.zipDestination = "";
         }
     }
 
     public String worldZipDestination(WorldId worldId) {
-        String value = worldZipDestinations.get(Objects.requireNonNull(worldId, "worldId"));
-        if (value == null) {
-            throw new IllegalArgumentException("Unknown world configuration: " + worldId);
-        }
-        return value;
+        return edit(worldId).zipDestination;
     }
 
     public void setWorldZipDestination(WorldId worldId, String destination) {
-        WorldId id = Objects.requireNonNull(worldId, "worldId");
-        if (!worldZipDestinations.containsKey(id)) {
-            throw new IllegalArgumentException("Unknown world configuration: " + id);
-        }
-        worldZipDestinations.put(id, Objects.requireNonNull(destination, "destination"));
+        edit(worldId).zipDestination = Objects.requireNonNull(destination, "destination");
     }
 
+    /** What the health footer checks for the fields as they are now. */
     public SettingsProbeRequest probeRequest() {
         return new SettingsProbeRequest(
                 gitEnabled,
-                "git",
                 SettingsPaths.parseAbsolute(gitRepository),
-                worldRemoteUrls.values().stream().anyMatch(value -> !value.isBlank()),
                 zipEnabled,
                 SettingsPaths.parseAbsolute(zipDestination));
     }
 
-    public void applyHealth(SettingsHealthSnapshot health, Instant checkedAt) {
-        Objects.requireNonNull(health, "health");
-        Objects.requireNonNull(checkedAt, "checkedAt");
-        gitHealth = health.gitDestinationHealth(checkedAt);
-        zipHealth = health.zipDestinationHealth(checkedAt);
+    private WorldEdit edit(WorldId worldId) {
+        WorldEdit edit = worlds.get(Objects.requireNonNull(worldId, "worldId"));
+        if (edit == null) {
+            throw new IllegalArgumentException("Unknown world configuration: " + worldId);
+        }
+        return edit;
     }
 
-    public DestinationHealth gitHealth() {
-        return gitHealth;
+    private static String pathText(Optional<Path> path) {
+        return path.map(Path::toString).orElse("");
     }
 
-    public DestinationHealth zipHealth() {
-        return zipHealth;
-    }
+    /** One world's fields as typed. */
+    private static final class WorldEdit {
+        private boolean enabled;
 
-    private void resetGitHealth() {
-        gitHealth = SettingsHealthSnapshot.unchecked(probeRequest())
-                .gitDestinationHealth(Instant.EPOCH);
-    }
+        private String remoteUrl;
 
-    private void resetZipHealth() {
-        zipHealth = SettingsHealthSnapshot.unchecked(probeRequest())
-                .zipDestinationHealth(Instant.EPOCH);
+        private boolean zipOverride;
+
+        private String zipDestination;
+
+        private String rememberedZipDestination = "";
+
+        private WorldEdit(WorldConfig world) {
+            enabled = world.enabled();
+            remoteUrl = world.remoteUrl().orElse("");
+            zipDestination = pathText(world.zipDestination());
+            zipOverride = !zipDestination.isEmpty();
+        }
+
+        private WorldEdit(WorldEdit source) {
+            enabled = source.enabled;
+            remoteUrl = source.remoteUrl;
+            zipOverride = source.zipOverride;
+            zipDestination = source.zipDestination;
+            rememberedZipDestination = source.rememberedZipDestination;
+        }
     }
 }

@@ -8,7 +8,6 @@ import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.BackupManifest;
 import dev.ishaanko.worldarchive.model.BackupRecord;
 import dev.ishaanko.worldarchive.model.BackupResult;
-import dev.ishaanko.worldarchive.model.BackupStatus;
 import dev.ishaanko.worldarchive.model.BackupTrigger;
 import dev.ishaanko.worldarchive.model.DestinationResult;
 import dev.ishaanko.worldarchive.model.DestinationType;
@@ -17,241 +16,156 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
-import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
 class BackupBrowserModelTest {
-    private static final WorldId WORLD_ID = new WorldId(
-            UUID.fromString("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"));
+    private static final WorldId WORLD_ID = WorldId.parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
 
     @Test
-    void filtersSortsPaginatesAndKeepsOnlyVisibleSelection() {
-        BackupRecord oldest = record("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1", "Zulu", 1, 10, 1);
-        BackupRecord middle = record("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa2", "alpha", 2, 30, 3);
-        BackupRecord newest = record("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa3", "Alpha", 3, 20, 2);
+    void filtersSortsAndPages() {
+        BackupRow oldest = row("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1", "Zulu", 1, 10, 1);
+        BackupRow middle = row("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa2", "alpha", 2, 30, 3);
+        BackupRow newest = row("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa3", "Alpha", 3, 20, 2);
+        List<BackupRow> rows = List.of(oldest, middle, newest);
 
-        BackupBrowserPage first = BackupBrowserPage.create(
-                List.of(oldest, middle, newest),
-                new BackupBrowserQuery("alpha", BackupSort.NEWEST, 0, 1),
-                Set.of(newest.manifest().backupId()));
+        List<BackupRow> alpha = BackupFilter.apply(rows, " ALPHA ", BackupSort.NEWEST);
+        assertEquals(List.of(newest, middle), alpha);
+        Paging second = Paging.of(alpha.size(), 1, 1);
+        assertEquals(List.of(middle), second.slice(alpha));
+        assertTrue(second.hasPrevious());
+        assertFalse(second.hasNext());
 
-        assertEquals(2, first.totalRows());
-        assertEquals(2, first.pageCount());
-        assertEquals(List.of(newest.manifest().backupId()), ids(first));
-        assertEquals(Set.of(newest.manifest().backupId()), first.selectedBackupIds());
-        assertEquals(
-                List.of(newest.manifest().backupId(), middle.manifest().backupId()),
-                first.matchingBackupIds());
-
-        BackupBrowserPage second = BackupBrowserPage.create(
-                List.of(oldest, middle, newest),
-                new BackupBrowserQuery("alpha", BackupSort.NEWEST, 1, 1),
-                Set.of(newest.manifest().backupId()));
-        assertEquals(List.of(middle.manifest().backupId()), ids(second));
-        assertTrue(second.selectedBackupIds().isEmpty());
-
-        BackupBrowserPage sizeOrder = BackupBrowserPage.create(
-                List.of(oldest, middle, newest),
-                new BackupBrowserQuery("", BackupSort.SIZE_DESCENDING, 0, 3),
-                Set.of());
-        assertEquals(
-                List.of(
-                        middle.manifest().backupId(),
-                        newest.manifest().backupId(),
-                        oldest.manifest().backupId()),
-                ids(sizeOrder));
-
-        BackupBrowserPage oldestFirst = BackupBrowserPage.create(
-                List.of(oldest, middle, newest),
-                new BackupBrowserQuery("", BackupSort.OLDEST, 0, 3),
-                Set.of());
-        assertEquals(
-                List.of(
-                        oldest.manifest().backupId(),
-                        middle.manifest().backupId(),
-                        newest.manifest().backupId()),
-                ids(oldestFirst));
-
-        BackupBrowserPage changedOrder = BackupBrowserPage.create(
-                List.of(oldest, middle, newest),
-                new BackupBrowserQuery("", BackupSort.CHANGED_FILES_DESCENDING, 0, 3),
-                Set.of());
-        assertEquals(
-                List.of(
-                        middle.manifest().backupId(),
-                        newest.manifest().backupId(),
-                        oldest.manifest().backupId()),
-                ids(changedOrder));
+        assertEquals(List.of(middle, newest, oldest), BackupFilter.apply(rows, "", BackupSort.SIZE_DESCENDING));
+        assertEquals(List.of(oldest, middle, newest), BackupFilter.apply(rows, "", BackupSort.OLDEST));
+        assertEquals(List.of(middle, newest, oldest), BackupFilter.apply(rows, "", BackupSort.CHANGED_FILES_DESCENDING));
     }
 
     @Test
-    void clampsPagesAndUsesStableLabelTies() {
-        BackupRecord first = record("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1", "same", 1, 10, 1);
-        BackupRecord second = record("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa2", "SAME", 2, 10, 1);
-        BackupBrowserPage page = BackupBrowserPage.create(
-                List.of(first, second),
-                new BackupBrowserQuery("", BackupSort.LABEL, 99, 1),
-                Set.of());
+    void theFilterMatchesLabelsTriggersAsShownAndIdPrefixesButNotTheWorldName() {
+        BackupRow labeled = row("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1", "Base before the raid", 1, 10, 1);
+        BackupRow unlabeled = record(
+                "cccccccc-aaaa-aaaa-aaaa-aaaaaaaaaaa2", Optional.empty(), BackupTrigger.WORLD_EXIT, 2, 10, 1, zip());
 
-        assertEquals(1, page.pageIndex());
-        assertEquals(List.of(first.manifest().backupId()), ids(page));
+        assertEquals(List.of(labeled), BackupFilter.apply(List.of(labeled, unlabeled), "base", BackupSort.NEWEST));
+        assertEquals(List.of(unlabeled), BackupFilter.apply(List.of(labeled, unlabeled), "world exit", BackupSort.NEWEST));
+        assertEquals(List.of(unlabeled), BackupFilter.apply(List.of(labeled, unlabeled), "cccc", BackupSort.NEWEST));
+    }
+
+    @Test
+    void pagesAreClampedAndLabelTiesStayStable() {
+        BackupRow first = row("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1", "same", 1, 10, 1);
+        BackupRow second = row("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa2", "SAME", 2, 10, 1);
+        List<BackupRow> sorted = BackupFilter.apply(List.of(first, second), "", BackupSort.LABEL);
+
+        Paging paging = Paging.of(sorted.size(), 1, 99);
+
+        assertEquals(1, paging.pageIndex());
+        assertEquals(List.of(first), paging.slice(sorted));
     }
 
     @Test
     void actionPolicyExplainsEveryDisabledAction() {
-        BackupRow selected = BackupRow.from(record(
-                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1", "label", 1, 10, 1));
-        BackupBrowserCapabilities capabilities = new BackupBrowserCapabilities(
-                false, true, true, false, true);
-        Map<BackupAction, BackupActionAvailability> states = BackupActionPolicy.evaluate(
-                capabilities, List.of(selected));
+        BackupRow selected = row("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1", "label", 1, 10, 1);
+        BackupBrowserCapabilities capabilities = capabilities(false, true, true, false, true);
 
-        assertTrue(states.get(BackupAction.CREATE).enabled());
-        assertTrue(states.get(BackupAction.RESTORE).enabled());
-        assertTrue(states.get(BackupAction.DELETE).enabled());
-        assertTrue(states.get(BackupAction.VERIFY).enabled());
-        assertTrue(states.get(BackupAction.OPEN_FOLDER).enabled());
-        assertTrue(states.get(BackupAction.SETTINGS).enabled());
-        assertFalse(states.get(BackupAction.SYNC).enabled());
-        assertEquals(
-                ActionDisabledReason.REMOTE_NOT_CONFIGURED,
-                states.get(BackupAction.SYNC).reason());
-
-        Map<BackupAction, BackupActionAvailability> noSelection = BackupActionPolicy.evaluate(
-                capabilities, List.of());
+        Map<BackupAction, ActionDisabledReason> states = BackupActionPolicy.evaluate(capabilities, List.of(selected));
+        for (BackupAction action : List.of(
+                BackupAction.CREATE,
+                BackupAction.RESTORE,
+                BackupAction.DELETE,
+                BackupAction.VERIFY,
+                BackupAction.OPEN_FOLDER,
+                BackupAction.SETTINGS)) {
+            assertEquals(ActionDisabledReason.NONE, states.get(action), action.name());
+        }
+        assertEquals(ActionDisabledReason.REMOTE_NOT_CONFIGURED, states.get(BackupAction.SYNC));
         assertEquals(
                 ActionDisabledReason.NO_SELECTION,
-                noSelection.get(BackupAction.RESTORE).reason());
+                BackupActionPolicy.evaluate(capabilities, List.of()).get(BackupAction.RESTORE));
+        assertTrue(BackupActionPolicy.evaluate(capabilities.withOperationInProgress(), List.of(selected))
+                .values().stream()
+                .allMatch(reason -> reason == ActionDisabledReason.OPERATION_IN_PROGRESS));
 
-        Map<BackupAction, BackupActionAvailability> busy = BackupActionPolicy.evaluate(
-                new BackupBrowserCapabilities(true, true, true, true, true),
-                List.of(selected));
-        assertTrue(busy.values().stream().noneMatch(BackupActionAvailability::enabled));
-        assertTrue(busy.values().stream()
-                .allMatch(state -> state.reason() == ActionDisabledReason.OPERATION_IN_PROGRESS));
-
-        BackupRow failed = BackupRow.from(record(
+        BackupRow failedGitOnly = record(
                 "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa4",
-                "failed",
+                Optional.of("failed"),
+                BackupTrigger.MANUAL,
                 4,
                 10,
                 1,
-                DestinationResult.failed(DestinationType.GIT, "failed")));
-        Map<BackupAction, BackupActionAvailability> noDurableCopy = BackupActionPolicy.evaluate(
-                new BackupBrowserCapabilities(false, true, false, true, false),
-                List.of(failed));
-        assertEquals(
-                ActionDisabledReason.NO_DESTINATION_CONFIGURED,
-                noDurableCopy.get(BackupAction.CREATE).reason());
-
-        Map<BackupAction, BackupActionAvailability> sourceMissing = BackupActionPolicy.evaluate(
-                new BackupBrowserCapabilities(false, false, false, true, false),
-                List.of(failed));
+                DestinationResult.failed(DestinationType.GIT, "failed"));
+        Map<BackupAction, ActionDisabledReason> noCopy = BackupActionPolicy.evaluate(
+                capabilities(false, true, false, true, false), List.of(failedGitOnly));
+        assertEquals(ActionDisabledReason.CREATE_BLOCKED, noCopy.get(BackupAction.CREATE));
+        assertEquals(ActionDisabledReason.FOLDER_UNAVAILABLE, noCopy.get(BackupAction.OPEN_FOLDER));
+        assertEquals(ActionDisabledReason.NO_DURABLE_COPY, noCopy.get(BackupAction.RESTORE));
+        assertEquals(ActionDisabledReason.NO_DURABLE_COPY, noCopy.get(BackupAction.SYNC));
         assertEquals(
                 ActionDisabledReason.SOURCE_UNAVAILABLE,
-                sourceMissing.get(BackupAction.CREATE).reason());
-        assertEquals(
-                ActionDisabledReason.FOLDER_UNAVAILABLE,
-                noDurableCopy.get(BackupAction.OPEN_FOLDER).reason());
-        assertEquals(
-                ActionDisabledReason.NO_DURABLE_COPY,
-                noDurableCopy.get(BackupAction.RESTORE).reason());
-        assertEquals(
-                ActionDisabledReason.NO_DURABLE_COPY,
-                noDurableCopy.get(BackupAction.SYNC).reason());
+                BackupActionPolicy.evaluate(capabilities(false, false, false, true, false), List.of(failedGitOnly))
+                        .get(BackupAction.CREATE));
     }
 
     @Test
-    void multipleSelectionOnlyAllowsDelete() {
-        BackupRow first = BackupRow.from(record(
-                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1", "one", 1, 10, 1));
-        BackupRow second = BackupRow.from(record(
-                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa2", "two", 2, 10, 1));
-        BackupBrowserCapabilities capabilities = new BackupBrowserCapabilities(
-                false, true, true, true, true);
+    void multipleSelectionOnlyAllowsDeleteAndOnlyWhenEveryBackupHasACopy() {
+        BackupRow first = row("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1", "one", 1, 10, 1);
+        BackupRow second = row("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa2", "two", 2, 10, 1);
+        BackupBrowserCapabilities capabilities = capabilities(false, true, true, true, true);
 
-        Map<BackupAction, BackupActionAvailability> states = BackupActionPolicy.evaluate(
-                capabilities, List.of(first, second));
+        Map<BackupAction, ActionDisabledReason> states = BackupActionPolicy.evaluate(capabilities, List.of(first, second));
 
-        assertTrue(states.get(BackupAction.DELETE).enabled());
-        assertEquals(
-                ActionDisabledReason.MULTIPLE_SELECTED,
-                states.get(BackupAction.RESTORE).reason());
-        assertEquals(
-                ActionDisabledReason.MULTIPLE_SELECTED,
-                states.get(BackupAction.SYNC).reason());
-        assertEquals(
-                ActionDisabledReason.MULTIPLE_SELECTED,
-                states.get(BackupAction.VERIFY).reason());
+        assertEquals(ActionDisabledReason.NONE, states.get(BackupAction.DELETE));
+        assertEquals(ActionDisabledReason.MULTIPLE_SELECTED, states.get(BackupAction.RESTORE));
+        assertEquals(ActionDisabledReason.MULTIPLE_SELECTED, states.get(BackupAction.SYNC));
+        assertEquals(ActionDisabledReason.MULTIPLE_SELECTED, states.get(BackupAction.VERIFY));
 
-        BackupRow unavailable = BackupRow.from(record(
+        BackupRow gone = record(
                 "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa3",
-                "gone",
+                Optional.of("gone"),
+                BackupTrigger.MANUAL,
                 3,
                 10,
                 1,
-                DestinationResult.failed(DestinationType.GIT, "failed")));
-        Map<BackupAction, BackupActionAvailability> mixed = BackupActionPolicy.evaluate(
-                capabilities, List.of(first, unavailable));
+                DestinationResult.failed(DestinationType.GIT, "failed"));
         assertEquals(
                 ActionDisabledReason.NO_DURABLE_COPY,
-                mixed.get(BackupAction.DELETE).reason());
+                BackupActionPolicy.evaluate(capabilities, List.of(first, gone)).get(BackupAction.DELETE));
     }
 
-    @Test
-    void deleteBatchSummaryCountsRemovedBackupsAndListsProblems() {
-        BackupId removed = BackupId.parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1");
-        BackupId stuck = BackupId.parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa2");
-        Instant completedAt = Instant.ofEpochSecond(10);
-        BackupResult success = BackupResult.aggregate(
-                removed,
-                WORLD_ID,
-                List.of(DestinationResult.success(DestinationType.ZIP, "zip")),
-                completedAt);
-        BackupResult failure = BackupResult.aggregate(
-                stuck,
-                WORLD_ID,
-                List.of(DestinationResult.failed(DestinationType.GIT, "remote refused")),
-                completedAt);
-
-        DeleteBatchSummary all = DeleteBatchSummary.from(List.of(success, success));
-        assertEquals(BackupStatus.SUCCESS, all.status());
-        assertEquals("Deleted 2 backups", all.headline());
-        assertTrue(all.details().isEmpty());
-
-        DeleteBatchSummary partial = DeleteBatchSummary.from(List.of(success, failure));
-        assertEquals(BackupStatus.PARTIAL_SUCCESS, partial.status());
-        assertEquals("Deleted 1 of 2 backups", partial.headline());
-        assertEquals(List.of("aaaaaaaa · GIT: remote refused"), partial.details());
-
-        DeleteBatchSummary none = DeleteBatchSummary.from(List.of(failure));
-        assertEquals(BackupStatus.FAILED, none.status());
-        assertEquals("No backups were deleted", none.headline());
+    private static BackupBrowserCapabilities capabilities(
+            boolean operationInProgress,
+            boolean sourceAvailable,
+            boolean createAllowed,
+            boolean gitRemoteConfigured,
+            boolean managedFolderAvailable) {
+        return new BackupBrowserCapabilities(
+                operationInProgress,
+                sourceAvailable,
+                createAllowed ? Optional.empty() : Optional.of(BackupBrowserCapabilities.CreateBlock.WORLD_OFF),
+                gitRemoteConfigured,
+                managedFolderAvailable,
+                Optional.empty());
     }
 
-    private static List<BackupId> ids(BackupBrowserPage page) {
-        return page.rows().stream().map(BackupRow::backupId).toList();
+    private static DestinationResult zip() {
+        return DestinationResult.success(DestinationType.ZIP, "archive.zip");
     }
 
-    private static BackupRecord record(
-            String backupId,
-            String label,
-            long epochSecond,
-            long bytes,
-            long changedFiles) {
+    private static BackupRow row(String backupId, String label, long epochSecond, long bytes, long changedFiles) {
         return record(
                 backupId,
-                label,
+                Optional.of(label),
+                BackupTrigger.MANUAL,
                 epochSecond,
                 bytes,
                 changedFiles,
                 DestinationResult.success(DestinationType.GIT, "artifact-" + backupId));
     }
 
-    private static BackupRecord record(
+    private static BackupRow record(
             String backupId,
-            String label,
+            Optional<String> label,
+            BackupTrigger trigger,
             long epochSecond,
             long bytes,
             long changedFiles,
@@ -261,20 +175,18 @@ class BackupBrowserModelTest {
         BackupManifest manifest = BackupManifest.create(
                 id,
                 WORLD_ID,
-                "Fixture World",
-                Optional.of(label),
+                "My Base",
+                label,
                 createdAt,
-                BackupTrigger.MANUAL,
+                trigger,
                 4,
                 bytes,
                 changedFiles,
                 "a".repeat(64),
-                "b".repeat(64));
-        BackupResult result = BackupResult.aggregate(
-                id,
-                WORLD_ID,
-                List.of(destination),
-                createdAt.plusSeconds(1));
-        return new BackupRecord(manifest, result);
+                "b".repeat(64),
+                Optional.empty());
+        return BackupRow.from(new BackupRecord(
+                manifest,
+                new BackupResult(id, WORLD_ID, List.of(destination), createdAt.plusSeconds(1))));
     }
 }

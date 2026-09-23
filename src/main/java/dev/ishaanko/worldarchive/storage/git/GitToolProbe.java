@@ -1,16 +1,26 @@
 package dev.ishaanko.worldarchive.storage.git;
 
+import dev.ishaanko.worldarchive.model.SafeText;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** Probes Git and Git LFS independently so partial installations are never reported healthy. */
+/**
+ * Checks Git and Git LFS independently, so a partial installation is never reported healthy.
+ * Each check may stay silent no longer than the settings' idle limit.
+ */
 public final class GitToolProbe {
+    /** The oldest Git whose options every command here uses ({@code --no-write-fetch-head}, {@code --object-format}). */
+    static final int[] MINIMUM_GIT_VERSION = {2, 29};
+
+    private static final Pattern GIT_VERSION = Pattern.compile("git version (\\d{1,6})\\.(\\d{1,6})\\b");
+
     private final GitBackendSettings settings;
 
     private final GitCommandRunner runner;
@@ -20,87 +30,59 @@ public final class GitToolProbe {
         this.runner = Objects.requireNonNull(runner, "runner");
     }
 
-    /** The oldest Git whose flags every command here uses ({@code --no-write-fetch-head}, {@code --object-format}). */
-    static final int[] MINIMUM_GIT_VERSION = {2, 29};
-
-    private static final Pattern GIT_VERSION = Pattern.compile("git version (\\d{1,6})\\.(\\d{1,6})\\b");
-
     public GitToolHealth probe() throws InterruptedException {
-        ProbeResult git = requireSupportedVersion(run(List.of(settings.executable(), "--version")));
-        ProbeResult lfs = run(List.of(settings.executable(), "lfs", "version"));
-        return new GitToolHealth(
-                git.available(),
-                lfs.available(),
-                git.version(),
-                lfs.version(),
-                git.failure(),
-                lfs.failure());
+        Result git = requireSupportedVersion(run(List.of(settings.executable(), "--version")));
+        Result lfs = run(List.of(settings.executable(), "lfs", "version"));
+        return new GitToolHealth(git.version(), lfs.version(), git.failure(), lfs.failure());
     }
 
-    private ProbeResult run(List<String> arguments) throws InterruptedException {
+    private Result run(List<String> arguments) throws InterruptedException {
         Path workingDirectory = settings.repository().getParent();
         if (workingDirectory == null || !Files.isDirectory(workingDirectory)) {
-            workingDirectory = Path.of("").toAbsolutePath().normalize();
+            workingDirectory = Path.of("").toAbsolutePath();
         }
-        GitCommand command = GitCommand.of(
-                arguments,
-                workingDirectory,
-                settings.commandTimeout(),
-                settings.maximumOutputBytes());
+        GitCommand command = new GitCommand(arguments, workingDirectory, Map.of(), GitCommand.Input.NONE,
+                Optional.of(settings.commandTimeout()), settings.maximumOutputBytes());
         try {
             GitCommandResult result = runner.run(command);
-            if (!result.successful()) {
-                return ProbeResult.failure(safeMessage(result));
-            }
-            String version = firstNonBlank(result.standardOutput(), result.standardError());
-            return ProbeResult.available(version);
+            String output = result.standardOutput().isBlank() ? result.standardError() : result.standardOutput();
+            String text = SafeText.of(output, result.successful() ? "version reported" : "the check failed", 512);
+            return result.successful() ? Result.available(text) : Result.failed(text);
         } catch (IOException exception) {
-            return ProbeResult.failure("Tool process could not be started or completed");
+            return Result.failed(SafeText.from(exception, "the tool could not be started", 512));
         }
     }
 
     /**
-     * An old Git fails mid-backup on an unknown flag; report it up front instead. Real Git
+     * An old Git fails mid-backup on an unknown option; report it up front instead. Real Git
      * always prints "git version X.Y", so output that does not is not a Git this mod can trust.
      */
-    private static ProbeResult requireSupportedVersion(ProbeResult git) {
-        if (!git.available()) {
+    private static Result requireSupportedVersion(Result git) {
+        if (git.version().isEmpty()) {
             return git;
         }
-        String reported = git.version().orElseThrow();
+        String reported = git.version().get();
         Matcher matcher = GIT_VERSION.matcher(reported);
         if (!matcher.find()) {
-            return ProbeResult.failure("Git version could not be read from: " + reported);
+            return Result.failed("Git version could not be read from: " + reported);
         }
         int major = Integer.parseInt(matcher.group(1));
         int minor = Integer.parseInt(matcher.group(2));
-        if (major > MINIMUM_GIT_VERSION[0]
-                || major == MINIMUM_GIT_VERSION[0] && minor >= MINIMUM_GIT_VERSION[1]) {
+        if (major > MINIMUM_GIT_VERSION[0] || major == MINIMUM_GIT_VERSION[0] && minor >= MINIMUM_GIT_VERSION[1]) {
             return git;
         }
-        return ProbeResult.failure("Git " + MINIMUM_GIT_VERSION[0] + "." + MINIMUM_GIT_VERSION[1]
+        return Result.failed("Git " + MINIMUM_GIT_VERSION[0] + "." + MINIMUM_GIT_VERSION[1]
                 + " or newer is required (found " + major + "." + minor + ")");
     }
 
-    private static String firstNonBlank(String first, String second) {
-        String value = first.isBlank() ? second : first;
-        value = value.replaceAll("\\p{Cntrl}+", " ").trim();
-        return value.isEmpty() ? "version reported" : value;
-    }
-
-    private static String safeMessage(GitCommandResult result) {
-        String value = SystemGitCommandRunner.redactPatterns(
-                firstNonBlank(result.standardError(), result.standardOutput()));
-        return value.length() > 512 ? value.substring(0, 512) : value;
-    }
-
-    private record ProbeResult(boolean available, Optional<String> version, Optional<String> failure) {
-        private static ProbeResult available(String version) {
-            return new ProbeResult(true, Optional.of(version), Optional.empty());
+    /** One tool's version or the reason it cannot be used. */
+    private record Result(Optional<String> version, Optional<String> failure) {
+        static Result available(String version) {
+            return new Result(Optional.of(version), Optional.empty());
         }
 
-        private static ProbeResult failure(String failure) {
-            return new ProbeResult(false, Optional.empty(), Optional.of(failure));
+        static Result failed(String failure) {
+            return new Result(Optional.empty(), Optional.of(failure));
         }
     }
 }

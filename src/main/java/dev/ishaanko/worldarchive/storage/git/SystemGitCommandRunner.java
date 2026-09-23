@@ -1,505 +1,344 @@
 package dev.ishaanko.worldarchive.storage.git;
 
-import java.io.ByteArrayOutputStream;
+import java.io.FilterOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.function.LongSupplier;
 
 /**
- * Runs Git directly with {@link ProcessBuilder}; no shell is ever involved.
- *
- * <p>The portable Java process API has no process-group or Windows Job Object primitive. Descendants
- * are therefore sampled aggressively and recursively, but a child that is spawned and reparented
- * entirely between samples cannot be proven killable without a platform-specific launcher.</p>
+ * Runs Git with {@link ProcessBuilder}; no shell is ever involved. Standard output and error go
+ * to private temporary files, so a helper process that keeps a handle open (an SSH control
+ * master, a credential cache) can never hold a finished command back, and nothing polls the
+ * process while it runs. Commands never prompt: terminal and askpass prompts are off, and every
+ * inherited {@code GIT_} variable is removed. When the caller is interrupted, or a command with
+ * an idle limit stays silent that long, the whole process tree is stopped: politely first, so
+ * Git can remove its lock files, then forcibly.
  */
 public final class SystemGitCommandRunner implements GitCommandRunner {
-    private static final Pattern URI_CREDENTIALS = Pattern.compile(
-            "(?i)([a-z][a-z0-9+.-]*://)([^\\s/@]+(?::[^\\s/@]*)?@)");
+    private static final long TERMINATION_GRACE_MILLIS = 500;
 
-    private static final Pattern NAMED_SECRET = Pattern.compile(
-            "(?i)(password|passwd|access[_-]?token|refresh[_-]?token|token|secret|"
-                    + "api[_-]?key|access[_-]?key|credential)([=:]\\s*)([^\\s&;,]+)");
+    private static final long IDLE_CHECK_MILLIS = 250;
 
-    private static final Pattern AUTHORIZATION = Pattern.compile(
-            "(?i)(authorization\\s*:\\s*(?:Bearer|Basic)\\s+)([A-Za-z0-9._~+/=-]{8,})");
+    private static final long FAILED_EXIT_WAIT_MILLIS = 100;
 
-    private static final Pattern KNOWN_TOKEN = Pattern.compile(
-            "(?i)(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|"
-                    + "glpat-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{20,}|"
-                    + "xox[baprs]-[A-Za-z0-9-]{10,}|ya29\\.[A-Za-z0-9_-]{20,}|"
-                    + "(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|"
-                    + "AKIA[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{30,})");
-
-    private static final Pattern JSON_WEB_TOKEN = Pattern.compile(
-            "eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}");
-
-    private static final long TERMINATION_GRACE_MILLIS = 500L;
-
-    private static final long PROCESS_POLL_MILLIS = 10L;
-
-    private static final Set<String> ALLOWED_COMMAND_GIT_ENVIRONMENT = Set.of(
+    /** The only {@code GIT_} variables a command may set; WorldArchive's own code sets them. */
+    private static final Set<String> COMMAND_VARIABLES = Set.of(
             "GIT_AUTHOR_DATE",
             "GIT_AUTHOR_EMAIL",
             "GIT_AUTHOR_NAME",
             "GIT_COMMITTER_DATE",
             "GIT_COMMITTER_EMAIL",
             "GIT_COMMITTER_NAME",
-            "GIT_INDEX_FILE",
-            "GIT_LFS_SKIP_SMUDGE");
-
-    private static final Set<String> NETWORK_SUBCOMMANDS = Set.of(
-            "clone", "fetch", "ls-remote", "pull", "push");
-
-    private final CredentialHelperResolver credentialHelpers;
-
-    public SystemGitCommandRunner() {
-        this(SystemCredentialHelpers::resolve);
-    }
-
-    SystemGitCommandRunner(CredentialHelperResolver credentialHelpers) {
-        this.credentialHelpers = Objects.requireNonNull(credentialHelpers, "credentialHelpers");
-    }
-
-    @FunctionalInterface
-    interface CredentialHelperResolver {
-        List<String> resolve(String executable, Map<String, String> environment)
-                throws InterruptedException;
-    }
+            "GIT_LFS_FORCE_PROGRESS");
 
     @Override
     public GitCommandResult run(GitCommand command) throws IOException, InterruptedException {
         Objects.requireNonNull(command, "command");
-        long deadlineNanos = deadline(command);
-        ProcessBuilder builder = new ProcessBuilder(command.arguments());
-        builder.directory(command.workingDirectory().toFile());
-        builder.redirectErrorStream(false);
+        try (OutputFile output = OutputFile.create(); OutputFile error = OutputFile.create()) {
+            ProcessBuilder builder = builder(command)
+                    .redirectOutput(output.path().toFile())
+                    .redirectError(error.path().toFile());
+            int exitCode = execute(builder, command, () -> output.size() + error.size(), process -> {
+            });
+            int limit = command.maximumOutputBytes();
+            return new GitCommandResult(
+                    exitCode, output.read(limit), error.read(limit), output.size() > limit, error.size() > limit);
+        }
+    }
+
+    @Override
+    public GitCommandResult stream(GitCommand command, OutputReader reader)
+            throws IOException, InterruptedException, GitStorageException {
+        Objects.requireNonNull(command, "command");
+        Objects.requireNonNull(reader, "reader");
+        int limit = command.maximumOutputBytes();
+        try (OutputFile error = OutputFile.create()) {
+            ProcessBuilder builder = builder(command).redirectError(error.path().toFile());
+            int exitCode = execute(builder, command, error::size, process -> {
+                InputStream output = process.getInputStream();
+                try {
+                    reader.read(output);
+                } catch (IOException | GitStorageException exception) {
+                    Optional<GitStorageException> gitFailure = gitFailure(process, error, limit);
+                    if (gitFailure.isEmpty()) {
+                        throw exception;
+                    }
+                    gitFailure.get().addSuppressed(exception);
+                    throw gitFailure.get();
+                } finally {
+                    output.close();
+                }
+            });
+            return new GitCommandResult(exitCode, "", error.read(limit), false, error.size() > limit);
+        }
+    }
+
+    /**
+     * Git's own failure when the process has already ended with an error: output that stops in
+     * the middle is then Git's doing, and its message explains more than the reader can.
+     */
+    private static Optional<GitStorageException> gitFailure(Process process, OutputFile error, int limit)
+            throws IOException, InterruptedException {
+        if (!process.waitFor(FAILED_EXIT_WAIT_MILLIS, TimeUnit.MILLISECONDS) || process.exitValue() == 0) {
+            return Optional.empty();
+        }
+        GitCommandResult result = new GitCommandResult(process.exitValue(), "", error.read(limit), false, false);
+        return Optional.of(new GitStorageException(GitRepository.failureMessage(result)));
+    }
+
+    /**
+     * Starts the process, feeds its input, runs the body while it works and waits for its exit.
+     * Whatever ends this method early also ends the process tree.
+     */
+    private static <E extends Exception> int execute(
+            ProcessBuilder builder,
+            GitCommand command,
+            LongSupplier written,
+            ProcessBody<E> body) throws IOException, InterruptedException, E {
+        Process process = start(builder);
+        boolean exited = false;
+        try {
+            InputFeed input = InputFeed.start(process, command.standardInput());
+            body.accept(process);
+            awaitExit(process, command.idleTimeout(), written);
+            exited = true;
+            input.finish(process.exitValue());
+            return process.exitValue();
+        } finally {
+            if (!exited) {
+                terminate(process);
+            }
+        }
+    }
+
+    private static Process start(ProcessBuilder builder) throws IOException {
+        try {
+            return builder.start();
+        } catch (IOException exception) {
+            throw new IOException("Git could not be started. Install Git and make sure it is on PATH.", exception);
+        }
+    }
+
+    private static ProcessBuilder builder(GitCommand command) {
+        List<String> arguments = new ArrayList<>(command.arguments());
+        arguments.set(0, KnownGitToolDirectories.program(arguments.getFirst()));
+        ProcessBuilder builder = new ProcessBuilder(arguments).directory(command.workingDirectory().toFile());
         Map<String, String> environment = builder.environment();
-        removeUnsafeGitEnvironment(environment);
-        applyCommandEnvironment(environment, command.environment());
-        KnownGitToolDirectories.augment(environment);
-        environment.put("GIT_CONFIG_NOSYSTEM", "1");
-        environment.put("GIT_ATTR_NOSYSTEM", "1");
+        environment.keySet().removeIf(name -> name.toUpperCase(Locale.ROOT).startsWith("GIT_"));
+        environment.remove("SSH_ASKPASS_REQUIRE");
         environment.put("GIT_TERMINAL_PROMPT", "0");
         environment.put("GCM_INTERACTIVE", "Never");
         environment.put("GIT_ASKPASS", "");
         environment.put("SSH_ASKPASS", "");
-        environment.remove("SSH_ASKPASS_REQUIRE");
-        environment.put("GIT_LFS_FORCE_PROGRESS", "0");
-        applySystemCredentialHelpers(command, environment);
-
-        Process process;
-        try {
-            process = builder.start();
-        } catch (IOException exception) {
-            throw new IOException("Unable to start the configured Git executable", exception);
-        }
-
-        BoundedOutput output = new BoundedOutput(command.maximumOutputBytes());
-        BoundedOutput error = new BoundedOutput(command.maximumOutputBytes());
-        Thread outputReader = Thread.ofVirtual().name("worldarchive-git-stdout").start(
-                () -> output.read(process.getInputStream()));
-        Thread errorReader = Thread.ofVirtual().name("worldarchive-git-stderr").start(
-                () -> error.read(process.getErrorStream()));
-        AtomicReference<IOException> inputFailure = new AtomicReference<>();
-        byte[] standardInput = command.standardInput();
-        Thread inputWriter = Thread.ofVirtual().name("worldarchive-git-stdin").start(() -> {
-            try (var input = process.getOutputStream()) {
-                input.write(standardInput);
-            } catch (IOException exception) {
-                inputFailure.set(exception);
+        command.environment().forEach((name, value) -> {
+            if (!COMMAND_VARIABLES.contains(name)) {
+                throw new IllegalArgumentException("Git command sets an unsupported variable: " + name);
             }
+            environment.put(name, value);
         });
-        Set<ProcessHandle> observedDescendants = ConcurrentHashMap.newKeySet();
-        AtomicBoolean observeDescendants = new AtomicBoolean(true);
-        Thread descendantObserver = Thread.ofVirtual().name("worldarchive-git-descendants").start(() -> {
-            while (observeDescendants.get() && process.isAlive()) {
-                observeDescendantsRecursively(process, observedDescendants);
-                try {
-                    Thread.sleep(1L);
-                } catch (InterruptedException exception) {
-                    Thread.currentThread().interrupt();
-                    break;
-                }
-            }
-            observeDescendantsRecursively(process, observedDescendants);
-        });
-
-        try {
-            if (!waitForExit(process, observedDescendants, inputFailure, deadlineNanos)
-                    || !joinCommunicationsUntil(
-                            process,
-                            observedDescendants,
-                            inputWriter,
-                            outputReader,
-                            errorReader,
-                            deadlineNanos)) {
-                terminate(process, observedDescendants);
-                closeProcessStreams(process);
-                joinCommunicationsAfterTermination(inputWriter, outputReader, errorReader);
-                throw new GitCommandTimeoutException(command.timeout());
-            }
-            if (inputFailure.get() != null) {
-                throw new IOException("Unable to write Git process input", inputFailure.get());
-            }
-        } catch (InterruptedException exception) {
-            terminate(process, observedDescendants);
-            closeProcessStreams(process);
-            inputWriter.interrupt();
-            outputReader.interrupt();
-            errorReader.interrupt();
-            joinCommunicationsAfterTermination(inputWriter, outputReader, errorReader);
-            throw exception;
-        } catch (IOException exception) {
-            terminate(process, observedDescendants);
-            closeProcessStreams(process);
-            joinCommunicationsAfterTermination(inputWriter, outputReader, errorReader);
-            throw exception;
-        } finally {
-            observeDescendants.set(false);
-            descendantObserver.interrupt();
-            joinObserver(descendantObserver);
-            closeProcessStreams(process);
-        }
-
-        return result(process, command, output, error);
+        KnownGitToolDirectories.extendPath(environment);
+        return builder;
     }
 
-    private static GitCommandResult result(
-            Process process,
-            GitCommand command,
-            BoundedOutput output,
-            BoundedOutput error) throws IOException {
-        return new GitCommandResult(
-                process.exitValue(),
-                output.truncated()
-                        ? redact(output.text(), command.secrets())
-                        : redactSecrets(output.text(), command.secrets()),
-                redact(error.text(), command.secrets()),
-                output.truncated(),
-                error.truncated(),
-                output.byteCount(),
-                output.sha256());
-    }
-
-    /**
-     * Restores the system-configured credential helpers that {@code GIT_CONFIG_NOSYSTEM} hides.
-     *
-     * <p>With terminal prompts disabled, network commands can only authenticate through a
-     * credential helper, and on macOS and Windows the stock helper lives in the system
-     * configuration file this runner suppresses. Only {@code credential.helper} is carried back
-     * over, as command-scoped configuration, and only for commands that may touch a remote.</p>
-     */
-    void applySystemCredentialHelpers(GitCommand command, Map<String, String> environment)
-            throws InterruptedException {
-        List<String> arguments = command.arguments();
-        if (arguments.stream().noneMatch(NETWORK_SUBCOMMANDS::contains)) {
+    /** Waits for the exit; with an idle limit, gives up once the output stops growing that long. */
+    private static void awaitExit(Process process, Optional<Duration> idleLimit, LongSupplier written)
+            throws InterruptedException, GitCommandTimeoutException {
+        if (idleLimit.isEmpty()) {
+            process.waitFor();
             return;
         }
-        List<String> helpers = credentialHelpers.resolve(arguments.get(0), environment);
-        int count = 0;
-        for (String helper : helpers) {
-            environment.put("GIT_CONFIG_KEY_" + count, "credential.helper");
-            environment.put("GIT_CONFIG_VALUE_" + count, helper);
-            count++;
-        }
-        if (count > 0) {
-            environment.put("GIT_CONFIG_COUNT", Integer.toString(count));
-        }
-    }
-
-    static void removeUnsafeGitEnvironment(Map<String, String> environment) {
-        Objects.requireNonNull(environment, "environment");
-        environment.keySet().removeIf(name ->
-                name.toUpperCase(Locale.ROOT).startsWith("GIT_"));
-        environment.put("GIT_CONFIG_NOSYSTEM", "1");
-        environment.put("GIT_ATTR_NOSYSTEM", "1");
-    }
-
-    private static void applyCommandEnvironment(
-            Map<String, String> environment,
-            Map<String, String> commandEnvironment) {
-        commandEnvironment.forEach((name, value) -> {
-            String normalized = name.toUpperCase(Locale.ROOT);
-            if (!normalized.startsWith("GIT_")
-                    || ALLOWED_COMMAND_GIT_ENVIRONMENT.contains(normalized)) {
-                environment.put(name, value);
-            }
-        });
-    }
-
-    private static long deadline(GitCommand command) {
-        long now = System.nanoTime();
-        long timeout = command.timeout().toNanos();
-        return now > Long.MAX_VALUE - timeout ? Long.MAX_VALUE : now + timeout;
-    }
-
-    private static boolean waitForExit(
-            Process process,
-            Set<ProcessHandle> observedDescendants,
-            AtomicReference<IOException> inputFailure,
-            long deadlineNanos) throws IOException, InterruptedException {
-        while (true) {
-            if (inputFailure.get() != null) {
-                throw new IOException("Unable to write Git process input", inputFailure.get());
-            }
-            observeDescendants(process, observedDescendants);
-            if (!process.isAlive()) {
-                return true;
-            }
-            long remaining = deadlineNanos - System.nanoTime();
-            if (remaining <= 0) {
-                return false;
-            }
-            long waitMillis = Math.max(
-                    1L,
-                    Math.min(PROCESS_POLL_MILLIS, TimeUnit.NANOSECONDS.toMillis(remaining)));
-            process.waitFor(waitMillis, TimeUnit.MILLISECONDS);
-        }
-    }
-
-    private static boolean joinCommunicationsUntil(
-            Process process,
-            Set<ProcessHandle> observedDescendants,
-            Thread inputWriter,
-            Thread outputReader,
-            Thread errorReader,
-            long deadlineNanos) throws InterruptedException {
-        while (inputWriter.isAlive() || outputReader.isAlive() || errorReader.isAlive()) {
-            observeDescendants(process, observedDescendants);
-            long remaining = deadlineNanos - System.nanoTime();
-            if (remaining <= 0) {
-                return false;
-            }
-            long waitMillis = Math.max(
-                    1L,
-                    Math.min(PROCESS_POLL_MILLIS, TimeUnit.NANOSECONDS.toMillis(remaining)));
-            inputWriter.join(waitMillis);
-            outputReader.join(waitMillis);
-            errorReader.join(waitMillis);
-        }
-        return true;
-    }
-
-    private static void observeDescendants(Process process, Set<ProcessHandle> observedDescendants) {
-        observeDescendantsRecursively(process, observedDescendants);
-    }
-
-    private static void observeDescendantsRecursively(
-            Process process,
-            Set<ProcessHandle> observedDescendants) {
-        process.descendants().forEach(observedDescendants::add);
-        for (ProcessHandle handle : List.copyOf(observedDescendants)) {
-            if (handle.isAlive()) {
-                handle.descendants().forEach(observedDescendants::add);
+        long limit = idleLimit.orElseThrow().toNanos();
+        long lastWritten = written.getAsLong();
+        long lastChange = System.nanoTime();
+        while (!process.waitFor(IDLE_CHECK_MILLIS, TimeUnit.MILLISECONDS)) {
+            long current = written.getAsLong();
+            if (current != lastWritten) {
+                lastWritten = current;
+                lastChange = System.nanoTime();
+            } else if (System.nanoTime() - lastChange >= limit) {
+                throw new GitCommandTimeoutException(idleLimit.orElseThrow());
             }
         }
-    }
-
-    private static void terminate(Process process, Set<ProcessHandle> observedDescendants) {
-        observeDescendants(process, observedDescendants);
-        destroyObserved(observedDescendants, false);
-        process.destroy();
-        long stopDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(TERMINATION_GRACE_MILLIS);
-        boolean interrupted = false;
-        while ((process.isAlive() || observedDescendants.stream().anyMatch(ProcessHandle::isAlive))
-                && System.nanoTime() < stopDeadline) {
-            observeDescendantsRecursively(process, observedDescendants);
-            destroyObserved(observedDescendants, false);
-            try {
-                Thread.sleep(PROCESS_POLL_MILLIS);
-            } catch (InterruptedException exception) {
-                interrupted = true;
-                break;
-            }
-        }
-        observeDescendantsRecursively(process, observedDescendants);
-        destroyObserved(observedDescendants, true);
-        if (process.isAlive()) {
-            process.destroyForcibly();
-        }
-        if (interrupted) {
-            Thread.currentThread().interrupt();
-        }
-    }
-
-    private static void destroyObserved(Set<ProcessHandle> observedDescendants, boolean forcibly) {
-        List<ProcessHandle> handles = new ArrayList<>(observedDescendants);
-        handles.sort(Comparator.comparingLong(ProcessHandle::pid).reversed());
-        for (ProcessHandle handle : handles) {
-            if (handle.isAlive()) {
-                if (forcibly) {
-                    handle.destroyForcibly();
-                } else {
-                    handle.destroy();
-                }
-            }
-        }
-    }
-
-    private static void joinObserver(Thread observer) {
-        boolean interrupted = false;
-        try {
-            observer.join(TERMINATION_GRACE_MILLIS);
-        } catch (InterruptedException exception) {
-            interrupted = true;
-        }
-        if (interrupted) {
-            Thread.currentThread().interrupt();
-        }
-    }
-
-    private static void joinCommunicationsAfterTermination(
-            Thread inputWriter,
-            Thread outputReader,
-            Thread errorReader) {
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(TERMINATION_GRACE_MILLIS);
-        boolean interrupted = false;
-        while ((inputWriter.isAlive() || outputReader.isAlive() || errorReader.isAlive())
-                && System.nanoTime() < deadline) {
-            try {
-                inputWriter.join(PROCESS_POLL_MILLIS);
-                outputReader.join(PROCESS_POLL_MILLIS);
-                errorReader.join(PROCESS_POLL_MILLIS);
-            } catch (InterruptedException exception) {
-                interrupted = true;
-                break;
-            }
-        }
-        inputWriter.interrupt();
-        outputReader.interrupt();
-        errorReader.interrupt();
-        if (interrupted) {
-            Thread.currentThread().interrupt();
-        }
-    }
-
-    private static void closeProcessStreams(Process process) {
-        try {
-            process.getInputStream().close();
-        } catch (IOException ignored) {
-            // Closing is best-effort after bounded process handling.
-        }
-        try {
-            process.getErrorStream().close();
-        } catch (IOException ignored) {
-            // Closing is best-effort after bounded process handling.
-        }
-        try {
-            process.getOutputStream().close();
-        } catch (IOException ignored) {
-            // Closing is best-effort after bounded process handling.
-        }
-    }
-
-    /** Full redaction for text that reaches a user: known secrets plus credential patterns. */
-    static String redact(String value, Iterable<String> secrets) {
-        return redactPatterns(redactSecrets(value, secrets));
     }
 
     /**
-     * Standard output is data the caller parses (manifests, trees, object IDs), so only the
-     * exact secrets the command was given are removed. Pattern redaction would corrupt a
-     * manifest whose world name reads "Secret: Base"; it is applied when output is displayed
-     * and to truncated output, which is never parsed.
+     * Stops the process and every descendant it started. The tree is read once, while the root
+     * still runs, because Git for Windows' launcher and a transport helper both outlive a killed
+     * parent. Deeper processes are asked first; after a short grace period the rest is killed.
      */
-    static String redactSecrets(String value, Iterable<String> secrets) {
-        String redacted = value;
-        List<String> orderedSecrets = new ArrayList<>();
-        secrets.forEach(secret -> {
-            if (secret != null && !secret.isBlank()) {
-                orderedSecrets.add(secret);
+    private static void terminate(Process process) {
+        List<ProcessHandle> tree = new ArrayList<>(process.descendants().toList());
+        tree.sort(Comparator.comparingInt((ProcessHandle handle) -> depth(handle, process.pid())).reversed());
+        tree.forEach(ProcessHandle::destroy);
+        process.destroy();
+        boolean interrupted = Thread.interrupted();
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(TERMINATION_GRACE_MILLIS);
+        while (!interrupted
+                && (process.isAlive() || tree.stream().anyMatch(ProcessHandle::isAlive))
+                && System.nanoTime() < deadline) {
+            try {
+                Thread.sleep(10);
+            } catch (InterruptedException exception) {
+                interrupted = true;
             }
-        });
-        orderedSecrets.sort(Comparator.comparingInt(String::length).reversed());
-        for (String secret : orderedSecrets) {
-            redacted = redacted.replace(secret, "[REDACTED]");
         }
-        return redacted;
+        tree.stream().filter(ProcessHandle::isAlive).forEach(ProcessHandle::destroyForcibly);
+        process.destroyForcibly();
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
     }
 
-    static String redactPatterns(String value) {
-        String redacted = URI_CREDENTIALS.matcher(value).replaceAll("$1[REDACTED]@");
-        Matcher matcher = NAMED_SECRET.matcher(redacted);
-        redacted = matcher.replaceAll("$1$2[REDACTED]");
-        redacted = AUTHORIZATION.matcher(redacted).replaceAll("$1[REDACTED]");
-        redacted = KNOWN_TOKEN.matcher(redacted).replaceAll("[REDACTED]");
-        return JSON_WEB_TOKEN.matcher(redacted).replaceAll("[REDACTED]");
+    private static int depth(ProcessHandle handle, long rootPid) {
+        int depth = 0;
+        Optional<ProcessHandle> current = Optional.of(handle);
+        while (current.isPresent() && current.get().pid() != rootPid && depth < 64) {
+            depth++;
+            current = current.get().parent();
+        }
+        return depth;
     }
 
-    private static final class BoundedOutput {
-        private final ByteArrayOutputStream bytes;
+    /** Work done while the process runs, such as reading its streamed output. */
+    @FunctionalInterface
+    private interface ProcessBody<E extends Exception> {
+        void accept(Process process) throws IOException, InterruptedException, E;
+    }
 
-        private final int maximumBytes;
-
-        private final MessageDigest digest = GitInventory.sha256();
-
-        private long byteCount;
-
-        private volatile boolean truncated;
-
-        private volatile IOException failure;
-
-        private BoundedOutput(int maximumBytes) {
-            this.maximumBytes = maximumBytes;
-            bytes = new ByteArrayOutputStream(Math.min(maximumBytes, 8_192));
+    /** One private temporary file that receives a process stream and is deleted afterwards. */
+    private record OutputFile(Path path) implements AutoCloseable {
+        static OutputFile create() throws IOException {
+            return new OutputFile(Files.createTempFile("worldarchive-git-", ".log"));
         }
 
-        private void read(InputStream input) {
-            byte[] buffer = new byte[8_192];
-            try (input) {
-                int count;
-                while ((count = input.read(buffer)) >= 0) {
-                    try {
-                        byteCount = Math.addExact(byteCount, count);
-                    } catch (ArithmeticException exception) {
-                        throw new IOException("Git process output size overflowed", exception);
-                    }
-                    digest.update(buffer, 0, count);
-                    int remaining = maximumBytes - bytes.size();
-                    if (remaining > 0) {
-                        bytes.write(buffer, 0, Math.min(remaining, count));
-                    }
-                    if (count > remaining) {
-                        truncated = true;
-                    }
-                }
+        long size() {
+            try {
+                return Files.size(path);
             } catch (IOException exception) {
-                failure = exception;
+                return 0;
             }
         }
 
-        private String text() throws IOException {
-            if (failure != null) {
-                throw new IOException("Unable to read bounded Git process output", failure);
+        String read(int maximumBytes) throws IOException {
+            try (InputStream input = Files.newInputStream(path)) {
+                return new String(input.readNBytes(maximumBytes), StandardCharsets.UTF_8);
             }
-            return bytes.toString(StandardCharsets.UTF_8);
         }
 
-        private boolean truncated() {
-            return truncated;
+        @Override
+        public void close() {
+            try {
+                Files.deleteIfExists(path);
+            } catch (IOException ignored) {
+                // A descendant on Windows may still hold the file; it is small and in temp.
+            }
+        }
+    }
+
+    /**
+     * Writes standard input on a virtual thread, so the caller can wait for or read from the
+     * process at the same time. A failure of the pipe itself is Git's doing and shows in its
+     * exit code; any other failure, such as an unreadable source file, is the command's.
+     */
+    private static final class InputFeed {
+        private final PipeOutput pipe;
+
+        private final Thread writer;
+
+        private final AtomicReference<IOException> failure;
+
+        private InputFeed(PipeOutput pipe, Thread writer, AtomicReference<IOException> failure) {
+            this.pipe = pipe;
+            this.writer = writer;
+            this.failure = failure;
         }
 
-        private long byteCount() {
-            return byteCount;
+        static InputFeed start(Process process, GitCommand.Input input) {
+            PipeOutput pipe = new PipeOutput(process.getOutputStream());
+            AtomicReference<IOException> failure = new AtomicReference<>();
+            if (input == GitCommand.Input.NONE) {
+                pipe.closeQuietly();
+                return new InputFeed(pipe, null, failure);
+            }
+            Thread writer = Thread.ofVirtual().name("worldarchive-git-input").start(() -> {
+                try (pipe) {
+                    input.writeTo(pipe);
+                } catch (IOException exception) {
+                    failure.set(exception);
+                }
+            });
+            return new InputFeed(pipe, writer, failure);
         }
 
-        private String sha256() {
-            return HexFormat.of().formatHex(digest.digest());
+        void finish(int exitCode) throws IOException, InterruptedException {
+            if (writer == null) {
+                return;
+            }
+            writer.join();
+            IOException failed = failure.get();
+            if (failed == null || pipe.broken && exitCode != 0) {
+                return;
+            }
+            throw pipe.broken
+                    ? new IOException("Git stopped reading its input before it finished", failed)
+                    : failed;
+        }
+    }
+
+    /** Standard input of the process; remembers whether writing to it failed. */
+    private static final class PipeOutput extends FilterOutputStream {
+        private volatile boolean broken;
+
+        PipeOutput(OutputStream pipe) {
+            super(pipe);
+        }
+
+        @Override
+        public void write(byte[] bytes, int offset, int length) throws IOException {
+            try {
+                out.write(bytes, offset, length);
+            } catch (IOException exception) {
+                broken = true;
+                throw exception;
+            }
+        }
+
+        @Override
+        public void write(int value) throws IOException {
+            write(new byte[] {(byte) value}, 0, 1);
+        }
+
+        @Override
+        public void close() throws IOException {
+            try {
+                out.close();
+            } catch (IOException exception) {
+                broken = true;
+                throw exception;
+            }
+        }
+
+        void closeQuietly() {
+            try {
+                close();
+            } catch (IOException ignored) {
+                // Git reads no input; a closed pipe changes nothing.
+            }
         }
     }
 }

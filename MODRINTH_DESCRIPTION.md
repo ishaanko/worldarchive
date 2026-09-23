@@ -6,7 +6,7 @@ WorldArchive is a Fabric client mod for dependable backups of single-player Mine
 
 - Manual backups from the backup browser
 - Automatic backups when leaving a world
-- Optional scheduled backups (every 30 minutes by default, skipping unchanged worlds)
+- Optional scheduled backups every 30 minutes by default, skipped while the game is paused
 - Independent Git and ZIP destinations
 - Incremental Git snapshots with optional Git LFS and per-world remote sync
 - ZIP archives with SHA-256 integrity metadata, usable inside OneDrive, Google Drive, or similar synced folders

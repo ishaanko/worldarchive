@@ -3,32 +3,25 @@ package dev.ishaanko.worldarchive.core;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.util.HexFormat;
+import dev.ishaanko.worldarchive.model.GoldenFixtures;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
 final class WorldInventoryTest {
-    private static final String A_SHA = sha256("alpha");
+    private static final String A_SHA = "a1".repeat(32);
 
-    private static final String B_SHA = sha256("bravo");
+    private static final String B_SHA = "b2".repeat(32);
 
     @Test
-    void usesCanonicalStorageDigestFramingAndSortsPaths() throws Exception {
-        WorldInventory inventory = WorldInventory.create(List.of(
-                new WorldInventory.Entry("region/r.0.0.mca", 5, B_SHA),
-                new WorldInventory.Entry("level.dat", 5, A_SHA)));
+    void digestsKeepTheFramingThatStoredManifestsHold() {
+        WorldInventory inventory = WorldInventory.create(GoldenFixtures.INVENTORY.stream()
+                .map(file -> new WorldInventory.Entry(file.path(), file.size(), file.sha256()))
+                .toList());
 
-        List<WorldInventory.Entry> sorted = List.of(
-                new WorldInventory.Entry("level.dat", 5, A_SHA),
-                new WorldInventory.Entry("region/r.0.0.mca", 5, B_SHA));
-        assertEquals(sorted, inventory.files());
-        assertEquals(2, inventory.fileCount());
-        assertEquals(10, inventory.byteCount());
-        assertEquals(contentDigest(sorted), inventory.contentSha256());
-        assertEquals(inventoryDigest(sorted), inventory.inventorySha256());
+        assertEquals(GoldenFixtures.INVENTORY_CONTENT_SHA256, inventory.contentSha256());
+        assertEquals(GoldenFixtures.INVENTORY_SHA256, inventory.inventorySha256());
+        assertEquals(4, inventory.fileCount());
+        assertEquals(266_251, inventory.byteCount());
     }
 
     @Test
@@ -45,42 +38,14 @@ final class WorldInventoryTest {
         assertEquals(3, current.changedFilesSince(previous));
     }
 
+    /** Git and ZIP will read their inventories through this type, so it must refuse collisions. */
     @Test
-    void rejectsNonportableAndCollidingPaths() {
-        assertThrows(IllegalArgumentException.class, () -> new WorldInventory.Entry(
-                "../level.dat", 1, A_SHA));
+    void refusesPathsThatCollideOnWindowsOrMacOs() {
         assertThrows(IllegalArgumentException.class, () -> WorldInventory.create(List.of(
                 new WorldInventory.Entry("Data/file.dat", 1, A_SHA),
                 new WorldInventory.Entry("data/FILE.dat", 1, A_SHA))));
-    }
-
-    private static String contentDigest(List<WorldInventory.Entry> files) throws Exception {
-        MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        for (WorldInventory.Entry file : files) {
-            digest.update(ByteBuffer.allocate(Long.BYTES).putLong(file.size()).array());
-            digest.update(HexFormat.of().parseHex(file.sha256()));
-        }
-        return HexFormat.of().formatHex(digest.digest());
-    }
-
-    private static String inventoryDigest(List<WorldInventory.Entry> files) throws Exception {
-        MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        for (WorldInventory.Entry file : files) {
-            byte[] path = file.path().getBytes(StandardCharsets.UTF_8);
-            digest.update(ByteBuffer.allocate(Long.BYTES).putLong(path.length).array());
-            digest.update(path);
-            digest.update(ByteBuffer.allocate(Long.BYTES).putLong(file.size()).array());
-            digest.update(HexFormat.of().parseHex(file.sha256()));
-        }
-        return HexFormat.of().formatHex(digest.digest());
-    }
-
-    private static String sha256(String value) {
-        try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                    .digest(value.getBytes(StandardCharsets.UTF_8)));
-        } catch (Exception exception) {
-            throw new AssertionError(exception);
-        }
+        assertThrows(IllegalArgumentException.class, () -> WorldInventory.create(List.of(
+                new WorldInventory.Entry("region", 1, A_SHA),
+                new WorldInventory.Entry("Region/r.0.0.mca", 1, A_SHA))));
     }
 }

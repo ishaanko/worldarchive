@@ -3,7 +3,13 @@ package dev.ishaanko.worldarchive.model;
 import java.util.Objects;
 import java.util.Optional;
 
-/** Immutable outcome from one independent destination. */
+/**
+ * Immutable outcome from one independent destination.
+ *
+ * <p>The canonical constructor also decodes catalog records, so it does not redact: the
+ * {@link #failed} and {@link #pendingSync} factories redact where a message is created, and the
+ * constructor only cleans control characters and cuts the length.</p>
+ */
 public record DestinationResult(
         DestinationType destination,
         DestinationStatus status,
@@ -13,23 +19,25 @@ public record DestinationResult(
         SyncStatus syncStatus,
         ArtifactOwnership ownership,
         Optional<ImportSourceId> importSourceId) {
-    private static final int MAXIMUM_TEXT_LENGTH = 2_048;
+    private static final int MAXIMUM_ARTIFACT_ID_LENGTH = 2_048;
+
+    /** Fits the 2,048 UTF-16 units that older versions accept, even with emoji. */
+    private static final int MAXIMUM_MESSAGE_CODE_POINTS = 1_024;
 
     public DestinationResult {
         Objects.requireNonNull(destination, "destination");
         Objects.requireNonNull(status, "status");
-        artifactId = validateOptionalText(artifactId, "artifactId");
-        if (artifactId.isPresent() && SensitiveDataRedactor.containsSensitiveData(artifactId.get())) {
-            throw new IllegalArgumentException("artifactId must not contain sensitive data");
-        }
-        message = validateOptionalText(message, "message").map(SensitiveDataRedactor::redact);
+        artifactId = Objects.requireNonNull(artifactId, "artifactId")
+                .map(value -> SafeText.require(value, "artifactId", MAXIMUM_ARTIFACT_ID_LENGTH));
+        message = Objects.requireNonNull(message, "message")
+                .map(value -> SafeText.clean(value, MAXIMUM_MESSAGE_CODE_POINTS))
+                .filter(value -> !value.isEmpty());
         Objects.requireNonNull(verificationStatus, "verificationStatus");
         Objects.requireNonNull(syncStatus, "syncStatus");
         Objects.requireNonNull(ownership, "ownership");
         importSourceId = Objects.requireNonNull(importSourceId, "importSourceId");
         validateOwnership(ownership, importSourceId);
-        if ((status == DestinationStatus.SUCCESS || status == DestinationStatus.PENDING_SYNC)
-                && artifactId.isEmpty()) {
+        if (isDurable(status) && artifactId.isEmpty()) {
             throw new IllegalArgumentException("A durable destination result must identify its artifact");
         }
         if ((status == DestinationStatus.FAILED || status == DestinationStatus.PENDING_SYNC)
@@ -53,42 +61,6 @@ public record DestinationResult(
         }
     }
 
-    /** Compatibility constructor for initial destination implementations. */
-    public DestinationResult(
-            DestinationType destination,
-            DestinationStatus status,
-            Optional<String> artifactId,
-            Optional<String> message,
-            VerificationStatus verificationStatus,
-            SyncStatus syncStatus) {
-        this(
-                destination,
-                status,
-                artifactId,
-                message,
-                verificationStatus,
-                syncStatus,
-                ArtifactOwnership.MANAGED,
-                Optional.empty());
-    }
-
-    /** Compatibility constructor for initial destination implementations. */
-    public DestinationResult(
-            DestinationType destination,
-            DestinationStatus status,
-            Optional<String> artifactId,
-            Optional<String> message) {
-        this(
-                destination,
-                status,
-                artifactId,
-                message,
-                VerificationStatus.NOT_VERIFIED,
-                defaultSyncStatus(status),
-                ArtifactOwnership.MANAGED,
-                Optional.empty());
-    }
-
     public static DestinationResult success(DestinationType destination, String artifactId) {
         return new DestinationResult(
                 destination,
@@ -101,19 +73,20 @@ public record DestinationResult(
                 Optional.empty());
     }
 
+    /** A destination that kept no copy; the message is redacted here. */
     public static DestinationResult failed(DestinationType destination, String message) {
         return new DestinationResult(
                 destination,
                 DestinationStatus.FAILED,
                 Optional.empty(),
-                Optional.of(message),
+                Optional.of(SafeText.of(message, "The destination did not finish", MAXIMUM_MESSAGE_CODE_POINTS)),
                 VerificationStatus.NOT_VERIFIED,
                 SyncStatus.FAILED,
                 ArtifactOwnership.MANAGED,
                 Optional.empty());
     }
 
-    /** A durable local backup whose optional remote synchronization must be retried. */
+    /** A durable local backup whose remote copy must be retried; the message is redacted here. */
     public static DestinationResult pendingSync(
             DestinationType destination,
             String artifactId,
@@ -122,7 +95,8 @@ public record DestinationResult(
                 destination,
                 DestinationStatus.PENDING_SYNC,
                 Optional.of(artifactId),
-                Optional.of(message),
+                Optional.of(SafeText.of(
+                        message, "The remote copy is not up to date yet", MAXIMUM_MESSAGE_CODE_POINTS)),
                 VerificationStatus.NOT_VERIFIED,
                 SyncStatus.PENDING,
                 ArtifactOwnership.MANAGED,
@@ -177,6 +151,15 @@ public record DestinationResult(
                 Optional.of(Objects.requireNonNull(sourceId, "sourceId")));
     }
 
+    /** True when this destination holds a copy: SUCCESS, or PENDING_SYNC with its local copy. */
+    public boolean isDurable() {
+        return isDurable(status);
+    }
+
+    private static boolean isDurable(DestinationStatus status) {
+        return status == DestinationStatus.SUCCESS || status == DestinationStatus.PENDING_SYNC;
+    }
+
     public DestinationResult withVerification(VerificationStatus verification) {
         return new DestinationResult(
                 destination,
@@ -213,29 +196,5 @@ public record DestinationResult(
                 sync,
                 ownership,
                 importSourceId);
-    }
-
-    private static Optional<String> validateOptionalText(Optional<String> value, String name) {
-        Objects.requireNonNull(value, name);
-        if (value.isEmpty()) {
-            return value;
-        }
-        String text = Objects.requireNonNull(value.get(), name);
-        if (text.isBlank() || text.length() > MAXIMUM_TEXT_LENGTH) {
-            throw new IllegalArgumentException(name + " must contain between 1 and "
-                    + MAXIMUM_TEXT_LENGTH + " characters when present");
-        }
-        if (text.chars().anyMatch(character -> Character.isISOControl(character))) {
-            throw new IllegalArgumentException(name + " must not contain control characters");
-        }
-        return Optional.of(text);
-    }
-
-    private static SyncStatus defaultSyncStatus(DestinationStatus status) {
-        return switch (status) {
-            case PENDING_SYNC -> SyncStatus.PENDING;
-            case FAILED -> SyncStatus.FAILED;
-            default -> SyncStatus.NOT_CONFIGURED;
-        };
     }
 }

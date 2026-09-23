@@ -1,12 +1,10 @@
 package dev.ishaanko.worldarchive.config;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Path;
-import java.util.UUID;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -15,52 +13,41 @@ final class RemoteUrlPolicyTest {
     Path temporaryDirectory;
 
     @Test
-    void acceptsOnlyWhitelistedCredentialFreeForms() {
-        assertEquals(
+    void acceptsTheRemotesPlayersUse() {
+        List<String> remotes = List.of(
                 "https://example.invalid/team/backups.git",
-                RemoteUrlPolicy.validate("https://example.invalid/team/backups.git"));
-        assertEquals(
-                "git@example.invalid:team/backups.git",
-                RemoteUrlPolicy.validate("git@example.invalid:team/backups.git"));
-        String local = temporaryDirectory.resolve("remote.git").toString();
-        assertEquals(local, RemoteUrlPolicy.validate(local));
-        String shortName = temporaryDirectory.resolve("RUNNER~1/remote.git").toString();
-        assertEquals(shortName, RemoteUrlPolicy.validate(shortName));
+                "git@github.com:bob/Desk-and-chair-collection-2024.git",
+                "ssh://git@gitea.example.com:2222/bob/world.git",
+                "ssh://git@github.com/bob/world.git",
+                "gitea:bob/world.git",
+                "file:///srv/git/world.git",
+                temporaryDirectory.resolve("100% Backups/world.git").toString(),
+                temporaryDirectory.resolve("Basic Training Backups/world.git").toString(),
+                temporaryDirectory.resolve("Bob's Laptop & Co (2)/RUNNER~1/remote.git").toString());
+        for (String remote : remotes) {
+            assertEquals(remote, RemoteUrlPolicy.validateConfiguredPlain(remote));
+        }
     }
 
     @Test
-    void acceptsLocalPathsWithPunctuationAndRejectsUnsafeCharacters() {
-        String punctuated = temporaryDirectory.resolve("Bob's Laptop & Co (2)/remote.git").toString();
-
-        assertEquals(punctuated, RemoteUrlPolicy.validate(punctuated));
-        assertThrows(IllegalArgumentException.class, () -> RemoteUrlPolicy.validate(
-                temporaryDirectory.resolve("bad<name>.git").toString()));
-    }
-
-    @Test
-    void acceptsAndResolvesExactlyOneWorldIdPlaceholder() {
-        String template = "https://example.invalid/team/world-{worldId}.git";
-        UUID worldId = UUID.fromString("12345678-1234-1234-1234-123456789abc");
-
-        assertEquals(template, RemoteUrlPolicy.validate(template));
-        assertTrue(RemoteUrlPolicy.isWorldIdTemplate(template));
-        assertFalse(RemoteUrlPolicy.isWorldIdTemplate(
-                "https://example.invalid/team/shared.git"));
-        assertEquals(
-                "https://example.invalid/team/world-12345678-1234-1234-1234-123456789abc.git",
-                RemoteUrlPolicy.resolveWorldId(template, worldId));
-    }
-
-    @Test
-    void keepsPlainLegacyUrlsButRejectsAmbiguousTemplates() {
-        String plain = "https://example.invalid/team/legacy.git";
-
-        assertEquals(plain, RemoteUrlPolicy.validatePlain(plain));
-        assertThrows(IllegalArgumentException.class, () -> RemoteUrlPolicy.validate(
-                "https://example.invalid/{worldId}/{worldId}.git"));
-        assertThrows(IllegalArgumentException.class, () -> RemoteUrlPolicy.validatePlain(
-                "https://example.invalid/team/{worldId}.git"));
-        assertThrows(IllegalArgumentException.class, () -> RemoteUrlPolicy.resolveWorldId(plain, UUID.randomUUID()));
+    void rejectsCredentialsTokensAndUnapprovedForms() {
+        List<String> rejected = List.of(
+                "../relative.git",
+                "https://user:password@example.invalid/team/repository.git",
+                "https://token@example.invalid/team/repository.git",
+                "ssh://git:password@example.invalid/team/repository.git",
+                "https://example.invalid/team/repository.git?token=value",
+                "https://example.invalid/team/repository.git#main",
+                "https://example.invalid/ghp_abcdefghijklmnopqrstuvwxyz/repository.git",
+                "https://example.invalid/x_ghp_abcdefghijklmnopqrstuvwxyz/repository.git",
+                "https://example.invalid/ghp%5Fabcdefghijklmnopqrstuvwxyz/repository.git",
+                "https://example.invalid/ghp%255Fabcdefghijklmnopqrstuvwxyz/repository.git",
+                "git@example.invalid:glpat-abcdefghijklmnopqrstuvwxyz.git",
+                "git://example.invalid/team/archive.git",
+                temporaryDirectory.resolve("bad<name>.git").toString());
+        for (String remote : rejected) {
+            assertThrows(IllegalArgumentException.class, () -> RemoteUrlPolicy.validateConfiguredPlain(remote), remote);
+        }
     }
 
     @Test
@@ -68,28 +55,5 @@ final class RemoteUrlPolicyTest {
         String importUrl = "git://example.invalid/team/archive.git";
 
         assertEquals(importUrl, RemoteUrlPolicy.validatePlain(importUrl));
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> RemoteUrlPolicy.validate(importUrl));
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> RemoteUrlPolicy.validateConfiguredPlain(importUrl));
-    }
-
-    @Test
-    void rejectsCredentialsTokensAndUnapprovedForms() {
-        assertThrows(IllegalArgumentException.class, () -> RemoteUrlPolicy.validate("../relative.git"));
-        assertThrows(IllegalArgumentException.class, () -> RemoteUrlPolicy.validate(
-                "https://user:password@example.invalid/team/repository.git"));
-        assertThrows(IllegalArgumentException.class, () -> RemoteUrlPolicy.validate(
-                "https://example.invalid/team/repository.git?token=value"));
-        assertThrows(IllegalArgumentException.class, () -> RemoteUrlPolicy.validate(
-                "https://example.invalid/ghp_abcdefghijklmnopqrstuvwxyz/repository.git"));
-        assertThrows(IllegalArgumentException.class, () -> RemoteUrlPolicy.validate(
-                "https://example.invalid/ghp%5Fabcdefghijklmnopqrstuvwxyz/repository.git"));
-        assertThrows(IllegalArgumentException.class, () -> RemoteUrlPolicy.validate(
-                "https://example.invalid/x_ghp_abcdefghijklmnopqrstuvwxyz/repository.git"));
-        assertThrows(IllegalArgumentException.class, () -> RemoteUrlPolicy.validate(
-                "https://example.invalid/ghp%255Fabcdefghijklmnopqrstuvwxyz/repository.git"));
     }
 }

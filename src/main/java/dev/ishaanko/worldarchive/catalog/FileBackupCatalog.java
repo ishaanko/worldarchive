@@ -5,50 +5,55 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParseException;
 import com.google.gson.JsonParser;
-import com.google.gson.JsonPrimitive;
-import dev.ishaanko.worldarchive.core.AtomicFiles;
+import com.google.gson.stream.JsonReader;
+import dev.ishaanko.worldarchive.model.ArtifactOwnership;
 import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.BackupManifest;
+import dev.ishaanko.worldarchive.model.BackupManifestJson;
 import dev.ishaanko.worldarchive.model.BackupRecord;
 import dev.ishaanko.worldarchive.model.BackupResult;
-import dev.ishaanko.worldarchive.model.BackupStatus;
-import dev.ishaanko.worldarchive.model.BackupTrigger;
-import dev.ishaanko.worldarchive.model.ArtifactOwnership;
 import dev.ishaanko.worldarchive.model.DestinationResult;
 import dev.ishaanko.worldarchive.model.DestinationStatus;
 import dev.ishaanko.worldarchive.model.DestinationType;
-import dev.ishaanko.worldarchive.model.GameVersionStamp;
 import dev.ishaanko.worldarchive.model.ImportSourceId;
 import dev.ishaanko.worldarchive.model.SyncStatus;
 import dev.ishaanko.worldarchive.model.VerificationStatus;
 import dev.ishaanko.worldarchive.model.WorldId;
+import dev.ishaanko.worldarchive.support.AtomicFiles;
+import dev.ishaanko.worldarchive.support.JsonFields;
+import dev.ishaanko.worldarchive.support.LockedFile;
 import java.io.IOException;
-import java.math.BigDecimal;
-import java.nio.channels.FileChannel;
-import java.nio.channels.FileLock;
-import java.nio.file.Files;
-import java.nio.file.LinkOption;
+import java.io.StringReader;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
-import java.time.Instant;
-import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
-import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.UnaryOperator;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-/** Thread- and process-safe JSON catalog with atomic publication. */
+/**
+ * The catalog in one JSON file. Reads take no lock: every change publishes a whole new file with
+ * an atomic rename, so a reader sees the catalog as it was before or after a change. A change
+ * holds the file's lock across threads and processes from its read to its write.
+ *
+ * <p>A file that cannot be decoded is moved aside to {@code catalog.json.corrupt-<UTC time>} and
+ * the catalog starts over with every record that still reads in it; the start-up rebuild then
+ * lists the backups on disk again. A file from a newer version of WorldArchive is refused
+ * instead, so this version never drops what it cannot read.</p>
+ */
 public final class FileBackupCatalog implements BackupCatalog {
     public static final int CURRENT_SCHEMA_VERSION = 3;
+
+    /** 0.1.0 wrote schema 2; schema 3 added imported artifacts. */
+    private static final int OLDEST_SCHEMA_VERSION = 2;
 
     private static final Gson GSON = new GsonBuilder()
             .setPrettyPrinting()
@@ -63,187 +68,212 @@ public final class FileBackupCatalog implements BackupCatalog {
     /** The catalog grows with every backup, so it gets a ceiling well above generic metadata. */
     private static final int MAXIMUM_CATALOG_BYTES = 256 * 1_024 * 1_024;
 
-    private static final ConcurrentMap<Path, ReentrantLock> JVM_LOCKS = new ConcurrentHashMap<>();
+    private static final JsonFields<DamagedFileException> FIELDS = new JsonFields<>(DamagedFileException::new);
+
+    private static final Logger LOGGER = LoggerFactory.getLogger("WorldArchive");
 
     private final Path file;
 
-    private final Path lockFile;
+    private final LockedFile lock;
 
-    private final ReentrantLock jvmLock;
+    private final AtomicBoolean lostRecords = new AtomicBoolean();
 
     public FileBackupCatalog(Path file) {
-        this.file = file.toAbsolutePath().normalize();
-        this.lockFile = this.file.resolveSibling(this.file.getFileName() + ".lock");
-        this.jvmLock = JVM_LOCKS.computeIfAbsent(this.file, ignored -> new ReentrantLock());
+        this.lock = new LockedFile(file);
+        this.file = lock.file();
     }
 
     @Override
     public void add(BackupRecord record) throws IOException {
-        withLock(() -> {
-            List<BackupRecord> records = readRecords();
-            for (BackupRecord existing : records) {
-                if (existing.manifest().backupId().equals(record.manifest().backupId())) {
-                    if (existing.equals(record)) {
-                        return null;
-                    }
-                    throw new IOException("Catalog already contains a different record for backup "
-                            + record.manifest().backupId());
-                }
+        Objects.requireNonNull(record, "record");
+        lock.withLock(() -> {
+            Map<BackupId, BackupRecord> records = readForChange();
+            BackupRecord existing = records.putIfAbsent(record.manifest().backupId(), record);
+            if (existing == null) {
+                write(records.values());
+            } else if (!existing.equals(record)) {
+                throw new IOException("Catalog already contains a different record for backup "
+                        + record.manifest().backupId());
             }
-            records.add(record);
-            writeRecords(records);
             return null;
         });
     }
 
     @Override
-    public CatalogMergeResult merge(BackupRecord discovered) throws IOException {
-        Objects.requireNonNull(discovered, "discovered");
-        return withLock(() -> {
-            List<BackupRecord> records = readRecords();
-            for (int index = 0; index < records.size(); index++) {
-                BackupRecord existing = records.get(index);
-                if (!existing.manifest().backupId().equals(discovered.manifest().backupId())) {
-                    continue;
-                }
-                CatalogMergeResult result = BackupRecordMerger.merge(existing, discovered);
-                if (result.status() == CatalogMergeStatus.MERGED) {
-                    records.set(index, result.record());
-                    writeRecords(records);
-                }
-                return result;
-            }
-            records.add(discovered);
-            writeRecords(records);
-            return new CatalogMergeResult(CatalogMergeStatus.ADDED, discovered);
-        });
-    }
-
-    @Override
     public Optional<BackupRecord> find(BackupId backupId) throws IOException {
-        return withLock(() -> readRecords().stream()
-                .filter(record -> record.manifest().backupId().equals(backupId))
-                .findFirst());
+        Objects.requireNonNull(backupId, "backupId");
+        return Optional.ofNullable(read().get(backupId));
     }
 
     @Override
     public List<BackupRecord> listAll() throws IOException {
-        return withLock(() -> sorted(readRecords()));
+        return sorted(read().values());
     }
 
     @Override
     public List<BackupRecord> list(WorldId worldId) throws IOException {
-        return withLock(() -> sorted(readRecords().stream()
+        Objects.requireNonNull(worldId, "worldId");
+        return sorted(read().values().stream()
                 .filter(record -> record.manifest().worldId().equals(worldId))
-                .toList()));
+                .toList());
     }
 
     @Override
-    public Optional<BackupRecord> update(
+    public boolean lostRecords() {
+        return lostRecords.get();
+    }
+
+    @Override
+    public Map<BackupId, Optional<BackupRecord>> updateAll(
+            Map<BackupId, UnaryOperator<Optional<BackupRecord>>> changes) throws IOException {
+        Map<BackupId, UnaryOperator<Optional<BackupRecord>>> requested =
+                new LinkedHashMap<>(Objects.requireNonNull(changes, "changes"));
+        return lock.withLock(() -> {
+            Map<BackupId, BackupRecord> records = readForChange();
+            Map<BackupId, Optional<BackupRecord>> results = new LinkedHashMap<>();
+            boolean changed = false;
+            for (Map.Entry<BackupId, UnaryOperator<Optional<BackupRecord>>> change : requested.entrySet()) {
+                BackupId backupId = change.getKey();
+                Optional<BackupRecord> current = Optional.ofNullable(records.get(backupId));
+                Optional<BackupRecord> replacement = Objects.requireNonNull(
+                        change.getValue().apply(current), "A catalog change returned null");
+                if (replacement.isPresent()) {
+                    requireSameIdentity(backupId, current, replacement.get());
+                    records.put(backupId, replacement.get());
+                } else {
+                    records.remove(backupId);
+                }
+                changed |= !replacement.equals(current);
+                results.put(backupId, replacement);
+            }
+            if (changed) {
+                write(records.values());
+            }
+            return results;
+        });
+    }
+
+    private static void requireSameIdentity(
             BackupId backupId,
-            UnaryOperator<BackupRecord> update) throws IOException {
-        return withLock(() -> {
-            List<BackupRecord> records = readRecords();
-            for (int index = 0; index < records.size(); index++) {
-                BackupRecord existing = records.get(index);
-                if (existing.manifest().backupId().equals(backupId)) {
-                    BackupRecord replacement = Objects.requireNonNull(
-                            update.apply(existing),
-                            "Catalog update returned null");
-                    if (!replacement.manifest().backupId().equals(backupId)
-                            || !replacement.manifest().worldId().equals(existing.manifest().worldId())) {
-                        throw new IOException("Catalog update must preserve backup and world identities");
-                    }
-                    records.set(index, replacement);
-                    writeRecords(records);
-                    return Optional.of(replacement);
+            Optional<BackupRecord> current,
+            BackupRecord replacement) throws IOException {
+        boolean sameBackup = replacement.manifest().backupId().equals(backupId);
+        boolean sameWorld = current.isEmpty()
+                || current.get().manifest().worldId().equals(replacement.manifest().worldId());
+        if (!sameBackup || !sameWorld) {
+            throw new IOException("A catalog change must keep the backup and world IDs of " + backupId);
+        }
+    }
+
+    /** The records by ID, read without the lock; a damaged file is first moved aside under the lock. */
+    private Map<BackupId, BackupRecord> read() throws IOException {
+        try {
+            return decode(DamagedFiles.read(file, MAXIMUM_CATALOG_BYTES));
+        } catch (DamagedFileException damaged) {
+            return lock.withLock(this::readForChange);
+        }
+    }
+
+    /** The records by ID for a change, whose caller holds the lock; a damaged file is moved aside. */
+    private Map<BackupId, BackupRecord> readForChange() throws IOException {
+        Optional<String> json;
+        try {
+            json = DamagedFiles.read(file, MAXIMUM_CATALOG_BYTES);
+        } catch (DamagedFileException notText) {
+            return startOver(new LinkedHashMap<>(), notText);
+        }
+        try {
+            return decode(json);
+        } catch (DamagedFileException damaged) {
+            return startOver(json.map(FileBackupCatalog::salvage).orElseGet(LinkedHashMap::new), damaged);
+        }
+    }
+
+    /** Moves the damaged file aside and starts over with the records that still read in it; the caller holds the lock. */
+    private Map<BackupId, BackupRecord> startOver(Map<BackupId, BackupRecord> salvaged, DamagedFileException damage)
+            throws IOException {
+        DamagedFiles.moveAside(file, damage);
+        lostRecords.set(true);
+        if (!salvaged.isEmpty()) {
+            write(salvaged.values());
+            LOGGER.warn("WorldArchive kept the {} backups that the damaged backup list still named", salvaged.size());
+        }
+        return salvaged;
+    }
+
+    /**
+     * The records of a damaged file that still decode. A record that does not decode is left out
+     * and the next one is read; damage to the JSON itself ends the reading, and the records before
+     * it are kept. A file of a schema this version does not read gives none.
+     */
+    private static Map<BackupId, BackupRecord> salvage(String json) {
+        Map<BackupId, BackupRecord> records = new LinkedHashMap<>();
+        try (JsonReader reader = new JsonReader(new StringReader(json))) {
+            int schemaVersion = CURRENT_SCHEMA_VERSION;
+            reader.beginObject();
+            while (reader.hasNext()) {
+                String name = reader.nextName();
+                if (name.equals("schemaVersion")) {
+                    schemaVersion = reader.nextInt();
+                } else if (name.equals("records")
+                        && schemaVersion >= OLDEST_SCHEMA_VERSION && schemaVersion <= CURRENT_SCHEMA_VERSION) {
+                    salvageRecords(reader, schemaVersion, records);
+                } else {
+                    reader.skipValue();
                 }
             }
-            return Optional.empty();
-        });
+        } catch (IOException | RuntimeException damaged) {
+            // The rest of the file cannot be read; what was read before the damage is kept.
+        }
+        return records;
     }
 
-    @Override
-    public boolean remove(BackupId backupId) throws IOException {
-        return withLock(() -> {
-            List<BackupRecord> records = readRecords();
-            boolean removed = records.removeIf(record -> record.manifest().backupId().equals(backupId));
-            if (removed) {
-                writeRecords(records);
+    private static void salvageRecords(JsonReader reader, int schemaVersion, Map<BackupId, BackupRecord> records)
+            throws IOException {
+        reader.beginArray();
+        while (reader.hasNext()) {
+            JsonElement encoded = JsonParser.parseReader(reader);
+            try {
+                if (encoded.isJsonObject()) {
+                    BackupRecord record = decodeRecord(encoded.getAsJsonObject(), schemaVersion);
+                    records.putIfAbsent(record.manifest().backupId(), record);
+                }
+            } catch (DamagedFileException | RuntimeException unreadable) {
+                // This record is lost; the next one may still read.
             }
-            return removed;
-        });
+        }
+        reader.endArray();
     }
 
-    public Path file() {
-        return file;
-    }
-
-    private <T> T withLock(IoSupplier<T> operation) throws IOException {
-        jvmLock.lock();
+    private Map<BackupId, BackupRecord> decode(Optional<String> json) throws IOException {
+        Map<BackupId, BackupRecord> records = new LinkedHashMap<>();
+        if (json.isEmpty()) {
+            return records;
+        }
         try {
-            Path parent = file.getParent();
-            if (parent == null) {
-                throw new IOException("Catalog path has no parent directory: " + file);
-            }
-            Files.createDirectories(parent);
-            if (Files.isSymbolicLink(lockFile)) {
-                throw new IOException("Catalog lock file must not be a symbolic link");
-            }
-            try (FileChannel channel = FileChannel.open(
-                            lockFile,
-                            StandardOpenOption.CREATE,
-                            StandardOpenOption.WRITE,
-                            LinkOption.NOFOLLOW_LINKS);
-                    FileLock ignored = channel.lock()) {
-                return operation.get();
-            }
-        } finally {
-            jvmLock.unlock();
-        }
-    }
-
-    private List<BackupRecord> readRecords() throws IOException {
-        if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) {
-            return new ArrayList<>();
-        }
-        if (Files.isSymbolicLink(file) || !Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
-            throw new IOException("Catalog is not a regular file: " + file);
-        }
-        String json = AtomicFiles.readUtf8(file, MAXIMUM_CATALOG_BYTES);
-        try {
-            JsonElement parsed = JsonParser.parseString(json);
-            if (!parsed.isJsonObject()) {
-                throw new IOException("Catalog root must be a JSON object");
-            }
-            JsonObject root = parsed.getAsJsonObject();
-            int schemaVersion = requiredInteger(root, "schemaVersion");
+            JsonObject root = FIELDS.parseObject(json.get(), "The backup list");
+            int schemaVersion = FIELDS.requiredInt(root, "schemaVersion");
             if (schemaVersion > CURRENT_SCHEMA_VERSION) {
-                throw new IOException("Unsupported future catalog schema: " + schemaVersion);
+                throw new IOException("The backup list " + file + " was written by a newer version of"
+                        + " WorldArchive (schema " + schemaVersion + "). Update WorldArchive to use it.");
             }
-            if (schemaVersion < 1) {
-                throw new IOException("Unsupported catalog schema: " + schemaVersion);
+            if (schemaVersion < OLDEST_SCHEMA_VERSION) {
+                throw new DamagedFileException("The backup list has an unknown schema " + schemaVersion, null);
             }
-            JsonArray array = requiredArray(root, "records");
-            List<BackupRecord> records = new ArrayList<>(array.size());
-            Set<BackupId> ids = new HashSet<>();
-            for (JsonElement element : array) {
-                if (!element.isJsonObject()) {
-                    throw new IOException("Catalog record must be a JSON object");
+            for (JsonObject encoded : FIELDS.requiredObjects(root, "records")) {
+                BackupRecord record = decodeRecord(encoded, schemaVersion);
+                if (records.putIfAbsent(record.manifest().backupId(), record) != null) {
+                    throw new DamagedFileException(
+                            "The backup list names backup " + record.manifest().backupId() + " twice", null);
                 }
-                BackupRecord record = decodeRecord(element.getAsJsonObject(), schemaVersion);
-                if (!ids.add(record.manifest().backupId())) {
-                    throw new IOException("Catalog contains duplicate backup IDs");
-                }
-                records.add(record);
             }
             return records;
-        } catch (JsonParseException | IllegalArgumentException exception) {
-            throw new IOException("Catalog is malformed or invalid", exception);
+        } catch (IllegalArgumentException invalid) {
+            throw new DamagedFileException("The backup list holds an invalid record", invalid);
         }
     }
 
-    private void writeRecords(List<BackupRecord> records) throws IOException {
+    private void write(Collection<BackupRecord> records) throws IOException {
         JsonObject root = new JsonObject();
         root.addProperty("schemaVersion", CURRENT_SCHEMA_VERSION);
         JsonArray encodedRecords = new JsonArray();
@@ -252,40 +282,20 @@ public final class FileBackupCatalog implements BackupCatalog {
         AtomicFiles.writeUtf8(file, GSON.toJson(root) + "\n", MAXIMUM_CATALOG_BYTES);
     }
 
-    private static List<BackupRecord> sorted(List<BackupRecord> records) {
+    private static List<BackupRecord> sorted(Collection<BackupRecord> records) {
         return records.stream().sorted(NEWEST_FIRST).toList();
     }
 
     private static JsonObject encodeRecord(BackupRecord record) {
+        JsonObject manifest = new JsonObject();
+        BackupManifestJson.write(record.manifest(), manifest);
         JsonObject encoded = new JsonObject();
-        encoded.add("manifest", encodeManifest(record.manifest()));
+        encoded.add("manifest", manifest);
         encoded.add("result", encodeResult(record.result()));
         return encoded;
     }
 
-    private static JsonObject encodeManifest(BackupManifest manifest) {
-        JsonObject encoded = new JsonObject();
-        encoded.addProperty("formatVersion", manifest.formatVersion());
-        encoded.addProperty("backupId", manifest.backupId().toString());
-        encoded.addProperty("worldId", manifest.worldId().toString());
-        encoded.addProperty("worldName", manifest.worldName());
-        manifest.label().ifPresent(label -> encoded.addProperty("label", label));
-        encoded.addProperty("createdAt", manifest.createdAt().toString());
-        encoded.addProperty("trigger", manifest.trigger().name());
-        encoded.addProperty("sourceFileCount", manifest.sourceFileCount());
-        encoded.addProperty("sourceByteCount", manifest.sourceByteCount());
-        encoded.addProperty("changedFileCount", manifest.changedFileCount());
-        encoded.addProperty("contentSha256", manifest.contentSha256());
-        encoded.addProperty("inventorySha256", manifest.inventorySha256());
-        manifest.gameVersion().ifPresent(stamp -> {
-            JsonObject encodedVersion = new JsonObject();
-            encodedVersion.addProperty("name", stamp.name());
-            encodedVersion.addProperty("dataVersion", stamp.dataVersion());
-            encoded.add("gameVersion", encodedVersion);
-        });
-        return encoded;
-    }
-
+    /** Writes the derived status too, so the file stays readable by older versions. */
     private static JsonObject encodeResult(BackupResult result) {
         JsonObject encoded = new JsonObject();
         encoded.addProperty("backupId", result.backupId().toString());
@@ -307,183 +317,45 @@ public final class FileBackupCatalog implements BackupCatalog {
         encoded.addProperty("verificationStatus", result.verificationStatus().name());
         encoded.addProperty("syncStatus", result.syncStatus().name());
         encoded.addProperty("ownership", result.ownership().name());
-        result.importSourceId().ifPresent(value ->
-                encoded.addProperty("importSourceId", value.toString()));
+        result.importSourceId().ifPresent(value -> encoded.addProperty("importSourceId", value.toString()));
         return encoded;
     }
 
-    private static BackupRecord decodeRecord(JsonObject encoded, int schemaVersion) throws IOException {
-        BackupManifest manifest = decodeManifest(requiredObject(encoded, "manifest"), schemaVersion);
-        BackupResult result = decodeResult(requiredObject(encoded, "result"), schemaVersion);
+    private static BackupRecord decodeRecord(JsonObject encoded, int schemaVersion) throws DamagedFileException {
+        BackupManifest manifest = BackupManifestJson.read(FIELDS.requiredObject(encoded, "manifest"), FIELDS);
+        BackupResult result = decodeResult(FIELDS.requiredObject(encoded, "result"), schemaVersion);
         return new BackupRecord(manifest, result);
     }
 
-    private static BackupManifest decodeManifest(JsonObject encoded, int schemaVersion) throws IOException {
-        if (schemaVersion == 1) {
-            return new BackupManifest(
-                    requiredInteger(encoded, "formatVersion"),
-                    BackupId.parse(requiredString(encoded, "backupId")),
-                    WorldId.parse(requiredString(encoded, "worldId")),
-                    requiredString(encoded, "worldName"),
-                    requiredInstant(encoded, "createdAt"),
-                    requiredEnum(encoded, "trigger", BackupTrigger.class),
-                    requiredLong(encoded, "sourceFileCount"),
-                    requiredLong(encoded, "sourceByteCount"),
-                    requiredString(encoded, "sourceSha256"));
-        }
-        return new BackupManifest(
-                requiredInteger(encoded, "formatVersion"),
-                BackupId.parse(requiredString(encoded, "backupId")),
-                WorldId.parse(requiredString(encoded, "worldId")),
-                requiredString(encoded, "worldName"),
-                optionalString(encoded, "label"),
-                requiredInstant(encoded, "createdAt"),
-                requiredEnum(encoded, "trigger", BackupTrigger.class),
-                requiredLong(encoded, "sourceFileCount"),
-                requiredLong(encoded, "sourceByteCount"),
-                requiredLong(encoded, "changedFileCount"),
-                requiredString(encoded, "contentSha256"),
-                requiredString(encoded, "inventorySha256"),
-                optionalGameVersion(encoded));
-    }
-
-    private static Optional<GameVersionStamp> optionalGameVersion(JsonObject object) throws IOException {
-        JsonElement element = object.get("gameVersion");
-        if (element == null || element.isJsonNull()) {
-            return Optional.empty();
-        }
-        if (!element.isJsonObject()) {
-            throw new IOException("Catalog game version is not an object");
-        }
-        JsonObject encoded = element.getAsJsonObject();
-        return Optional.of(new GameVersionStamp(
-                requiredString(encoded, "name"),
-                requiredInteger(encoded, "dataVersion")));
-    }
-
-    private static BackupResult decodeResult(JsonObject encoded, int schemaVersion) throws IOException {
-        JsonArray destinations = requiredArray(encoded, "destinations");
-        List<DestinationResult> decodedDestinations = new ArrayList<>(destinations.size());
-        for (JsonElement destination : destinations) {
-            if (!destination.isJsonObject()) {
-                throw new IOException("Destination result must be a JSON object");
-            }
-            decodedDestinations.add(decodeDestination(destination.getAsJsonObject(), schemaVersion));
+    /** The stored status is derived from the destinations, so it is written but never read. */
+    private static BackupResult decodeResult(JsonObject encoded, int schemaVersion) throws DamagedFileException {
+        List<DestinationResult> destinations = new ArrayList<>();
+        for (JsonObject destination : FIELDS.requiredObjects(encoded, "destinations")) {
+            destinations.add(decodeDestination(destination, schemaVersion));
         }
         return new BackupResult(
-                BackupId.parse(requiredString(encoded, "backupId")),
-                WorldId.parse(requiredString(encoded, "worldId")),
-                requiredEnum(encoded, "status", BackupStatus.class),
-                decodedDestinations,
-                requiredInstant(encoded, "completedAt"));
+                BackupId.parse(FIELDS.requiredString(encoded, "backupId")),
+                WorldId.parse(FIELDS.requiredString(encoded, "worldId")),
+                destinations,
+                FIELDS.requiredInstant(encoded, "completedAt"));
     }
 
-    private static DestinationResult decodeDestination(JsonObject encoded, int schemaVersion) throws IOException {
-        VerificationStatus verification = schemaVersion == 1
-                ? VerificationStatus.NOT_VERIFIED
-                : requiredEnum(encoded, "verificationStatus", VerificationStatus.class);
-        SyncStatus sync = schemaVersion == 1
-                ? SyncStatus.NOT_CONFIGURED
-                : requiredEnum(encoded, "syncStatus", SyncStatus.class);
-        ArtifactOwnership ownership = schemaVersion < 3
-                ? ArtifactOwnership.MANAGED
-                : requiredEnum(encoded, "ownership", ArtifactOwnership.class);
-        Optional<ImportSourceId> sourceId = schemaVersion < 3
-                ? Optional.empty()
-                : optionalString(encoded, "importSourceId").map(ImportSourceId::parse);
+    /** Schema 2 predates imports, so every artifact it lists is WorldArchive's own. */
+    private static DestinationResult decodeDestination(JsonObject encoded, int schemaVersion)
+            throws DamagedFileException {
+        boolean imports = schemaVersion >= 3;
         return new DestinationResult(
-                requiredEnum(encoded, "destination", DestinationType.class),
-                requiredEnum(encoded, "status", DestinationStatus.class),
-                optionalString(encoded, "artifactId"),
-                optionalString(encoded, "message"),
-                verification,
-                sync,
-                ownership,
-                sourceId);
-    }
-
-    private static JsonObject requiredObject(JsonObject object, String name) throws IOException {
-        JsonElement element = object.get(name);
-        if (element == null || !element.isJsonObject()) {
-            throw new IOException("Required object is missing or invalid: " + name);
-        }
-        return element.getAsJsonObject();
-    }
-
-    private static JsonArray requiredArray(JsonObject object, String name) throws IOException {
-        JsonElement element = object.get(name);
-        if (element == null || !element.isJsonArray()) {
-            throw new IOException("Required array is missing or invalid: " + name);
-        }
-        return element.getAsJsonArray();
-    }
-
-    private static String requiredString(JsonObject object, String name) throws IOException {
-        JsonElement element = object.get(name);
-        if (element == null
-                || !element.isJsonPrimitive()
-                || !element.getAsJsonPrimitive().isString()) {
-            throw new IOException("Required string is missing or invalid: " + name);
-        }
-        return element.getAsString();
-    }
-
-    private static Optional<String> optionalString(JsonObject object, String name) throws IOException {
-        JsonElement element = object.get(name);
-        if (element == null || element.isJsonNull()) {
-            return Optional.empty();
-        }
-        if (!element.isJsonPrimitive() || !element.getAsJsonPrimitive().isString()) {
-            throw new IOException("Expected a string: " + name);
-        }
-        return Optional.of(element.getAsString());
-    }
-
-    private static int requiredInteger(JsonObject object, String name) throws IOException {
-        long value = requiredLong(object, name);
-        if (value < Integer.MIN_VALUE || value > Integer.MAX_VALUE) {
-            throw new IOException("Integer is out of range: " + name);
-        }
-        return (int) value;
-    }
-
-    private static long requiredLong(JsonObject object, String name) throws IOException {
-        JsonElement element = object.get(name);
-        if (element == null || !element.isJsonPrimitive()) {
-            throw new IOException("Required number is missing or invalid: " + name);
-        }
-        JsonPrimitive primitive = element.getAsJsonPrimitive();
-        if (!primitive.isNumber()) {
-            throw new IOException("Required number is missing or invalid: " + name);
-        }
-        try {
-            return new BigDecimal(primitive.getAsString()).longValueExact();
-        } catch (ArithmeticException | NumberFormatException exception) {
-            throw new IOException("Required number is not an integer: " + name, exception);
-        }
-    }
-
-    private static Instant requiredInstant(JsonObject object, String name) throws IOException {
-        try {
-            return Instant.parse(requiredString(object, name));
-        } catch (DateTimeParseException exception) {
-            throw new IOException("Required timestamp is invalid: " + name, exception);
-        }
-    }
-
-    private static <E extends Enum<E>> E requiredEnum(
-            JsonObject object,
-            String name,
-            Class<E> enumType) throws IOException {
-        try {
-            return Enum.valueOf(enumType, requiredString(object, name));
-        } catch (IllegalArgumentException exception) {
-            throw new IOException("Enum value is invalid: " + name, exception);
-        }
-    }
-
-    @FunctionalInterface
-    private interface IoSupplier<T> {
-        T get() throws IOException;
+                FIELDS.requiredEnum(encoded, "destination", DestinationType.class),
+                FIELDS.requiredEnum(encoded, "status", DestinationStatus.class),
+                FIELDS.optionalString(encoded, "artifactId"),
+                FIELDS.optionalString(encoded, "message"),
+                FIELDS.requiredEnum(encoded, "verificationStatus", VerificationStatus.class),
+                FIELDS.requiredEnum(encoded, "syncStatus", SyncStatus.class),
+                imports
+                        ? FIELDS.requiredEnum(encoded, "ownership", ArtifactOwnership.class)
+                        : ArtifactOwnership.MANAGED,
+                imports
+                        ? FIELDS.optionalString(encoded, "importSourceId").map(ImportSourceId::parse)
+                        : Optional.empty());
     }
 }

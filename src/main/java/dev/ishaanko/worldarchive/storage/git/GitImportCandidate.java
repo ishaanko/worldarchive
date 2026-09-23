@@ -3,14 +3,17 @@ package dev.ishaanko.worldarchive.storage.git;
 import dev.ishaanko.worldarchive.model.BackupManifest;
 import java.util.Objects;
 
-/** A metadata-validated WorldArchive commit pinned in a private fetched repository. */
+/** A WorldArchive snapshot commit found by an import preview and pinned in its private repository. */
 public record GitImportCandidate(
         BackupManifest manifest,
         String sourceRef,
         String commitId) {
     public GitImportCandidate {
         Objects.requireNonNull(manifest, "manifest");
-        sourceRef = Objects.requireNonNull(sourceRef, "sourceRef");
-        commitId = GitImportValidation.objectId(commitId);
+        Objects.requireNonNull(sourceRef, "sourceRef");
+        Objects.requireNonNull(commitId, "commitId");
+        if (!GitRepository.isObjectId(commitId)) {
+            throw new IllegalArgumentException("Imported Git commit is not a SHA-1 object ID");
+        }
     }
 }

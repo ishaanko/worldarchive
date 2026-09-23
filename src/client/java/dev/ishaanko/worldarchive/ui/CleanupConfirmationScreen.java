@@ -4,7 +4,10 @@ import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.storage.management.CleanupItem;
 import dev.ishaanko.worldarchive.storage.management.CleanupPlan;
 import dev.ishaanko.worldarchive.storage.management.CleanupRequest;
+import dev.ishaanko.worldarchive.ui.model.BackupWorldContext;
+import dev.ishaanko.worldarchive.ui.model.Paging;
 import dev.ishaanko.worldarchive.ui.model.ScreenGeometry;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -15,8 +18,13 @@ import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 
-/** Final explicit confirmation repeating every selected destructive action. */
+/**
+ * The final confirmation before a cleanup deletes anything. It lists every selected backup with
+ * the same text as the preview, and deletes only after the player checks that they reviewed them.
+ */
 final class CleanupConfirmationScreen extends Screen {
+    private static final int ROW_HEIGHT = 24;
+
     private static final int CONTENT_MIN = 240;
 
     private static final int CONTENT_MAX = 440;
@@ -37,11 +45,11 @@ final class CleanupConfirmationScreen extends Screen {
 
     private final List<CleanupItem> items;
 
+    private final ScreenCalls calls = new ScreenCalls(this);
+
     private boolean acknowledged;
 
     private boolean busy;
-
-    private boolean active;
 
     private int page;
 
@@ -58,15 +66,14 @@ final class CleanupConfirmationScreen extends Screen {
         this.world = Objects.requireNonNull(world, "world");
         this.facade = Objects.requireNonNull(facade, "facade");
         this.plan = Objects.requireNonNull(plan, "plan");
-        this.selected = Set.copyOf(Objects.requireNonNull(selected, "selected"));
+        this.selected = Set.copyOf(selected);
         items = plan.items().stream()
-                .filter(item -> selected.contains(item.backupId()))
+                .filter(item -> this.selected.contains(item.backupId()))
                 .toList();
     }
 
     @Override
     protected void init() {
-        active = true;
         int contentWidth = ScreenGeometry.contentWidth(width, CONTENT_MIN, CONTENT_MAX, CONTENT_MARGIN);
         int x = ScreenGeometry.centerX(width, contentWidth);
         addRenderableOnly(Widgets.title(font, x, 9, contentWidth, 20, title));
@@ -75,112 +82,57 @@ final class CleanupConfirmationScreen extends Screen {
                 31,
                 contentWidth,
                 18,
-                Component.literal(
-                                "These backups will be deleted from this computer. This cannot be undone.")
+                Component.literal("These backups will be deleted from this computer. This cannot be undone.")
                         .withStyle(ChatFormatting.RED),
                 font));
-        int pageSize = Math.max(1, Math.min(6, (height - 142) / 24));
-        int pageCount = Math.max(1, (items.size() + pageSize - 1) / pageSize);
-        page = Math.min(page, pageCount - 1);
-        int first = page * pageSize;
-        int limit = Math.min(items.size(), first + pageSize);
+        Paging paging = Paging.of(items.size(), Math.min(6, (height - 142) / ROW_HEIGHT), page);
+        page = paging.pageIndex();
         int y = 56;
-        for (int index = first; index < limit; index++) {
-            CleanupItem item = items.get(index);
-            String label = item.backupId().toString().substring(0, 8)
-                    + " · "
-                    + item.label().orElse("unlabeled")
-                    + " · "
-                    + (plan.protectedBackups().contains(item.backupId())
-                            ? "local Git copy only"
-                            : (item.removeGit() ? "Git " : "") + (item.removeZip() ? "ZIP" : ""));
+        for (CleanupItem item : paging.slice(items)) {
             StringWidget row = new StringWidget(
-                    x,
-                    y,
-                    contentWidth,
-                    20,
-                    Component.literal(label),
-                    font);
-            row.setTooltip(Tooltip.create(Component.literal(
-                    CleanupPreviewScreen.details(item))));
+                    x, y, contentWidth, 20, Component.literal(CleanupText.row(plan, item)), font);
+            row.setTooltip(Tooltip.create(CleanupText.details(item)));
             addRenderableOnly(row);
-            y += 24;
+            y += ROW_HEIGHT;
         }
-        addFooter(x, contentWidth, pageCount);
+        addFooter(x, contentWidth, paging);
     }
 
-    private void addFooter(int x, int contentWidth, int pageCount) {
-        int y = height - 52;
+    private void addFooter(int x, int contentWidth, Paging paging) {
         Button acknowledgement = Button.builder(
-                        Component.literal(acknowledged
-                                ? "[x] I reviewed every item"
-                                : "[ ] I reviewed every item"),
+                        Widgets.checkbox(acknowledged, Component.literal("I reviewed every item")),
                         ignored -> {
                             acknowledged = !acknowledged;
                             rebuildWidgets();
                         })
-                .bounds(x, y, contentWidth, 20)
+                .bounds(x, height - 52, contentWidth, 20)
                 .build();
         acknowledgement.active = !busy;
         addRenderableWidget(acknowledgement);
 
-        int gap = 4;
-        int width = (contentWidth - gap * 3) / 4;
-        int buttonY = height - 28;
-        Button previous = Button.builder(Component.literal("Previous"), ignored -> {
-                    page--;
-                    rebuildWidgets();
-                })
-                .bounds(x, buttonY, width, 20)
-                .build();
-        previous.active = !busy && page > 0;
-        addRenderableWidget(previous);
-        Button next = Button.builder(Component.literal("Next"), ignored -> {
-                    page++;
-                    rebuildWidgets();
-                })
-                .bounds(x + width + gap, buttonY, width, 20)
-                .build();
-        next.active = !busy && page + 1 < pageCount;
-        addRenderableWidget(next);
-        Button clean = Button.builder(
-                        Component.literal("Delete " + items.size() + " Backup(s)")
-                                .withStyle(ChatFormatting.RED),
+        List<Button> buttons = new ArrayList<>(Widgets.pageButtons(paging, index -> {
+            page = index;
+            rebuildWidgets();
+        }));
+        Button delete = Button.builder(
+                        Component.literal("Delete " + items.size() + " Backup(s)").withStyle(ChatFormatting.RED),
                         ignored -> apply())
-                .bounds(x + (width + gap) * 2, buttonY, width, 20)
                 .build();
-        clean.active = !busy && acknowledged;
-        addRenderableWidget(clean);
-        Button back = Button.builder(Component.literal("Back"), ignored -> onClose())
-                .bounds(x + (width + gap) * 3, buttonY, width, 20)
-                .build();
-        back.active = !busy;
-        addRenderableWidget(back);
+        delete.active = acknowledged;
+        buttons.add(delete);
+        buttons.add(Button.builder(Component.literal("Back"), ignored -> onClose()).build());
+        buttons.forEach(button -> button.active &= !busy);
+        Widgets.row(x, height - 28, contentWidth, buttons);
+        buttons.forEach(this::addRenderableWidget);
     }
 
     private void apply() {
         busy = true;
         rebuildWidgets();
-        facade.applyCleanup(new CleanupRequest(plan.confirmationToken(), selected))
-                .whenComplete((result, throwable) -> minecraft.execute(() -> {
-                    busy = false;
-                    if (!active) {
-                        return;
-                    }
-                    if (throwable != null || result == null) {
-                        minecraft.setScreenAndShow(new CleanupResultScreen(
-                                returnTo,
-                                world,
-                                null,
-                                StorageScreen.failure(throwable)));
-                    } else {
-                        minecraft.setScreenAndShow(new CleanupResultScreen(
-                                returnTo,
-                                world,
-                                result,
-                                null));
-                    }
-                }));
+        calls.start(
+                () -> facade.applyCleanup(new CleanupRequest(plan.confirmationToken(), selected)),
+                result -> minecraft.setScreenAndShow(CleanupResultScreen.succeeded(returnTo, world, plan, result)),
+                failure -> minecraft.setScreenAndShow(CleanupResultScreen.failed(returnTo, world, failure)));
     }
 
     @Override
@@ -193,11 +145,5 @@ final class CleanupConfirmationScreen extends Screen {
     @Override
     public boolean shouldCloseOnEsc() {
         return !busy;
-    }
-
-    @Override
-    public void removed() {
-        active = false;
-        super.removed();
     }
 }
