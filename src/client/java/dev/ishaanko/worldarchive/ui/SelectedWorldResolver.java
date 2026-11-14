@@ -4,6 +4,7 @@ import dev.ishaanko.worldarchive.ui.model.BackupWorldContext;
 import dev.ishaanko.worldarchive.ui.model.BackupWorldSelection;
 import java.util.function.Consumer;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.network.chat.Component;
 
 /**
  * Resolves the WorldArchive identity of a world picked in a vanilla world screen, for the
@@ -25,15 +26,15 @@ final class SelectedWorldResolver {
             BackupClientFacade facade,
             BackupWorldSelection selection,
             Consumer<BackupWorldContext> resolved,
-            Consumer<String> unavailable) {
+            Consumer<Component> unavailable) {
         calls.dropPending();
         calls.start(() -> facade.resolveWorld(selection), world -> {
             if (world.matches(selection)) {
                 resolved.accept(world);
             } else {
-                unavailable.accept("World identity did not match the selection");
+                unavailable.accept(Component.translatable("screen.worldarchive.select_world.mismatch"));
             }
-        }, failure -> unavailable.accept(FailureMessages.text(failure)));
+        }, failure -> unavailable.accept(Component.literal(FailureMessages.text(failure))));
     }
 
     /** Drops the answer of a request that is still running. */

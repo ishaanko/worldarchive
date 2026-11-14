@@ -29,15 +29,15 @@ public final class Widgets {
         return new StringWidget(x, y, width, height, title.copy().withStyle(ChatFormatting.BOLD), font);
     }
 
-    /** Plain left-aligned label built from a literal string, unstyled. */
+    /** Plain left-aligned label, unstyled. */
     public static StringWidget label(
             Font font,
             int x,
             int y,
             int width,
             int height,
-            String text) {
-        return new StringWidget(x, y, width, height, Component.literal(text), font);
+            Component text) {
+        return new StringWidget(x, y, width, height, text, font);
     }
 
     /** Muted (gray) status or footer line built from a literal string. */

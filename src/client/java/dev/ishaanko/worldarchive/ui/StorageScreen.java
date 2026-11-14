@@ -19,6 +19,7 @@ import net.minecraft.client.gui.components.MultiLineTextWidget;
 import net.minecraft.client.gui.components.StringWidget;
 import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.network.chat.CommonComponents;
 import net.minecraft.network.chat.Component;
 
 /**
@@ -43,7 +44,7 @@ final class StorageScreen extends Screen {
     private StorageOverview overview;
 
     private Component status =
-            Component.literal("Checking how much space backups use…").withStyle(ChatFormatting.GRAY);
+            Component.translatable("screen.worldarchive.storage.loading").withStyle(ChatFormatting.GRAY);
 
     private String limit = "";
 
@@ -62,7 +63,7 @@ final class StorageScreen extends Screen {
             Screen parent,
             BackupWorldContext world,
             BackupClientFacade facade) {
-        super(Component.literal("Storage · " + world.displayName()));
+        super(Component.translatable("screen.worldarchive.storage.title", world.displayName()));
         this.parent = Objects.requireNonNull(parent, "parent");
         this.world = Objects.requireNonNull(world, "world");
         this.facade = Objects.requireNonNull(facade, "facade");
@@ -83,7 +84,7 @@ final class StorageScreen extends Screen {
             addRenderableOnly(new MultiLineTextWidget(x, 42, status, font)
                     .setMaxWidth(contentWidth)
                     .setMaxRows(4));
-            addRenderableWidget(Button.builder(Component.literal("Back"), ignored -> onClose())
+            addRenderableWidget(Button.builder(CommonComponents.GUI_BACK, ignored -> onClose())
                     .bounds(x, height - 28, contentWidth, 20)
                     .build());
             return;
@@ -95,18 +96,21 @@ final class StorageScreen extends Screen {
 
     private void addUsage(int x, int contentWidth) {
         StoragePolicy policy = overview.policy();
-        String budgetLabel = policy.budgetEnabled()
-                ? "limit " + BackupText.bytes(policy.budgetBytes())
-                : "no limit set";
+        String used = BackupText.bytes(overview.totalBytes());
+        Component usage = policy.budgetEnabled()
+                ? Component.translatable("screen.worldarchive.storage.used", used, BackupText.bytes(policy.budgetBytes()))
+                : Component.translatable("screen.worldarchive.storage.used_no_limit", used);
         addRenderableOnly(new StringWidget(
                 x,
                 38,
                 contentWidth,
                 18,
-                Component.literal(BackupText.bytes(overview.totalBytes()) + " used · " + budgetLabel),
+                usage,
                 font));
-        Component breakdown = Component.literal("Git " + BackupText.bytes(overview.gitBytes())
-                + "  ·  ZIP " + BackupText.bytes(overview.zipBytes()));
+        Component breakdown = Component.translatable(
+                "screen.worldarchive.storage.breakdown",
+                BackupText.bytes(overview.gitBytes()),
+                BackupText.bytes(overview.zipBytes()));
         if (overview.unmeteredStoragePresent()) {
             breakdown = breakdown.copy()
                     .append("  ·  ")
@@ -119,11 +123,9 @@ final class StorageScreen extends Screen {
                 18,
                 breakdown.copy().withStyle(ChatFormatting.GRAY),
                 font);
-        breakdownWidget.setTooltip(Tooltip.create(Component.literal(
-                "Counts backup files stored on this computer. Git backups share data"
-                        + " between snapshots, so cleanup can free less space than shown.")));
+        breakdownWidget.setTooltip(Tooltip.create(Component.translatable("screen.worldarchive.storage.breakdown_tooltip")));
         addRenderableOnly(breakdownWidget);
-        Component forecast = Component.literal(forecast(overview.forecast()))
+        Component forecast = forecast(overview.forecast()).copy()
                 .withStyle(overview.cleanupReviewRecommended()
                         ? ChatFormatting.YELLOW
                         : ChatFormatting.GRAY);
@@ -132,28 +134,25 @@ final class StorageScreen extends Screen {
 
     private void addPolicyFields(int x, int contentWidth) {
         int labelWidth = Math.min(105, contentWidth / 3);
-        addRenderableOnly(Widgets.label(font, x, 106, labelWidth, 20, "Limit (GiB)"));
+        addRenderableOnly(Widgets.label(font, x, 106, labelWidth, 20, Component.translatable("screen.worldarchive.storage.limit")));
         field(x + labelWidth, 106, contentWidth - labelWidth, limit, value -> limit = value)
-                .setHint(Component.literal("Empty = no limit"));
+                .setHint(Component.translatable("screen.worldarchive.storage.limit_hint"));
 
         int fieldWidth = (contentWidth - Widgets.GAP * 2) / 3;
-        addCountField(x, fieldWidth, "Daily", daily, value -> daily = value);
-        addCountField(x + fieldWidth + Widgets.GAP, fieldWidth, "Weekly", weekly, value -> weekly = value);
-        addCountField(x + (fieldWidth + Widgets.GAP) * 2, fieldWidth, "Monthly", monthly, value -> monthly = value);
+        addCountField(x, fieldWidth, "screen.worldarchive.storage.daily", daily, value -> daily = value);
+        addCountField(x + fieldWidth + Widgets.GAP, fieldWidth, "screen.worldarchive.storage.weekly", weekly, value -> weekly = value);
+        addCountField(x + (fieldWidth + Widgets.GAP) * 2, fieldWidth, "screen.worldarchive.storage.monthly", monthly, value -> monthly = value);
         addRenderableOnly(new MultiLineTextWidget(
                         x,
                         184,
-                        Component.literal(
-                                        "How many daily, weekly, and monthly backups to keep."
-                                                + " Backups with a label are never deleted.")
-                                .withStyle(ChatFormatting.GRAY),
+                        Component.translatable("screen.worldarchive.storage.keep_help").withStyle(ChatFormatting.GRAY),
                         font)
                 .setMaxWidth(contentWidth)
                 .setMaxRows(2));
     }
 
-    private void addCountField(int x, int width, String label, String value, Consumer<String> update) {
-        addRenderableOnly(Widgets.label(font, x, 142, width, 16, label));
+    private void addCountField(int x, int width, String labelKey, String value, Consumer<String> update) {
+        addRenderableOnly(Widgets.label(font, x, 142, width, 16, Component.translatable(labelKey)));
         field(x, 159, width, value, update);
     }
 
@@ -173,16 +172,16 @@ final class StorageScreen extends Screen {
 
     private void addActions(int x, int contentWidth) {
         int y = height - 28;
-        Button save = Button.builder(Component.literal("Save Policy"), ignored -> save()).build();
+        Button save = Button.builder(Component.translatable("screen.worldarchive.storage.save"), ignored -> save()).build();
         save.active = !busy;
-        Button review = Button.builder(Component.literal("Review Cleanup"), ignored -> review()).build();
+        Button review = Button.builder(Component.translatable("screen.worldarchive.storage.review"), ignored -> review()).build();
         review.active = !busy && !edited && overview.policy().budgetEnabled();
         if (edited) {
             review.setTooltip(Tooltip.create(Component.translatable("screen.worldarchive.storage.save_first")));
         } else if (!overview.policy().budgetEnabled()) {
-            review.setTooltip(Tooltip.create(Component.literal("Set and save a storage limit first")));
+            review.setTooltip(Tooltip.create(Component.translatable("screen.worldarchive.storage.no_limit")));
         }
-        Button back = Button.builder(Component.literal("Back"), ignored -> onClose()).build();
+        Button back = Button.builder(CommonComponents.GUI_BACK, ignored -> onClose()).build();
         back.active = !busy;
         List<Button> buttons = List.of(save, review, back);
         Widgets.row(x, y, contentWidth, buttons);
@@ -213,22 +212,22 @@ final class StorageScreen extends Screen {
             monthly = Integer.toString(policy.monthlyCopies());
         }
         status = loaded.cleanupReviewRecommended()
-                ? Component.literal("Backups are close to the limit · review cleanup")
+                ? Component.translatable("screen.worldarchive.storage.near_limit")
                         .withStyle(ChatFormatting.YELLOW)
-                : Component.literal("Up to date").withStyle(ChatFormatting.GRAY);
+                : Component.translatable("screen.worldarchive.storage.up_to_date").withStyle(ChatFormatting.GRAY);
         rebuildWidgets();
     }
 
     private void save() {
         Optional<StoragePolicy> policy = StoragePolicyInput.parse(limit, daily, weekly, monthly);
         if (policy.isEmpty()) {
-            status = Component.literal("Enter a number for the limit and whole numbers for the keep counts")
+            status = Component.translatable("screen.worldarchive.storage.invalid")
                     .withStyle(ChatFormatting.RED);
             rebuildWidgets();
             return;
         }
         busy = true;
-        status = Component.literal("Saving…").withStyle(ChatFormatting.GRAY);
+        status = Component.translatable("screen.worldarchive.storage.saving").withStyle(ChatFormatting.GRAY);
         rebuildWidgets();
         calls.start(() -> facade.saveStoragePolicy(world.worldId(), policy.orElseThrow()), ignored -> {
             edited = false;
@@ -239,7 +238,7 @@ final class StorageScreen extends Screen {
     /** Prepares a cleanup plan from the saved policy; a plan left unused expires by itself. */
     private void review() {
         busy = true;
-        status = Component.literal("Preparing cleanup preview…").withStyle(ChatFormatting.GRAY);
+        status = Component.translatable("screen.worldarchive.storage.preparing").withStyle(ChatFormatting.GRAY);
         rebuildWidgets();
         calls.start(() -> facade.prepareCleanup(world.worldId()), this::showPlan, this::showFailure);
     }
@@ -255,15 +254,15 @@ final class StorageScreen extends Screen {
         rebuildWidgets();
     }
 
-    private static String forecast(StorageForecast forecast) {
+    private static Component forecast(StorageForecast forecast) {
         return switch (forecast.state()) {
-            case DISABLED -> "Set a storage limit to see a forecast";
-            case LEARNING -> "Watching how fast backups grow · ready after 7 days";
-            case STABLE -> "Backups are not growing";
-            case REACHED -> "Storage limit reached";
-            case ESTIMATED -> "About "
-                    + forecast.daysRemaining().orElseThrow()
-                    + " days until backups reach the limit";
+            case DISABLED -> Component.translatable("screen.worldarchive.storage.forecast.disabled");
+            case LEARNING -> Component.translatable("screen.worldarchive.storage.forecast.learning");
+            case STABLE -> Component.translatable("screen.worldarchive.storage.forecast.stable");
+            case REACHED -> Component.translatable("screen.worldarchive.storage.forecast.reached");
+            case ESTIMATED -> forecast.daysRemaining().orElseThrow() == 1
+                    ? Component.translatable("screen.worldarchive.storage.forecast.one_day")
+                    : Component.translatable("screen.worldarchive.storage.forecast.days", forecast.daysRemaining().orElseThrow());
         };
     }
 
