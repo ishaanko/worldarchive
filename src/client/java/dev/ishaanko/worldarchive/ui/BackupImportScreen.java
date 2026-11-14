@@ -13,6 +13,7 @@ import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.components.MultiLineTextWidget;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.network.chat.CommonComponents;
 import net.minecraft.network.chat.Component;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -49,7 +50,7 @@ public final class BackupImportScreen extends Screen {
     private CompletableFuture<FolderSelectionResult> picker;
 
     public BackupImportScreen(Screen parent, BackupClientFacade facade) {
-        super(Component.literal("Import Backups"));
+        super(Component.translatable("screen.worldarchive.import.title"));
         this.parent = Objects.requireNonNull(parent, "parent");
         this.facade = Objects.requireNonNull(facade, "facade");
         imports = facade.importService();
@@ -60,64 +61,64 @@ public final class BackupImportScreen extends Screen {
         int contentWidth = ScreenGeometry.contentWidth(width, CONTENT_MIN, CONTENT_MAX, CONTENT_MARGIN);
         int x = ScreenGeometry.centerX(width, contentWidth);
         addRenderableOnly(Widgets.title(font, x, 12, contentWidth, 20, title));
-        addRenderableOnly(Widgets.label(font, x, 34, contentWidth, 14, "From a repository"));
-        addRenderableOnly(Widgets.label(font, x, 48, contentWidth, 14, "Repository address"));
-        EditBox remoteBox = new EditBox(font, x, 62, contentWidth, 20, Component.literal("Repository address"));
+        addRenderableOnly(Widgets.label(font, x, 34, contentWidth, 14, Component.translatable("screen.worldarchive.import.from_repository")));
+        addRenderableOnly(Widgets.label(font, x, 48, contentWidth, 14, Component.translatable("screen.worldarchive.import.repository_address")));
+        EditBox remoteBox = new EditBox(font, x, 62, contentWidth, 20, Component.translatable("screen.worldarchive.import.repository_address"));
         remoteBox.setMaxLength(2048);
         remoteBox.setValue(remote);
         remoteBox.setResponder(value -> remote = value);
         remoteBox.active = !busy;
         addRenderableWidget(remoteBox);
         Button gitPreview = Button.builder(
-                        Component.literal("Find Backups from Repository"),
+                        Component.translatable("screen.worldarchive.import.find_in_repository"),
                         ignored -> preview(
                                 () -> imports.previewGit(remote),
-                                "Checking which backups can be imported..."))
+                                Component.translatable("screen.worldarchive.import.checking")))
                 .bounds(x, 86, contentWidth, 20).build();
         gitPreview.active = !busy && !remote.isBlank();
         addRenderableWidget(gitPreview);
-        addRenderableOnly(Widgets.label(font, x, 114, contentWidth, 14, "From a backup folder"));
-        Button chooseZip = Button.builder(Component.literal("Choose Backup Folder"), ignored -> chooseZipFolder())
+        addRenderableOnly(Widgets.label(font, x, 114, contentWidth, 14, Component.translatable("screen.worldarchive.import.from_folder")));
+        Button chooseZip = Button.builder(Component.translatable("screen.worldarchive.import.choose_folder"), ignored -> chooseZipFolder())
                 .bounds(x, 128, contentWidth, 20).build();
         chooseZip.active = !busy;
         addRenderableWidget(chooseZip);
-        addRenderableOnly(Widgets.label(font, x, 156, contentWidth, 14, "Already stored by WorldArchive?"));
+        addRenderableOnly(Widgets.label(font, x, 156, contentWidth, 14, Component.translatable("screen.worldarchive.import.from_stored")));
         Button rebuild = Button.builder(
-                        Component.literal("Find Stored Backups"),
+                        Component.translatable("screen.worldarchive.import.find_stored"),
                         ignored -> preview(
                                 imports::previewLocal,
-                                "Looking for backups already stored by WorldArchive..."))
+                                Component.translatable("screen.worldarchive.import.looking_stored")))
                 .bounds(x, 170, contentWidth, 20).build();
         rebuild.active = !busy;
         addRenderableWidget(rebuild);
         addRenderableOnly(new MultiLineTextWidget(x, 192, status, font)
                 .setMaxWidth(contentWidth).setMaxRows(2));
-        Button back = Button.builder(Component.literal("Back"), ignored -> onClose())
+        Button back = Button.builder(CommonComponents.GUI_BACK, ignored -> onClose())
                 .bounds(x + (contentWidth - 120) / 2, height - 28, 120, 20).build();
         back.active = !busy;
         addRenderableWidget(back);
     }
 
     private void chooseZipFolder() {
-        showBusy(Component.literal("Choose the folder containing your backup files...").withStyle(ChatFormatting.GRAY));
+        showBusy(Component.translatable("screen.worldarchive.import.picker_waiting").withStyle(ChatFormatting.GRAY));
         CompletableFuture<FolderSelectionResult> request = facade.pickFolder(
-                "Choose a folder containing WorldArchive backups");
+                Component.translatable("screen.worldarchive.import.picker_title").getString());
         picker = request;
         calls.start(() -> request, result -> {
             picker = null;
             switch (result) {
                 case FolderSelectionResult.Selected selected -> preview(
                         () -> imports.previewZip(selected.path()),
-                        "Checking which backups can be imported...");
+                        Component.translatable("screen.worldarchive.import.checking"));
                 case FolderSelectionResult.Cancelled ignored -> showStatus(
-                        Component.literal("No folder was selected").withStyle(ChatFormatting.GRAY));
+                        Component.translatable("screen.worldarchive.import.no_folder").withStyle(ChatFormatting.GRAY));
                 case FolderSelectionResult.Failed failed -> showStatus(
                         Component.literal(failed.message()).withStyle(ChatFormatting.RED));
             }
         }, failure -> {
             picker = null;
             LOGGER.warn("The backup folder picker failed: {}", FailureMessages.text(failure));
-            showStatus(Component.literal("The backup folder could not be opened").withStyle(ChatFormatting.RED));
+            showStatus(Component.translatable("screen.worldarchive.import.picker_failed").withStyle(ChatFormatting.RED));
         });
     }
 
@@ -125,8 +126,8 @@ public final class BackupImportScreen extends Screen {
      * Finds the backups a source holds and opens the preview. A preview that arrives after the
      * player left is discarded, so the import service can release what it holds for it.
      */
-    private void preview(Supplier<CompletionStage<ImportPreview>> operation, String waiting) {
-        showBusy(Component.literal(waiting).withStyle(ChatFormatting.YELLOW));
+    private void preview(Supplier<CompletionStage<ImportPreview>> operation, Component waiting) {
+        showBusy(waiting.copy().withStyle(ChatFormatting.YELLOW));
         calls.start(operation, found -> {
             busy = false;
             status = defaultStatus();
@@ -151,7 +152,7 @@ public final class BackupImportScreen extends Screen {
     }
 
     private static Component defaultStatus() {
-        return Component.literal("Choose where your existing backups are stored.").withStyle(ChatFormatting.GRAY);
+        return Component.translatable("screen.worldarchive.import.choose_source").withStyle(ChatFormatting.GRAY);
     }
 
     @Override

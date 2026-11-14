@@ -30,8 +30,7 @@ public final class EditWorldBackupIntegration {
 
     private static final String BACKUP_FOLDER_KEY = "selectWorld.edit.backupFolder";
 
-    private static final String NO_WORLD_MESSAGE =
-            "Open Edit World from the world list to use WorldArchive backups";
+    private static final String NO_WORLD_KEY = "screen.worldarchive.edit_world.no_world";
 
     /**
      * Vanilla keeps the Edit World widgets when it shows the screen again, so each screen keeps
@@ -69,10 +68,10 @@ public final class EditWorldBackupIntegration {
             }
         }
 
-        private void apply(boolean enabled, String tooltip) {
+        private void apply(boolean enabled, Component tooltip) {
             if (replacement != null) {
                 replacement.active = enabled;
-                replacement.setTooltip(Tooltip.create(Component.literal(tooltip)));
+                replacement.setTooltip(Tooltip.create(tooltip));
             }
         }
     }
@@ -106,16 +105,16 @@ public final class EditWorldBackupIntegration {
         private void install() {
             layoutPending = true;
             ScreenEvents.afterTick(screen).register(ignored -> afterTick());
-            backupSlot = takeOver(backupSlot, BACKUP_KEY, "Make Backup", this::promptManualBackup);
-            backupFolderSlot = takeOver(backupFolderSlot, BACKUP_FOLDER_KEY, "Backups", this::openBrowser);
+            backupSlot = takeOver(backupSlot, BACKUP_KEY, "screen.worldarchive.edit_world.make_backup", this::promptManualBackup);
+            backupFolderSlot = takeOver(backupFolderSlot, BACKUP_FOLDER_KEY, "screen.worldarchive.edit_world.backups", this::openBrowser);
             world = null;
             Optional<BackupWorldSelection> selection = SelectWorldBackupIntegration.lastSelection();
             if (selection.isEmpty()) {
                 resolver.cancel();
-                disable(NO_WORLD_MESSAGE);
+                disable(Component.translatable(NO_WORLD_KEY));
                 return;
             }
-            disable("Loading world identity…");
+            disable(Component.translatable("screen.worldarchive.select_world.loading"));
             resolver.resolve(facade, selection.orElseThrow(), this::enable, this::disable);
         }
 
@@ -123,7 +122,7 @@ public final class EditWorldBackupIntegration {
          * Puts a WorldArchive button where the vanilla button with {@code key} was. After the
          * first init the vanilla button is no longer in the widget list, so the slot remembers it.
          */
-        private Slot takeOver(Slot slot, String key, String label, Runnable action) {
+        private Slot takeOver(Slot slot, String key, String labelKey, Runnable action) {
             List<AbstractWidget> widgets = Screens.getWidgets(screen);
             Button vanillaButton = widgets.stream()
                     .filter(Button.class::isInstance)
@@ -140,7 +139,7 @@ public final class EditWorldBackupIntegration {
             Button replacement = slot.replacement();
             if (replacement == null || !widgets.contains(replacement)) {
                 ScreenRectangle bounds = vanillaButton.getRectangle();
-                replacement = Button.builder(Component.literal(label), ignored -> action.run())
+                replacement = Button.builder(Component.translatable(labelKey), ignored -> action.run())
                         .bounds(bounds.left(), bounds.top(), bounds.width(), bounds.height())
                         .build();
                 widgets.add(index < 0 || index > widgets.size() ? widgets.size() : index, replacement);
@@ -161,11 +160,11 @@ public final class EditWorldBackupIntegration {
 
         private void enable(BackupWorldContext context) {
             world = context;
-            backupSlot.apply(true, "Create a WorldArchive backup of " + context.displayName());
-            backupFolderSlot.apply(true, "Browse WorldArchive backups for " + context.displayName());
+            backupSlot.apply(true, Component.translatable("screen.worldarchive.edit_world.make_backup_tooltip", context.displayName()));
+            backupFolderSlot.apply(true, Component.translatable("screen.worldarchive.edit_world.backups_tooltip", context.displayName()));
         }
 
-        private void disable(String message) {
+        private void disable(Component message) {
             backupSlot.apply(false, message);
             backupFolderSlot.apply(false, message);
         }
@@ -173,20 +172,20 @@ public final class EditWorldBackupIntegration {
         private void promptManualBackup() {
             BackupWorldContext context = world;
             if (context == null) {
-                disable(NO_WORLD_MESSAGE);
+                disable(Component.translatable(NO_WORLD_KEY));
                 return;
             }
             minecraft.setScreenAndShow(new BackupCreateScreen(screen, label -> minecraft.setScreenAndShow(
                     BackupOperationScreen.backupResult(
                             screen,
                             BackupOperation.CREATE,
-                            "Creating backup",
+                            Component.translatable("screen.worldarchive.browser.creating").getString(),
                             listener -> facade.createManualBackup(context, label, listener)))));
         }
 
         private void openBrowser() {
             if (world == null) {
-                disable(NO_WORLD_MESSAGE);
+                disable(Component.translatable(NO_WORLD_KEY));
                 return;
             }
             minecraft.setScreenAndShow(new BackupBrowserScreen(screen, world, facade));

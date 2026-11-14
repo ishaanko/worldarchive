@@ -104,10 +104,10 @@ public final class SelectWorldBackupIntegration {
                     .map(WorldSelectionList.class::cast)
                     .findFirst()
                     .orElse(null);
-            backupsButton = Button.builder(Component.literal("Backups"), ignored -> openBrowser())
+            backupsButton = Button.builder(Component.translatable("screen.worldarchive.select_world.backups"), ignored -> openBrowser())
                     .bounds(Math.max(10, (width - 100) / 2), Math.max(5, height - 28), 100, 20)
                     .build();
-            disable("Select a valid world");
+            disable(Component.translatable("screen.worldarchive.select_world.no_world"));
             Screens.getWidgets(screen).add(backupsButton);
             ScreenEvents.afterTick(screen).register(ignored -> afterTick());
             relayoutBottomBar();
@@ -136,10 +136,10 @@ public final class SelectWorldBackupIntegration {
             lastSelection = selected;
             if (selected == null) {
                 resolver.cancel();
-                disable("Select a valid world");
+                disable(Component.translatable("screen.worldarchive.select_world.no_world"));
                 return;
             }
-            disable("Loading world identity…");
+            disable(Component.translatable("screen.worldarchive.select_world.loading"));
             resolver.resolve(facade, selected, this::enable, this::disable);
         }
 
@@ -160,17 +160,17 @@ public final class SelectWorldBackupIntegration {
             resolved = context;
             backupsButton.active = true;
             backupsButton.setTooltip(Tooltip.create(
-                    Component.literal("Browse backups for " + context.displayName())));
+                    Component.translatable("screen.worldarchive.select_world.tooltip", context.displayName())));
         }
 
-        private void disable(String message) {
+        private void disable(Component message) {
             backupsButton.active = false;
-            backupsButton.setTooltip(Tooltip.create(Component.literal(message)));
+            backupsButton.setTooltip(Tooltip.create(message));
         }
 
         private void openBrowser() {
             if (resolved == null) {
-                disable("Select a valid world");
+                disable(Component.translatable("screen.worldarchive.select_world.no_world"));
                 return;
             }
             minecraft.setScreenAndShow(new BackupBrowserScreen(screen, resolved, facade));

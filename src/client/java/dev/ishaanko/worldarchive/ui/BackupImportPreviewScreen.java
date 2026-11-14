@@ -17,6 +17,7 @@ import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.MultiLineTextWidget;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.network.chat.CommonComponents;
 import net.minecraft.network.chat.Component;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -65,7 +66,7 @@ public final class BackupImportPreviewScreen extends Screen {
             Screen parent,
             BackupClientFacade facade,
             ImportPreview preview) {
-        super(Component.literal("Choose Backups"));
+        super(Component.translatable("screen.worldarchive.import.preview_title"));
         this.parent = Objects.requireNonNull(parent, "parent");
         this.facade = Objects.requireNonNull(facade, "facade");
         this.preview = Objects.requireNonNull(preview, "preview");
@@ -81,7 +82,7 @@ public final class BackupImportPreviewScreen extends Screen {
         int contentWidth = ScreenGeometry.contentWidth(width, CONTENT_MIN, CONTENT_MAX, CONTENT_MARGIN);
         int x = ScreenGeometry.centerX(width, contentWidth);
         addRenderableOnly(Widgets.title(font, x, 12, contentWidth, 20, title));
-        addRenderableOnly(new MultiLineTextWidget(x, 34, Component.literal(summaryText()), font)
+        addRenderableOnly(new MultiLineTextWidget(x, 34, summaryText(), font)
                 .setMaxWidth(contentWidth).setMaxRows(2));
         Paging paging = Paging.of(preview.items().size(), Math.min(7, (height - 126) / ROW_HEIGHT), page);
         page = paging.pageIndex();
@@ -98,8 +99,9 @@ public final class BackupImportPreviewScreen extends Screen {
     private Button itemButton(ImportPreviewItem item, int x, int y, int contentWidth) {
         BackupId backupId = item.manifest().backupId();
         Component text = Component.literal(item.manifest().worldName()
-                + BackupText.SEPARATOR + BackupText.dateTime(item.manifest().createdAt())
-                + BackupText.SEPARATOR + disposition(item.disposition()));
+                        + BackupText.SEPARATOR + BackupText.dateTime(item.manifest().createdAt())
+                        + BackupText.SEPARATOR)
+                .append(disposition(item.disposition()));
         Button choice = Button.builder(
                         actionable(item) ? Widgets.checkbox(selected.contains(backupId), text) : text,
                         ignored -> {
@@ -120,10 +122,10 @@ public final class BackupImportPreviewScreen extends Screen {
             page = index;
             rebuildWidgets();
         }));
-        Button confirm = Button.builder(Component.literal("Import Selected"), ignored -> execute()).build();
+        Button confirm = Button.builder(Component.translatable("screen.worldarchive.import.import_selected"), ignored -> execute()).build();
         confirm.active = state == State.CHOOSING && !selected.isEmpty();
         buttons.add(confirm);
-        buttons.add(Button.builder(Component.literal("Back"), ignored -> onClose()).build());
+        buttons.add(Button.builder(CommonComponents.GUI_BACK, ignored -> onClose()).build());
         buttons.forEach(button -> button.active &= state != State.IMPORTING);
         Widgets.row(x, height - 28, contentWidth, buttons);
         buttons.forEach(this::addRenderableWidget);
@@ -131,7 +133,7 @@ public final class BackupImportPreviewScreen extends Screen {
 
     private void execute() {
         state = State.IMPORTING;
-        status = Component.literal("Importing the selected backups...").withStyle(ChatFormatting.YELLOW);
+        status = Component.translatable("screen.worldarchive.import.importing").withStyle(ChatFormatting.YELLOW);
         rebuildWidgets();
         calls.start(
                 () -> facade.importService().execute(preview.token(), Set.copyOf(selected)),
@@ -157,37 +159,42 @@ public final class BackupImportPreviewScreen extends Screen {
     }
 
     private void updateSelectionStatus() {
-        String issues = preview.issues().isEmpty()
-                ? ""
-                : "; " + preview.issues().size() + " could not be imported safely";
-        status = Component.literal(selected.size() + " backup(s) selected" + issues)
+        status = (preview.issues().isEmpty()
+                        ? Component.translatable("screen.worldarchive.import.selected", selected.size())
+                        : Component.translatable("screen.worldarchive.import.selected_issues", selected.size(), preview.issues().size()))
                 .withStyle(ChatFormatting.GRAY);
     }
 
-    private String summaryText() {
+    private Component summaryText() {
         long conflicts = preview.items().stream()
                 .filter(item -> item.disposition() == ImportDisposition.CONFLICT)
                 .count();
-        return sourceName() + ": " + preview.items().size() + " backup(s) found, "
-                + preview.actionableCount() + " available to import, "
-                + conflicts + " conflict(s)";
+        int found = preview.items().size();
+        return Component.translatable(
+                "screen.worldarchive.import.summary",
+                Component.translatable(sourceKey()),
+                found == 1
+                        ? Component.translatable("screen.worldarchive.import.found_one")
+                        : Component.translatable("screen.worldarchive.import.found_many", found),
+                preview.actionableCount(),
+                conflicts);
     }
 
-    private String sourceName() {
+    private String sourceKey() {
         return switch (preview.kind()) {
-            case GIT -> "Repository";
-            case ZIP -> "Backup folder";
-            case LOCAL_REBUILD -> "Stored backups";
+            case GIT -> "screen.worldarchive.import.source.git";
+            case ZIP -> "screen.worldarchive.import.source.zip";
+            case LOCAL_REBUILD -> "screen.worldarchive.import.source.stored";
         };
     }
 
-    private static String disposition(ImportDisposition disposition) {
-        return switch (disposition) {
-            case ADD -> "Ready to import";
-            case MERGE -> "Ready to update";
-            case UNCHANGED -> "Already imported";
-            case CONFLICT -> "Needs attention";
-        };
+    private static Component disposition(ImportDisposition disposition) {
+        return Component.translatable(switch (disposition) {
+            case ADD -> "screen.worldarchive.import.disposition.add";
+            case MERGE -> "screen.worldarchive.import.disposition.merge";
+            case UNCHANGED -> "screen.worldarchive.import.disposition.unchanged";
+            case CONFLICT -> "screen.worldarchive.import.disposition.conflict";
+        });
     }
 
     private static boolean actionable(ImportPreviewItem item) {
