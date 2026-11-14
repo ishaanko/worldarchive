@@ -73,7 +73,8 @@ final class BackupOperationScreen<T> extends Screen {
 
     private State state = State.RUNNING;
 
-    private Presentation presentation = Presentation.waiting(Component.literal("Queued"));
+    private Presentation presentation =
+            Presentation.waiting(Component.translatable("screen.worldarchive.operation.queued"));
 
     /** Where the operation stands; the buttons, Esc and the progress bar follow it. */
     private enum State {
@@ -140,9 +141,11 @@ final class BackupOperationScreen<T> extends Screen {
             Consumer<RestoreBackupResult> restored) {
         return new BackupOperationScreen<>(parent, BackupOperation.RESTORE, title, starter, result ->
                 Presentation.finished(
-                        Component.literal("Restore completed"),
+                        Component.translatable("screen.worldarchive.operation.restored"),
                         ChatFormatting.GREEN,
-                        Presentation.lines(List.of("Created " + result.restoredWorldDirectory().getFileName()))),
+                        List.of(Component.translatable(
+                                "screen.worldarchive.operation.restored_detail",
+                                result.restoredWorldDirectory().getFileName().toString()))),
                 restored);
     }
 
@@ -190,16 +193,16 @@ final class BackupOperationScreen<T> extends Screen {
     private void addButtons() {
         int buttonY = Math.min(height - 28, height / 2 + 72);
         if (state == State.RETRYABLE) {
-            addRenderableWidget(Button.builder(Component.literal("Retry"), ignored -> start())
+            addRenderableWidget(Button.builder(Component.translatable("screen.worldarchive.operation.retry"), ignored -> start())
                     .bounds(width / 2 - 123, buttonY, 120, 20)
                     .build());
-            addRenderableWidget(Button.builder(Component.literal("Done"), ignored -> onClose())
+            addRenderableWidget(Button.builder(CommonComponents.GUI_DONE, ignored -> onClose())
                     .bounds(width / 2 + 3, buttonY, 120, 20)
                     .build());
             return;
         }
         Button button = state == State.FINISHED
-                ? Button.builder(Component.literal("Done"), ignored -> onClose()).build()
+                ? Button.builder(CommonComponents.GUI_DONE, ignored -> onClose()).build()
                 : runningButton();
         button.setRectangle(150, 20, width / 2 - 75, buttonY);
         addRenderableWidget(button);
@@ -209,7 +212,7 @@ final class BackupOperationScreen<T> extends Screen {
     private Button runningButton() {
         Optional<CancelText> cancel = cancelText(operation);
         if (cancel.isEmpty()) {
-            Button wait = Button.builder(Component.literal("Please wait…"), ignored -> {
+            Button wait = Button.builder(Component.translatable("screen.worldarchive.operation.wait"), ignored -> {
             }).build();
             wait.active = false;
             return wait;
@@ -251,7 +254,7 @@ final class BackupOperationScreen<T> extends Screen {
         progress = null;
         state = State.RUNNING;
         if (attempt != null) {
-            presentation = Presentation.waiting(Component.literal("Saving the world before retry…"));
+            presentation = Presentation.waiting(Component.translatable("screen.worldarchive.operation.retrying"));
             rebuildIfInitialized();
         }
         attempt = calls.start(() -> starter.start(update -> offerProgress(slot, update)), this::succeed, this::fail)
@@ -318,14 +321,14 @@ final class BackupOperationScreen<T> extends Screen {
                             List.of()));
         } else if (state == State.RETRYABLE) {
             presentation = Presentation.finished(
-                    Component.literal("Operation failed"),
+                    Component.translatable("screen.worldarchive.operation.failed"),
                     ChatFormatting.RED,
-                    Presentation.lines(List.of(
-                            FailureMessages.text(failure),
-                            "The world changed while it was being copied. Wait a moment, then choose Retry.")));
+                    List.of(
+                            Component.literal(FailureMessages.text(failure)),
+                            Component.translatable("screen.worldarchive.operation.world_changed")));
         } else {
             presentation = Presentation.finished(
-                    Component.literal("Operation failed"),
+                    Component.translatable("screen.worldarchive.operation.failed"),
                     ChatFormatting.RED,
                     Presentation.lines(List.of(FailureMessages.text(failure))));
         }

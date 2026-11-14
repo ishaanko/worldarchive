@@ -25,11 +25,11 @@ final class BackupRowText {
     }
 
     static Component tooltip(BackupRow row) {
-        StringBuilder text = new StringBuilder(title(row)).append('\n').append(storedIn(row));
-        remote(row).ifPresent(remote -> text.append('\n').append(remote));
-        text.append("\nSize: ").append(BackupText.bytes(row.logicalSizeBytes()));
-        text.append("\nBackup ID: ").append(row.backupId());
-        return Component.literal(text.toString());
+        StringBuilder tooltip = new StringBuilder(title(row)).append('\n').append(storedIn(row));
+        remote(row).ifPresent(remote -> tooltip.append('\n').append(remote));
+        tooltip.append('\n').append(text("screen.worldarchive.row.size", BackupText.bytes(row.logicalSizeBytes())));
+        tooltip.append('\n').append(text("screen.worldarchive.row.backup_id", row.backupId().toString()));
+        return Component.literal(tooltip.toString());
     }
 
     /** The row as one line of a delete prompt: its title and which copies it has. */
@@ -39,9 +39,9 @@ final class BackupRowText {
 
     private static String trigger(BackupRow row) {
         return switch (row.trigger()) {
-            case MANUAL -> "Manual";
-            case WORLD_EXIT -> "World exit";
-            case SCHEDULED -> "Scheduled";
+            case MANUAL -> text("screen.worldarchive.row.trigger_manual");
+            case WORLD_EXIT -> text("screen.worldarchive.row.trigger_world_exit");
+            case SCHEDULED -> text("screen.worldarchive.row.trigger_scheduled");
         };
     }
 
@@ -49,12 +49,12 @@ final class BackupRowText {
         boolean git = row.git().durable();
         boolean zip = row.zip().durable();
         if (git && zip) {
-            return "Saved in Git and ZIP";
+            return text("screen.worldarchive.row.saved_git_and_zip");
         }
         if (git) {
-            return "Saved in Git";
+            return text("screen.worldarchive.row.saved_git");
         }
-        return zip ? "Saved as ZIP" : "Backup unavailable";
+        return text(zip ? "screen.worldarchive.row.saved_zip" : "screen.worldarchive.row.unavailable");
     }
 
     private static String copies(BackupRow row) {
@@ -81,7 +81,7 @@ final class BackupRowText {
         };
     }
 
-    private static String text(String key) {
-        return Component.translatable(key).getString();
+    private static String text(String key, Object... args) {
+        return Component.translatable(key, args).getString();
     }
 }

@@ -19,28 +19,32 @@ final class CleanupText {
     static String row(CleanupPlan plan, CleanupItem item) {
         return BackupText.name(item.createdAt(), item.label())
                 + BackupText.SEPARATOR + action(plan, item)
-                + BackupText.SEPARATOR + item.changedFileCount() + " changed";
+                + BackupText.SEPARATOR + text("screen.worldarchive.cleanup.row_changed", item.changedFileCount());
     }
 
     /** Where the item's artifacts are and what the player loses; shown as the row's tooltip. */
     static Component details(CleanupItem item) {
         List<String> lines = new ArrayList<>();
-        item.gitRef().ifPresent(ref -> lines.add("Git ref: " + ref));
-        item.zipArtifactId().ifPresent(id -> lines.add("ZIP: " + id));
-        lines.add("Frees about " + BackupText.bytes(item.estimatedReclaimableBytes()));
+        item.gitRef().ifPresent(ref -> lines.add(text("screen.worldarchive.cleanup.git_ref", ref)));
+        item.zipArtifactId().ifPresent(id -> lines.add(text("screen.worldarchive.cleanup.zip_file", id)));
+        lines.add(text("screen.worldarchive.cleanup.frees", BackupText.bytes(item.estimatedReclaimableBytes())));
         lines.add(item.removesRestorePoint()
-                ? "You cannot restore this backup after cleanup."
-                : "Another copy of this backup still exists.");
+                ? text("screen.worldarchive.cleanup.last_copy")
+                : text("screen.worldarchive.cleanup.other_copy"));
         return Component.literal(String.join("\n", lines));
     }
 
     private static String action(CleanupPlan plan, CleanupItem item) {
         if (plan.protectedBackups().contains(item.backupId())) {
-            return "local Git copy only";
+            return text("screen.worldarchive.cleanup.action_local_git");
         }
         if (item.removeGit() && item.removeZip()) {
-            return "delete Git + ZIP";
+            return text("screen.worldarchive.cleanup.action_git_zip");
         }
-        return item.removeGit() ? "delete Git" : "delete ZIP";
+        return text(item.removeGit() ? "screen.worldarchive.cleanup.action_git" : "screen.worldarchive.cleanup.action_zip");
+    }
+
+    private static String text(String key, Object... args) {
+        return Component.translatable(key, args).getString();
     }
 }

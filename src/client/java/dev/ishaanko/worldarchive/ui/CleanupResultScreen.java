@@ -42,7 +42,7 @@ final class CleanupResultScreen extends Screen {
     private final Component message;
 
     private CleanupResultScreen(Screen parent, BackupWorldContext world, Component message) {
-        super(Component.literal("Cleanup Result"));
+        super(Component.translatable("screen.worldarchive.cleanup.result_title"));
         this.parent = Objects.requireNonNull(parent, "parent");
         this.world = Objects.requireNonNull(world, "world");
         this.message = Objects.requireNonNull(message, "message");
@@ -96,7 +96,7 @@ final class CleanupResultScreen extends Screen {
                 .setMaxWidth(contentWidth)
                 .setMaxRows(12));
         addRenderableWidget(Button.builder(
-                        Component.literal("Back to " + world.displayName()),
+                        Component.translatable("screen.worldarchive.cleanup.back_to", world.displayName()),
                         ignored -> onClose())
                 .bounds(x, height - 34, contentWidth, 20)
                 .build());
