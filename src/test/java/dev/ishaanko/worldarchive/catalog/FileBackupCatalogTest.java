@@ -286,6 +286,25 @@ final class FileBackupCatalogTest {
                 catalog.find(finished.manifest().backupId()).orElseThrow().result().destinations());
     }
 
+    /** The other instance can sync and verify the copy it listed before the backup records itself. */
+    @Test
+    void aFinishedBackupKeepsListedCopiesItLacksOrThatChangedSinceTheyWereListed() throws IOException {
+        Path file = temporaryDirectory.resolve("catalog.json");
+        FileBackupCatalog catalog = new FileBackupCatalog(file);
+        BackupRecord finished = record(WorldId.create(), "2026-07-17T10:00:00Z");
+        String ref = "refs/heads/worldarchive/" + finished.manifest().worldId() + "/" + finished.manifest().backupId();
+        DestinationResult synced = DestinationResult.success(DestinationType.GIT, ref)
+                .withSync(SyncStatus.SYNCED).withVerification(VerificationStatus.VERIFIED);
+        DestinationResult zip = finished.result().destinations().getFirst();
+        catalog.mergeAll(List.of(withDestinations(finished, List.of(synced, zip))));
+
+        catalog.add(withDestinations(finished,
+                List.of(DestinationResult.pendingSync(DestinationType.GIT, ref, "The remote was not reached"))));
+
+        assertEquals(List.of(synced, zip), new FileBackupCatalog(file)
+                .find(finished.manifest().backupId()).orElseThrow().result().destinations());
+    }
+
     @Test
     void mergesOnlyAddWhatTheCatalogLacks() throws IOException {
         FileBackupCatalog catalog = new FileBackupCatalog(temporaryDirectory.resolve("merge.json"));

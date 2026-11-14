@@ -20,9 +20,10 @@ import java.util.function.UnaryOperator;
  */
 public interface BackupCatalog {
     /**
-     * Adds the record of a finished backup. When the catalog already lists the same backup, the
-     * record's destinations replace the listed ones of the same kind and the others are kept; a
-     * record of the same ID with a different manifest is refused.
+     * Adds the record of a finished backup. When the catalog already lists the same backup, a
+     * listed copy stays if the record has none of its kind or if a sync or a verify changed it
+     * since it was listed; the record's destinations replace the rest. A record of the same ID
+     * with a different manifest is refused.
      */
     void add(BackupRecord record) throws IOException;
 

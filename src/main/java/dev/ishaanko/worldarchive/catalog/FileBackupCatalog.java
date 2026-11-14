@@ -159,15 +159,22 @@ public final class FileBackupCatalog implements BackupCatalog {
 
     /**
      * The record a finished backup adds over one already listed for it, such as when another game
-     * instance's rebuild listed a copy first: the backup's own outcome of each destination wins,
-     * and a copy listed only before is kept.
+     * instance's rebuild listed a copy first. A copy listed only before is kept, and so is a listed
+     * copy that a sync or a verify changed since; the backup's own outcome replaces the rest.
      */
     private static BackupRecord overlay(BackupRecord existing, BackupRecord added) {
         Map<DestinationType, DestinationResult> destinations = new EnumMap<>(DestinationType.class);
         existing.result().destinations().forEach(destination -> destinations.put(destination.destination(), destination));
-        added.result().destinations().forEach(destination -> destinations.put(destination.destination(), destination));
+        added.result().destinations().forEach(own -> destinations.merge(own.destination(), own,
+                (listed, finished) -> changedSinceListed(listed) ? listed : finished));
         return new BackupRecord(added.manifest(), new BackupResult(added.manifest().backupId(),
                 added.manifest().worldId(), List.copyOf(destinations.values()), added.result().completedAt()));
+    }
+
+    /** True for a listed copy that no longer reads as a rebuild first lists it. */
+    private static boolean changedSinceListed(DestinationResult listed) {
+        return listed.isDurable() && !listed.equals(
+                DestinationResult.success(listed.destination(), listed.artifactId().orElseThrow()));
     }
 
     private static void requireSameIdentity(
