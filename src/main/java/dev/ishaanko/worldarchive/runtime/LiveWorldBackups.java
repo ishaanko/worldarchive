@@ -3,6 +3,7 @@ package dev.ishaanko.worldarchive.runtime;
 import dev.ishaanko.worldarchive.core.CaptureKind;
 import dev.ishaanko.worldarchive.core.CreateBackupRequest;
 import dev.ishaanko.worldarchive.core.PreparedBackup;
+import dev.ishaanko.worldarchive.core.WorldOperationGate;
 import dev.ishaanko.worldarchive.model.BackupResult;
 import dev.ishaanko.worldarchive.model.BackupTrigger;
 import dev.ishaanko.worldarchive.model.ProgressListener;
@@ -31,8 +32,9 @@ import org.slf4j.LoggerFactory;
  * Backs up the world the integrated server runs. A manual or scheduled backup of the open world
  * asks the server to save on its own thread, then copies the world on a worker while autosave is
  * paused. A world-exit backup copies the world on a worker after the server's final save, when
- * nothing writes to it any more. The Fabric adapter reports the server's events here through
- * {@link LiveServer}; every event method returns at once, and a backup problem is reported to the
+ * nothing writes to it any more; a server that opens the world again waits until that copy is
+ * done. The Fabric adapter reports the server's events here through {@link LiveServer}; every
+ * event method but {@link #starting} returns at once, and a backup problem is reported to the
  * player instead of thrown.
  *
  * <p>A scheduled backup is skipped without a word when the player turned it off, when a backup of
@@ -47,6 +49,9 @@ public final class LiveWorldBackups {
     private static final long LAST_RETRY_NANOS = Duration.ofSeconds(30).toNanos();
 
     private static final int NAME_LIMIT = 120;
+
+    /** How long a world that opens waits for a backup that still copies it; the copy then sees the writes and fails. */
+    private static final Duration START_WAIT = Duration.ofMinutes(2);
 
     private final ServiceGraph graph;
 
@@ -102,6 +107,23 @@ public final class LiveWorldBackups {
         NOT_OPEN,
         LOADING,
         READY
+    }
+
+    /**
+     * The server is about to load its world; server thread. A world-exit backup of the same world
+     * may still copy it, as when the player opens the world again right after leaving it, and the
+     * server writes the world as it loads. The server waits here until the copy is done; the game
+     * shows its loading screen meanwhile.
+     */
+    public void starting(LiveServer server) {
+        Path world = server.worldDirectory();
+        try {
+            if (!graph.captures().awaitNotCopying(world, START_WAIT)) {
+                LOGGER.warn("The world opens while a backup still copies it; that backup will likely fail");
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     /** The server finished starting a world; server thread. */
@@ -434,9 +456,17 @@ public final class LiveWorldBackups {
             return;
         }
         exitBackups.incrementAndGet();
+        // Counted as being copied from here on, so a server that opens the world again waits even
+        // before the worker gets to the copy.
+        WorldOperationGate.Permit copying = graph.captures().markCopying(ended.selection.worldDirectory());
         try {
-            graph.executor().execute(() -> runExitBackup(ended, permit));
+            graph.executor().execute(() -> {
+                try (copying) {
+                    runExitBackup(ended, permit);
+                }
+            });
         } catch (RejectedExecutionException shuttingDown) {
+            copying.close();
             exitBackups.decrementAndGet();
             permit.close();
             reports.exitNotMade(BackgroundNotices.exitNotMade("WorldArchive is shutting down"));

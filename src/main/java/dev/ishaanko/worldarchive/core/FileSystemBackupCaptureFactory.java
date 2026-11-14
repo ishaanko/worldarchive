@@ -25,6 +25,7 @@ import java.time.DateTimeException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -32,6 +33,8 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Copies a world into a private folder outside it and proves the copy matches the world. A live
@@ -59,6 +62,9 @@ public final class FileSystemBackupCaptureFactory {
     private final Optional<GameVersionStamp> gameVersion;
 
     private final SourceCaptureObserver observer;
+
+    /** The real folders of the worlds being copied, and how many captures copy each. Guarded by itself. */
+    private final Map<Path, Integer> copying = new HashMap<>();
 
     /**
      * Captures go below {@code captureDirectory}, which must be outside every world. Each manifest
@@ -113,6 +119,59 @@ public final class FileSystemBackupCaptureFactory {
         } catch (IOException | InterruptedException | RuntimeException | Error failure) {
             lease.closeAfterFailure(failure);
             throw failure;
+        }
+    }
+
+    /**
+     * Waits until no capture copies {@code world} or waits to copy it, for at most {@code limit};
+     * false when the limit passed first. The game calls it before a server loads a world: the
+     * server saves the world as it starts, and a capture that still copies the world would see
+     * those writes.
+     */
+    public boolean awaitNotCopying(Path world, Duration limit) throws InterruptedException {
+        Path real = copyKey(world);
+        long deadline = System.nanoTime() + limit.toNanos();
+        synchronized (copying) {
+            while (copying.containsKey(real)) {
+                long left = deadline - System.nanoTime();
+                if (left <= 0) {
+                    return false;
+                }
+                TimeUnit.NANOSECONDS.timedWait(copying, left);
+            }
+            return true;
+        }
+    }
+
+    /**
+     * Counts the world as being copied until the returned permit is closed. The coordinator holds
+     * it from before a capture waits for its turn until the capture ends, and a world-exit backup
+     * holds one from the moment the world stops.
+     */
+    public WorldOperationGate.Permit markCopying(Path worldDirectory) {
+        Path world = copyKey(worldDirectory);
+        synchronized (copying) {
+            copying.merge(world, 1, Integer::sum);
+        }
+        AtomicBoolean closed = new AtomicBoolean();
+        return () -> {
+            if (closed.compareAndSet(false, true)) {
+                synchronized (copying) {
+                    if (copying.merge(world, -1, Integer::sum) == 0) {
+                        copying.remove(world);
+                        copying.notifyAll();
+                    }
+                }
+            }
+        };
+    }
+
+    /** The real folder, so a link or another letter case on Windows names the same world. */
+    private static Path copyKey(Path world) {
+        try {
+            return world.toRealPath();
+        } catch (IOException missing) {
+            return world.toAbsolutePath().normalize();
         }
     }
 

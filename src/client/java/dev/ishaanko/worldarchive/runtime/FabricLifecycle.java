@@ -36,6 +36,7 @@ final class FabricLifecycle {
     }
 
     void register() {
+        ServerLifecycleEvents.SERVER_STARTING.register(server -> run(server, "opening the world", live::starting));
         ServerLifecycleEvents.SERVER_STARTED.register(this::serverStarted);
         ServerLifecycleEvents.SERVER_STOPPING.register(server -> run(server, "closing the world", live::stopping));
         ServerLifecycleEvents.AFTER_SAVE.register((server, flush, force) ->
