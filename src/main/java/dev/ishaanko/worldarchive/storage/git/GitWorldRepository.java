@@ -30,6 +30,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -126,7 +127,7 @@ final class GitWorldRepository {
                     return remote.isPresent() ? local.withSync(SyncStatus.NOT_SYNCED) : local;
                 }
                 progress.report(OperationPhase.PUBLISHING, "Uploading the Git snapshot");
-                return upload(snapshot, main, day);
+                return upload(snapshot, () -> main, day);
             });
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
@@ -315,7 +316,7 @@ final class GitWorldRepository {
             // A repository that an older version wrote gets the current settings before it uploads.
             repository.prepare();
             LocalDate today = LocalDate.now(repository.settings().clock());
-            return upload(snapshot, mainBranch(snapshot.committedAt()), today);
+            return upload(snapshot, () -> mainAfterSync(snapshot), today);
         });
     }
 
@@ -438,10 +439,32 @@ final class GitWorldRepository {
         }
     }
 
+    /**
+     * Whether a Sync moves {@code main} to the snapshot: only when the remote holds no newer
+     * snapshot of this repository. A newer snapshot that never uploaded does not count, or
+     * {@code main} would stay behind every backup the remote has.
+     */
+    private GitRemote.MainBranch mainAfterSync(GitSnapshot snapshot)
+            throws IOException, InterruptedException, GitStorageException {
+        Set<BackupId> uploaded = remote.orElseThrow().branches().snapshots().stream()
+                .map(GitRemote.Branch::backupId)
+                .collect(Collectors.toSet());
+        return snapshots().stream().anyMatch(other -> uploaded.contains(other.backupId())
+                        && other.committedAt().isAfter(snapshot.committedAt()))
+                ? GitRemote.MainBranch.KEEP
+                : GitRemote.MainBranch.MOVE;
+    }
+
+    /** Decides what an upload does with {@code main}; asking the remote can fail like the upload itself. */
+    @FunctionalInterface
+    private interface MainChoice {
+        GitRemote.MainBranch decide() throws IOException, InterruptedException, GitStorageException;
+    }
+
     /** Uploads a published snapshot and records the day; a failed or cancelled upload leaves it pending. */
-    private DestinationResult upload(GitSnapshot snapshot, GitRemote.MainBranch main, LocalDate day) {
+    private DestinationResult upload(GitSnapshot snapshot, MainChoice main, LocalDate day) {
         try {
-            remote.orElseThrow().upload(snapshot, main);
+            remote.orElseThrow().upload(snapshot, main.decide());
             recordUpload(day);
             return DestinationResult.success(DestinationType.GIT, snapshot.refName()).withSync(SyncStatus.SYNCED);
         } catch (InterruptedException exception) {

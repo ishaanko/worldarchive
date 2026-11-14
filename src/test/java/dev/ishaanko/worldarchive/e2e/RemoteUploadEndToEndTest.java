@@ -91,6 +91,24 @@ class RemoteUploadEndToEndTest {
         assertTrue(onRemote(remote).isEmpty());
     }
 
+    /** A newer backup that stayed here must not keep the remote's main behind the backups it has. */
+    @Test
+    void syncMovesMainToTheNewestBackupTheRemoteHolds() throws Exception {
+        Path remote = bareRepository("main.git");
+        TestWorld world = TestWorld.create(root.resolve("saves"), "Main");
+        engine = start(config(world, remote, RemoteUpload.ONLY_WITH_SYNC));
+        BackupResult older = backup(world, 1);
+        engine.clock.advance(Duration.ofHours(1));
+        BackupResult newer = backup(world, 2);
+
+        await(engine.recovery.syncBackup(older.backupId(), ProgressListener.NO_OP));
+        assertEquals(branchCommit(remote, older.backupId()), remoteGit(remote, "rev-parse", "refs/heads/main").strip());
+
+        await(engine.recovery.syncBackup(newer.backupId(), ProgressListener.NO_OP));
+        await(engine.recovery.syncBackup(older.backupId(), ProgressListener.NO_OP));
+        assertEquals(branchCommit(remote, newer.backupId()), remoteGit(remote, "rev-parse", "refs/heads/main").strip());
+    }
+
     @Test
     void deletingABackupThatNeverUploadedLeavesTheRemoteAsItWas() throws Exception {
         Path remote = bareRepository("kept.git");
@@ -145,6 +163,15 @@ class RemoteUploadEndToEndTest {
                 .filter(line -> !line.isBlank())
                 .map(ref -> BackupId.parse(ref.substring(ref.length() - 36)))
                 .toList();
+    }
+
+    private static String branchCommit(Path remote, BackupId backupId) throws Exception {
+        return remoteGit(remote, "for-each-ref", "--format=%(objectname) %(refname)", "refs/heads/backups/")
+                .lines()
+                .filter(line -> line.endsWith(backupId.toString()))
+                .map(line -> line.substring(0, line.indexOf(' ')))
+                .findFirst()
+                .orElseThrow();
     }
 
     private Path bareRepository(String name) throws Exception {
