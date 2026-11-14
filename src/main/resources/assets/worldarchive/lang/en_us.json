@@ -158,6 +158,7 @@
     "screen.worldarchive.runtime.busy": "A backup of this world is already running. Try again when it finishes.",
     "screen.worldarchive.runtime.world_loading": "This world is still loading. Try again in a moment.",
     "screen.worldarchive.runtime.world_not_saved": "The settings could not record this world's folder. Open WorldArchive settings to check them.",
+    "screen.worldarchive.runtime.quit_wait": "WorldArchive is finishing a backup. Minecraft closes as soon as it is done.",
     "screen.worldarchive.notice.chat": "WorldArchive: %s",
     "screen.worldarchive.notice.exit_started": "Creating backup... Keep Minecraft open until it finishes.",
     "screen.worldarchive.notice.exit_done": "Backup finished. You can safely quit Minecraft.",
