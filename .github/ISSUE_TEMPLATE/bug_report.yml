@@ -88,7 +88,7 @@ body:
     attributes:
       label: WorldArchive version
       description: Mod version, release tag, or commit SHA.
-      placeholder: 0.3.3 or main @ abc1234
+      placeholder: 0.4.0 or main @ abc1234
     validations:
       required: true
 

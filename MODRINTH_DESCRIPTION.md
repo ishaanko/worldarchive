@@ -1,45 +1,40 @@
 # WorldArchive
 
-WorldArchive is a Fabric client mod for dependable backups of single-player Minecraft worlds. Create incremental Git snapshots, standalone ZIP archives, or both, then verify and restore any backup as a new world without modifying the original.
+WorldArchive backs up your single-player Minecraft worlds, as incremental Git
+snapshots, standalone ZIP archives, or both. A restore always creates a new
+world, so your original world is never touched.
 
 ## Features
 
-- Manual backups from the backup browser
-- Automatic backups when leaving a world
-- Optional scheduled backups every 30 minutes by default, skipped while the game is paused
-- Independent Git and ZIP destinations
-- Incremental Git snapshots with optional Git LFS and per-world remote sync
-- ZIP archives with SHA-256 integrity metadata, usable inside OneDrive, Google Drive, or similar synced folders
-- Per-world destination settings, ZIP folder overrides, and per-world pausing
-- Backup labels, verification, synchronization, and manual deletion
-- Per-world storage overview with growth tracking and budget forecasts
-- Guided cleanup with a full preview; labeled backups are always kept
-- Import and recovery of existing WorldArchive Git histories and ZIP folders
-- Safe, copy-only restores to uniquely named new worlds
-- Partial-success reporting when one destination fails
-- Every backup records the Minecraft version it was made with, and restores warn across versions
-- The Edit World backup buttons create and browse WorldArchive backups instead of vanilla zip copies
+- Backups on demand, on world exit, or every 30 minutes on a schedule
+- One Git repository per world, with an optional remote to push to
+- ZIP archives with SHA-256 checksums, fine to keep in OneDrive or Google Drive
+- Labels, verification, and a storage screen that forecasts disk use
+- Guided cleanup with a preview; labeled backups are always kept
+- Import of Git repositories and ZIP folders after a reinstall or a move
+- Restores warn when a backup comes from a different Minecraft version
+- The Edit World screen's backup buttons use WorldArchive instead of vanilla's
 
-WorldArchive never deletes backups on its own. Guided cleanup shows a preview and waits for your confirmation before removing anything.
+WorldArchive never deletes a backup on its own. You review and confirm every
+cleanup.
 
 ## Requirements
 
 - Minecraft 26.3
 - Fabric Loader 0.19.3 or newer
 - Fabric API 0.160.5 or newer
-- Mod Menu 21.0.0-beta.1 or newer (optional)
 - Java 25
+- Mod Menu (optional)
+- Git 2.29 or newer and Git LFS on `PATH`, for Git backups only
 
-Git backups also require Git and Git LFS on your system path. They are not needed for ZIP-only backups; if either tool is unavailable, the Git destination is disabled and ZIP backups remain usable.
-
-WorldArchive is client-side and backs up local single-player saves only. It does not back up servers you join, and it never stores your Git credentials.
+Without Git or Git LFS, the Git destination turns off and ZIP backups still
+work. WorldArchive runs on the client and backs up local worlds only, not
+servers you join.
 
 ## Getting started
 
-Click the **World Backups** icon on the title screen, or open **Mods**, choose **WorldArchive**, and use its configuration button if Mod Menu is installed. The **World Backups** screen lets you create, restore, delete, sync, verify, and import backups.
+Click the **World Backups** icon on the title screen, or select a world in
+**Singleplayer** and click **Backups**. From there you can back up, restore,
+verify, sync, import, and delete.
 
-You can also select a world in **Singleplayer** and choose **Backups** to open that world's history directly.
-
-Restores always create a separate world. Your original save is never overwritten or modified.
-
-Source code and issue tracking are available on [GitHub](https://github.com/ishaanko/worldarchive).
+Source code and issues are on [GitHub](https://github.com/ishaanko/worldarchive).
