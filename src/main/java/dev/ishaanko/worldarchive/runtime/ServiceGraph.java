@@ -29,6 +29,7 @@ import dev.ishaanko.worldarchive.support.AsyncTasks;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -37,6 +38,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -94,7 +96,7 @@ public final class ServiceGraph {
      * @param storageRoot WorldArchive's folder in the game directory
      * @param captures copies worlds into {@code capture-temp} in {@code storageRoot}
      * @param finalizer gives a restored world the name the player chose
-     * @param executor runs all background work; it belongs to the caller, who also stops it
+     * @param executor runs all background work; {@link #shutdown} stops it at quit
      * @param clock the clock of backup times; its zone decides the local days of the storage history
      */
     public ServiceGraph(
@@ -242,6 +244,24 @@ public final class ServiceGraph {
             open.clear();
         }
         closing.forEach(ServiceGraph::closeQuietly);
+    }
+
+    /**
+     * Stops the engine at quit, once the caller has waited for the work permits. Work that still
+     * runs is then interrupted at once, which stops its Git processes and removes its partial
+     * files; when all work finished, the last callbacks first get {@code grace} to end on their
+     * own. Either way this waits up to {@code grace} for the workers to end, because the game
+     * exits right after and would otherwise cut that cleanup off halfway. True when every worker
+     * ended.
+     */
+    public boolean shutdown(boolean workFinished, Duration grace) throws InterruptedException {
+        close();
+        executor.shutdown();
+        if (workFinished && executor.awaitTermination(grace.toNanos(), TimeUnit.NANOSECONDS)) {
+            return true;
+        }
+        executor.shutdownNow();
+        return executor.awaitTermination(grace.toNanos(), TimeUnit.NANOSECONDS);
     }
 
     public ConfigurationGate gate() {
