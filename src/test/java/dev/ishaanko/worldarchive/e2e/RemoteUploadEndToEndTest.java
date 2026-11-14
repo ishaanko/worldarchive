@@ -32,6 +32,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CancellationException;
@@ -39,6 +40,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -231,6 +233,27 @@ class RemoteUploadEndToEndTest {
             rows.add(BackupRow.from(engine.catalog.find(backupId).orElseThrow()));
         }
         return SyncBatch.of(rows);
+    }
+
+    /** A remote that was deleted and created again is empty, whatever the backup list still says. */
+    @Test
+    void syncUploadsAgainToARemoteThatWasReplaced() throws Exception {
+        Path remote = bareRepository("replaced.git");
+        TestWorld world = TestWorld.create(root.resolve("saves"), "Replaced");
+        engine = start(config(world, remote, RemoteUpload.EVERY_BACKUP));
+        BackupResult uploaded = backup(world, 1);
+        assertEquals(SyncStatus.SYNCED, listed(uploaded.backupId()).syncStatus());
+        try (Stream<Path> files = Files.walk(remote)) {
+            for (Path file : files.sorted(Comparator.reverseOrder()).toList()) {
+                Files.delete(file);
+            }
+        }
+        bareRepository("replaced.git");
+
+        BackupResult synced = await(engine.recovery.syncBackup(uploaded.backupId(), ProgressListener.NO_OP));
+
+        assertEquals(SyncStatus.SYNCED, git(synced).syncStatus());
+        assertEquals(List.of(uploaded.backupId()), onRemote(remote));
     }
 
     @Test

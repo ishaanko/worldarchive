@@ -95,7 +95,11 @@ final class RecoveryHealthOperations {
         }
     }
 
-    /** Uploads this computer's Git copy to the world's remote; a copy already there is left alone. */
+    /**
+     * Uploads this computer's Git copy to the world's remote. It asks the remote every time, also
+     * for a copy the list calls synced: the remote may have been replaced or emptied since, and
+     * a copy that is already there costs one round trip.
+     */
     BackupResult sync(BackupId backupId, ProgressListener listener, CancellableTask<?> task) throws Exception {
         task.checkpoint();
         BackupRecord record = RecoverySupport.requireRecord(catalog, backupId);
@@ -109,11 +113,6 @@ final class RecoveryHealthOperations {
             }
             DestinationResult local = gitCopy.get();
             OperationId operationId = OperationId.create();
-            if (local.status() == DestinationStatus.SUCCESS && local.syncStatus() == SyncStatus.SYNCED) {
-                report(listener, operationId, current, BackupOperation.SYNC, OperationPhase.COMPLETE, 1, 1,
-                        "Backup is already synchronized");
-                return current.result();
-            }
             report(listener, operationId, current, BackupOperation.SYNC, OperationPhase.PREPARING, 0, 1,
                     "Preparing Git synchronization");
             DestinationResult synced = upload(current, local);
