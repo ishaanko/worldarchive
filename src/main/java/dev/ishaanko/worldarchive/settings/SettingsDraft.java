@@ -40,9 +40,9 @@ import java.util.function.UnaryOperator;
 public final class SettingsDraft {
     private static final int MESSAGE_LIMIT = 512;
 
-    private static final String GIT_REPOSITORY_LABEL = "Git repository root";
+    private static final String GIT_REPOSITORY_LABEL = "Local repository root";
 
-    private static final String ZIP_FOLDER_LABEL = "ZIP folder";
+    private static final String ZIP_FOLDER_LABEL = "Archive folder";
 
     private static final String REQUIRED_WHILE_ENABLED = " is required while this destination is enabled";
 
@@ -137,12 +137,12 @@ public final class SettingsDraft {
         int interval = scheduleIntervalMinutes(issues);
         Optional<Path> repository = folder(gitRepository, GIT_REPOSITORY_LABEL, sourceWorlds,
                 issue -> issues.put(SettingsField.GIT_REPOSITORY, issue));
-        if (gitEnabled && gitRepository.isBlank()) {
+        if (gitEnabled && SettingsPaths.typed(gitRepository).isBlank()) {
             issues.put(SettingsField.GIT_REPOSITORY, GIT_REPOSITORY_LABEL + REQUIRED_WHILE_ENABLED);
         }
         Optional<Path> zipFolder = folder(zipDestination, ZIP_FOLDER_LABEL, sourceWorlds,
                 issue -> issues.put(SettingsField.ZIP_DESTINATION, issue));
-        if (zipEnabled && zipDestination.isBlank()) {
+        if (zipEnabled && SettingsPaths.typed(zipDestination).isBlank()) {
             issues.put(SettingsField.ZIP_DESTINATION, ZIP_FOLDER_LABEL + REQUIRED_WHILE_ENABLED);
         }
         problem(() -> GitDestinationConfig.validateRemoteName(gitRemoteName))
@@ -274,7 +274,7 @@ public final class SettingsDraft {
             WorldEdit edit = edit(world.worldId());
             String code = world.worldId().displayCode();
             Map<SettingsField, String> issues = new EnumMap<>(SettingsField.class);
-            Optional<Path> zipFolder = folder(edit.zipDestination, "ZIP override for world " + code, sourceWorlds,
+            Optional<Path> zipFolder = folder(edit.zipDestination, "ZIP folder for world " + code, sourceWorlds,
                     issue -> issues.put(SettingsField.WORLD_ZIP_DESTINATION, issue));
             Optional<String> remoteUrl = remoteUrl(edit.remoteUrl, code,
                     issue -> issues.put(SettingsField.WORLD_REMOTE_URL, issue));
@@ -287,22 +287,23 @@ public final class SettingsDraft {
     }
 
     /**
-     * The canonical folder a field names; empty when the field is blank or has a problem. A
-     * problem is reported to {@code issue}.
+     * The canonical folder a field names (see {@link SettingsPaths#typed}); empty when the field
+     * is blank or has a problem. A problem is reported to {@code issue}.
      */
     private static Optional<Path> folder(String value, String label, List<Path> sourceWorlds, Consumer<String> issue) {
-        if (value.isBlank()) {
+        String typed = SettingsPaths.typed(value);
+        if (typed.isBlank()) {
             return Optional.empty();
         }
         Path path;
         try {
-            path = Path.of(SettingsPaths.expandHome(value));
+            path = Path.of(typed);
         } catch (InvalidPathException exception) {
-            issue.accept(label + " is not a valid filesystem path");
+            issue.accept(label + " is not a folder path this computer can use; check it for characters such as < > | ? *");
             return Optional.empty();
         }
         if (!path.isAbsolute()) {
-            issue.accept(label + " must be an absolute path");
+            issue.accept(label + " must be a full folder path, such as one chosen with Browse...");
             return Optional.empty();
         }
         try {
@@ -318,12 +319,14 @@ public final class SettingsDraft {
         }
     }
 
+    /** A remote pasted with spaces or a line break around it is read without them. */
     private static Optional<String> remoteUrl(String value, String worldCode, Consumer<String> issue) {
-        if (value.isBlank()) {
+        String typed = value.strip();
+        if (typed.isEmpty()) {
             return Optional.empty();
         }
         try {
-            return Optional.of(RemoteUrlPolicy.validateConfiguredPlain(value));
+            return Optional.of(RemoteUrlPolicy.validateConfiguredPlain(typed));
         } catch (IllegalArgumentException exception) {
             issue.accept("Git remote for world " + worldCode + " is invalid: " + exception.getMessage());
             return Optional.empty();

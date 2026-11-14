@@ -102,6 +102,23 @@ class SettingsDraftTest {
     }
 
     @Test
+    void readsAPastedQuotedPathAndAPaddedRemoteAndStillRefusesAQuotedWorldFolder() throws IOException {
+        Path world = Files.createDirectory(temporaryDirectory.resolve("My World"));
+        Path archives = Files.createDirectory(temporaryDirectory.resolve("Backups ünïcode"));
+        SettingsDraft draft = draftWithWorld(world);
+        WorldId worldId = draft.base().worlds().getFirst().worldId();
+        draft.setZipDestination(" \"" + archives + "\" ");
+        draft.setWorldRemoteUrl(worldId, "https://example.com/user/world.git\n");
+
+        WorldArchiveConfig config = draft.validate(List.of(world)).config().orElseThrow();
+
+        assertEquals(Optional.of(archives.toRealPath()), config.zip().destination());
+        assertEquals(Optional.of("https://example.com/user/world.git"), config.worlds().getFirst().remoteUrl());
+        draft.setZipDestination("\"" + world.resolve("zips") + "\"");
+        assertTrue(draft.validate(List.of(world)).issue(SettingsField.ZIP_DESTINATION).isPresent());
+    }
+
+    @Test
     void rejectsACredentialInARemoteAndAnInvalidSchedule() {
         SettingsDraft draft = draftWithWorld(temporaryDirectory.resolve("credential-world"));
         WorldId worldId = draft.base().worlds().getFirst().worldId();

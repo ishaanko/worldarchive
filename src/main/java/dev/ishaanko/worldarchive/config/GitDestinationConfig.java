@@ -68,7 +68,8 @@ public record GitDestinationConfig(
                 || remoteName.startsWith("-")
                 || remoteName.equals(".")
                 || remoteName.equals("..")) {
-            throw new IllegalArgumentException("Git remote name is unsafe");
+            throw new IllegalArgumentException(
+                    "Git remote name may use only letters, digits, dots, dashes, and underscores, such as origin");
         }
         return remoteName;
     }
@@ -87,7 +88,8 @@ public record GitDestinationConfig(
         Set<String> unique = new LinkedHashSet<>();
         for (String pattern : patterns) {
             if (isUnsafeLfsPattern(Objects.requireNonNull(pattern, "lfsPattern"))) {
-                throw new IllegalArgumentException("Unsafe Git LFS pattern: " + pattern);
+                throw new IllegalArgumentException("Git LFS pattern " + pattern + " is not allowed: use patterns such as *.mca, "
+                        + "without spaces, backslashes, .., or a leading ! or -");
             }
             if (!unique.add(pattern)) {
                 throw new IllegalArgumentException("Duplicate Git LFS pattern: " + pattern);
