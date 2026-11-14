@@ -19,8 +19,12 @@ class RestoreNameTest {
                 "Base - Restored 2026-09-22 Copy",
                 RestoreName.suggest("Base", "base - restored 2026-09-22", DATE));
 
-        String cut = RestoreName.suggest("x".repeat(250) + " ...", "folder", DATE);
-        assertEquals("x".repeat(250), cut, "a cut name loses the dots and spaces Windows would drop");
+        String dated = " - Restored 2026-09-22";
+        String cut = RestoreName.suggest("x".repeat(250), "folder", DATE);
+        assertEquals(
+                "x".repeat(RestoreBackupRequest.MAXIMUM_NAME_LENGTH - dated.length()) + dated,
+                cut,
+                "a long world name is cut so the date still fits");
         assertEquals(Optional.empty(), RestoreName.check(cut, "folder"));
     }
 

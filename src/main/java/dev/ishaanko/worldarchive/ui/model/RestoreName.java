@@ -34,11 +34,15 @@ public final class RestoreName {
     /**
      * The suggested name: the world's display name followed by {@code - Restored} and the local
      * date the backup was made, such as {@code My World - Restored 2026-09-22}, so copies restored
-     * from different backups get different names. Unsafe characters are replaced, the name is cut
-     * to fit, and it is never the folder name of the original world.
+     * from different backups get different names. Unsafe characters are replaced, a long world
+     * name is cut so the date still fits, and the result is never the folder name of the original
+     * world.
      */
     public static String suggest(String displayName, String originalFolder, LocalDate backupDate) {
-        String name = trimFolderName(replaceUnsafe(displayName + SUFFIX + backupDate));
+        String dated = SUFFIX + backupDate;
+        String world = replaceUnsafe(displayName);
+        int room = RestoreBackupRequest.MAXIMUM_NAME_LENGTH - dated.length();
+        String name = trimFolderName(world.substring(0, Math.min(world.length(), room)) + dated);
         if (name.isBlank()) {
             name = "Restored World";
         }
