@@ -26,7 +26,7 @@ import java.util.function.LongSupplier;
  * Runs Git with {@link ProcessBuilder}; no shell is ever involved. Standard output and error go
  * to private temporary files, so a helper process that keeps a handle open (an SSH control
  * master, a credential cache) can never hold a finished command back, and nothing polls the
- * process while it runs. Commands never prompt: terminal and askpass prompts are off, and every
+ * process while it runs, except for a cancel while streamed output is read. Commands never prompt: terminal and askpass prompts are off, and every
  * inherited {@code GIT_} variable is removed. When the caller is interrupted, also while it
  * waits for streamed output, or a command with an idle limit stays silent that long, the whole
  * process tree is stopped: politely first, so Git can remove its lock files, then forcibly.

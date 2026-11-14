@@ -304,9 +304,16 @@ class WorldGitSnapshotStoreTest {
         BackupCapture capture = capture(world("Signed"), worldId, START);
 
         DestinationResult uploaded = store.createBackup(capture, ProgressListener.NO_OP);
+        // A repository that an older version wrote has no override yet when Sync retries an upload.
+        Path managed = store.repositoryFor(worldId).resolve("worldarchive").resolve("config");
+        String older = Files.readString(managed).replaceFirst("\\[push]\\R\\s*gpgSign = false\\R", "");
+        assertFalse(older.contains("gpgSign"));
+        Files.writeString(managed, older);
+        DestinationResult retried = await(store.syncSnapshot(worldId, capture.manifest().backupId()));
         Map<BackupId, GitDeletion> deleted = await(store.deleteSnapshots(worldId, Set.of(capture.manifest().backupId())));
 
         assertEquals(SyncStatus.SYNCED, uploaded.syncStatus(), uploaded.toString());
+        assertEquals(SyncStatus.SYNCED, retried.syncStatus(), retried.toString());
         assertEquals(GitDeletion.Outcome.DELETED, deleted.get(capture.manifest().backupId()).outcome());
         assertTrue(await(store.remoteSnapshotCommits(worldId)).isEmpty());
     }
