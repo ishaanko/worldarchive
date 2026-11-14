@@ -36,7 +36,7 @@ Another Git-based Minecraft backup mod exists ("Fast" + "Back", GPL-licensed). T
 
 ## How a backup happens
 
-A trigger in the runtime asks `SerializedBackupCoordinator` for a backup. For the open world, `LiveWorldBackups` has the server save, pauses autosave, and calls `prepareCapture`, which copies the world on a worker. When the copy is complete, autosave goes back to how the player set it, and `createPreparedBackup` queues the destination work. A world exit backup captures after the server's final save. A world that is not open goes through `createBackup`, which captures and then queues in the same way.
+A trigger in the runtime asks `SerializedBackupCoordinator` for a backup. For the open world, `LiveWorldBackups` has the server save, pauses autosave, and calls `prepareCapture`, which copies the world on a worker. When the copy is complete, autosave goes back to how the player set it, and `createPreparedBackup` queues the destination work. A world exit backup captures after the server's final save, and a server that opens the same world again waits at start until that copy is done. A world that is not open goes through `createBackup`, which captures and then queues in the same way.
 
 The coordinator lets one capture copy a world at a time and writes the backups of one world in order, while different worlds run in parallel. It never merges triggers: each trigger makes its own backup.
 
