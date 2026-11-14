@@ -22,6 +22,7 @@ final class RestoreWorkspaceTest {
                 "My World", "My World",
                 "CON. ", "_CON",
                 "lpt1.backup", "_lpt1.backup",
+                "COM0", "_COM0",
                 "a/b\\c:d*e?f\"g<h>i|j", "a_b_c_d_e_f_g_h_i_j",
                 "trailing dots... ", "trailing dots",
                 "..", "Restored World",

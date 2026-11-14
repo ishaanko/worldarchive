@@ -26,10 +26,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * The saves folder as a restore uses it. A restore writes into a private staging folder there,
- * {@code .worldarchive-restore-*}, and publishes it with one atomic rename to a free name, so a
- * half-restored world never appears under a world name and no existing folder is overwritten. A
- * saves folder that the game reaches through a link or junction is used where it really is.
+ * The saves folder as a restore uses it. A restore writes the world into
+ * {@code .worldarchive-restore-*}{@code /world}, one level down, so the game, which lists every
+ * folder of saves that holds a {@code level.dat}, never lists a half-restored world, not even
+ * after a crash. One atomic rename publishes the world to a free name, so no existing folder is
+ * overwritten. A saves folder that the game reaches through a link or junction is used where it
+ * really is.
  */
 public final class RestoreWorkspace {
     /** The start of the name of every staging folder, which the settings' world scan skips. */
@@ -44,6 +46,9 @@ public final class RestoreWorkspace {
     private static final int MAXIMUM_NAME_ATTEMPTS = 10_000;
 
     private static final String DEFAULT_NAME = "Restored World";
+
+    /** The folder inside a staging folder that receives the world. */
+    private static final String STAGED_WORLD = "world";
 
     private static final Set<String> WINDOWS_DEVICE_NAMES = windowsDeviceNames();
 
@@ -67,8 +72,9 @@ public final class RestoreWorkspace {
         return new RestoreWorkspace(root);
     }
 
+    /** Creates an empty folder for one restore's world, inside a new staging folder. */
     Path createStaging() throws IOException {
-        return Files.createTempDirectory(root, STAGING_PREFIX);
+        return Files.createDirectory(Files.createTempDirectory(root, STAGING_PREFIX).resolve(STAGED_WORLD));
     }
 
     /**
@@ -89,7 +95,9 @@ public final class RestoreWorkspace {
                     continue;
                 }
                 try {
-                    return task.pointOfNoReturn(() -> move(staging, target));
+                    Path published = task.pointOfNoReturn(() -> move(staging, target));
+                    removeEmptyStaging(staging.getParent());
+                    return published;
                 } catch (FileAlreadyExistsException taken) {
                     // Another program took the name after the check; try the next one.
                 }
@@ -100,12 +108,12 @@ public final class RestoreWorkspace {
         }
     }
 
-    /** Removes a staging folder of this workspace; links inside it are removed, never followed. */
+    /**
+     * Removes the staging folder of a world from {@link #createStaging}; links inside it are
+     * removed, never followed.
+     */
     void delete(Path staging) throws IOException {
-        Path target = staging.toAbsolutePath().normalize();
-        if (!root.equals(target.getParent()) || !target.getFileName().toString().startsWith(STAGING_PREFIX)) {
-            throw new IOException("Refusing to remove " + target + ", which is not a restore staging folder");
-        }
+        Path target = stagingFolder(staging);
         if (!Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
             return;
         }
@@ -135,6 +143,26 @@ public final class RestoreWorkspace {
                 return FileVisitResult.CONTINUE;
             }
         });
+    }
+
+    /** The staging folder around a world from {@link #createStaging}, checked to be one. */
+    private Path stagingFolder(Path stagedWorld) throws IOException {
+        Path world = stagedWorld.toAbsolutePath().normalize();
+        Path folder = world.getParent();
+        if (!world.getFileName().toString().equals(STAGED_WORLD) || folder == null
+                || !root.equals(folder.getParent()) || !folder.getFileName().toString().startsWith(STAGING_PREFIX)) {
+            throw new IOException("Refusing to remove " + world + ", which is not a restore staging folder");
+        }
+        return folder;
+    }
+
+    /** The staging folder is empty once its world is published; one that stays is harmless. */
+    private static void removeEmptyStaging(Path folder) {
+        try {
+            Files.deleteIfExists(folder);
+        } catch (IOException exception) {
+            LOGGER.warn("Could not remove the empty folder {} after a restore: {}", folder, exception.toString());
+        }
     }
 
     /**
@@ -225,7 +253,8 @@ public final class RestoreWorkspace {
 
     private static Set<String> windowsDeviceNames() {
         Set<String> names = new HashSet<>(Set.of("CON", "PRN", "AUX", "NUL", "CLOCK$"));
-        for (int index = 1; index <= 9; index++) {
+        // Microsoft's list of reserved names includes COM0 and LPT0.
+        for (int index = 0; index <= 9; index++) {
             names.add("COM" + index);
             names.add("LPT" + index);
         }
