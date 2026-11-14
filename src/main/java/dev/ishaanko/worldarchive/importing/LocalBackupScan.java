@@ -346,6 +346,10 @@ final class LocalBackupScan {
                 artifact = store.readArchive(archive.archivePath());
             } catch (IOException failure) {
                 found.issue(artifactId, failure);
+                if (Thread.currentThread().isInterrupted()) {
+                    // The scan is being stopped, as at quit: open no further archive.
+                    return;
+                }
                 continue;
             }
             artifact.ifPresentOrElse(
