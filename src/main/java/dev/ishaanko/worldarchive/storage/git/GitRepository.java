@@ -310,9 +310,9 @@ final class GitRepository {
     }
 
     /**
-     * WorldArchive's settings for this repository. No line-ending conversion, no hooks, LFS
-     * objects stay inside the repository, objects and refs reach the disk before Git reports
-     * success, and Git never packs or prunes on its own.
+     * WorldArchive's settings for this repository. No line-ending conversion, no hooks, no
+     * signed pushes (most hosts refuse them), LFS objects stay inside the repository, objects and
+     * refs reach the disk before Git reports success, and Git never packs or prunes on its own.
      */
     private String managedConfiguration() {
         Path hooks = directory.resolve("worldarchive").resolve("hooks");
@@ -331,6 +331,8 @@ final class GitRepository {
                     auto = 0
                 [maintenance]
                     auto = false
+                [push]
+                    gpgSign = false
                 [lfs]
                     storage = lfs
                 """.formatted(quoted(hooks.toString()));

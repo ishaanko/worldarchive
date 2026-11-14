@@ -298,6 +298,8 @@ final class GitWorldRepository {
             if (remote.isEmpty()) {
                 return DestinationResult.success(DestinationType.GIT, snapshot.refName());
             }
+            // A repository that an older version wrote gets the current settings before it uploads.
+            repository.prepare();
             return upload(snapshot, mainBranch(snapshot.committedAt()));
         });
     }

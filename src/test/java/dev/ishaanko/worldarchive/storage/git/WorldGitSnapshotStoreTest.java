@@ -285,6 +285,39 @@ class WorldGitSnapshotStoreTest {
         assertEquals(0, lfsObjects(store, synced), "the deleted backups' space is freed");
     }
 
+    /** A player's global Git configuration that signs every push, which most hosts refuse, never reaches WorldArchive. */
+    @Test
+    void aGlobalConfigurationThatSignsPushesNeverFailsAnUploadOrADelete() throws Exception {
+        Assumptions.assumeFalse(isWindows(), "the Git that reads the global configuration is a shell script");
+        Path global = Files.writeString(temporaryDirectory.resolve("global.gitconfig"),
+                "[push]\n    gpgSign = true\n[gpg]\n    program = false\n");
+        Path git = Files.writeString(temporaryDirectory.resolve("git-with-global-config"),
+                "#!/bin/sh\nGIT_CONFIG_GLOBAL='" + global + "' exec git \"$@\"\n");
+        assertTrue(git.toFile().setExecutable(true));
+        Path remote = bareRepository("signed.git");
+        WorldId worldId = WorldId.create();
+        GitBackendSettings defaults = settings("signed", GitBackendSettings.DEFAULT_LFS_PATTERNS);
+        WorldGitSnapshotStore store = new WorldGitSnapshotStore(new GitBackendSettings(true, defaults.repository(),
+                        FolderOrigin.DEFAULT, git.toString(), "origin", Optional.empty(), defaults.lfsPatterns(),
+                        defaults.commandTimeout(), defaults.maximumOutputBytes()),
+                Map.of(worldId, remote.toString()), new SystemGitCommandRunner(), executor);
+        BackupCapture capture = capture(world("Signed"), worldId, START);
+
+        DestinationResult uploaded = store.createBackup(capture, ProgressListener.NO_OP);
+        // A repository that an older version wrote has no override yet when Sync retries an upload.
+        Path managed = store.repositoryFor(worldId).resolve("worldarchive").resolve("config");
+        String older = Files.readString(managed).replaceFirst("\\[push]\\R\\s*gpgSign = false\\R", "");
+        assertFalse(older.contains("gpgSign"));
+        Files.writeString(managed, older);
+        DestinationResult retried = await(store.syncSnapshot(worldId, capture.manifest().backupId()));
+        Map<BackupId, GitDeletion> deleted = await(store.deleteSnapshots(worldId, Set.of(capture.manifest().backupId())));
+
+        assertEquals(SyncStatus.SYNCED, uploaded.syncStatus(), uploaded.toString());
+        assertEquals(SyncStatus.SYNCED, retried.syncStatus(), retried.toString());
+        assertEquals(GitDeletion.Outcome.DELETED, deleted.get(capture.manifest().backupId()).outcome());
+        assertTrue(await(store.remoteSnapshotCommits(worldId)).isEmpty());
+    }
+
     @Test
     void aRemoteCopyThatDiffersIsNeitherDeletedNorRestoredOrKept() throws Exception {
         Path remote = bareRepository("diverged.git");

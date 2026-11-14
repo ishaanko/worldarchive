@@ -17,17 +17,19 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.LongSupplier;
 
 /**
  * Runs Git with {@link ProcessBuilder}; no shell is ever involved. Standard output and error go
  * to private temporary files, so a helper process that keeps a handle open (an SSH control
  * master, a credential cache) can never hold a finished command back, and nothing polls the
- * process while it runs. Commands never prompt: terminal and askpass prompts are off, and every
- * inherited {@code GIT_} variable is removed. When the caller is interrupted, or a command with
- * an idle limit stays silent that long, the whole process tree is stopped: politely first, so
- * Git can remove its lock files, then forcibly.
+ * process while it runs, except for a cancel while streamed output is read. Commands never prompt: terminal and askpass prompts are off, and every
+ * inherited {@code GIT_} variable is removed. When the caller is interrupted, also while it
+ * waits for streamed output, or a command with an idle limit stays silent that long, the whole
+ * process tree is stopped: politely first, so Git can remove its lock files, then forcibly.
  */
 public final class SystemGitCommandRunner implements GitCommandRunner {
     private static final long TERMINATION_GRACE_MILLIS = 500;
@@ -71,9 +73,14 @@ public final class SystemGitCommandRunner implements GitCommandRunner {
             ProcessBuilder builder = builder(command).redirectError(error.path().toFile());
             int exitCode = execute(builder, command, error::size, process -> {
                 InputStream output = process.getInputStream();
-                try {
+                try (CancelWatch ignored = CancelWatch.start(process)) {
                     reader.read(output);
                 } catch (IOException | GitStorageException exception) {
+                    if (Thread.interrupted()) {
+                        InterruptedException cancelled = new InterruptedException("The Git command was cancelled");
+                        cancelled.addSuppressed(exception);
+                        throw cancelled;
+                    }
                     Optional<GitStorageException> gitFailure = gitFailure(process, error, limit);
                     if (gitFailure.isEmpty()) {
                         throw exception;
@@ -115,6 +122,9 @@ public final class SystemGitCommandRunner implements GitCommandRunner {
         try {
             InputFeed input = InputFeed.start(process, command.standardInput());
             body.accept(process);
+            if (Thread.interrupted()) {
+                throw new InterruptedException("The Git command was cancelled");
+            }
             awaitExit(process, command.idleTimeout(), written);
             exited = true;
             input.finish(process.exitValue());
@@ -212,6 +222,52 @@ public final class SystemGitCommandRunner implements GitCommandRunner {
             current = current.get().parent();
         }
         return depth;
+    }
+
+    /**
+     * Stops the process tree as soon as the caller is interrupted while it reads streamed output.
+     * A read from a pipe never sees an interrupt, so without this a cancel waits until Git writes
+     * something or exits. Closing it waits until a stop it began has finished.
+     */
+    private static final class CancelWatch implements AutoCloseable {
+        private static final long CHECK_NANOS = TimeUnit.MILLISECONDS.toNanos(50);
+
+        private final AtomicBoolean done = new AtomicBoolean();
+
+        private final Thread watcher;
+
+        private CancelWatch(Process process, Thread caller) {
+            watcher = Thread.ofVirtual().name("worldarchive-git-cancel").start(() -> {
+                while (!done.get() && process.isAlive()) {
+                    if (caller.isInterrupted()) {
+                        terminate(process);
+                        return;
+                    }
+                    LockSupport.parkNanos(CHECK_NANOS);
+                }
+            });
+        }
+
+        static CancelWatch start(Process process) {
+            return new CancelWatch(process, Thread.currentThread());
+        }
+
+        @Override
+        public void close() {
+            done.set(true);
+            LockSupport.unpark(watcher);
+            boolean interrupted = Thread.interrupted();
+            while (watcher.isAlive()) {
+                try {
+                    watcher.join();
+                } catch (InterruptedException exception) {
+                    interrupted = true;
+                }
+            }
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     /** Work done while the process runs, such as reading its streamed output. */

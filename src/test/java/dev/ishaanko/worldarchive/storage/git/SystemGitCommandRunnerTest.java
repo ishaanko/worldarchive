@@ -63,6 +63,29 @@ class SystemGitCommandRunnerTest {
     }
 
     @Test
+    void interruptionStopsAStreamedCommandWhileItsReaderWaitsForOutput() throws Exception {
+        Path childPid = temporaryDirectory.resolve("streamed-child.pid");
+        GitCommand command = command(
+                List.of("spawn-inherited", childPid.toString(), "20000", "20000"), Optional.empty(), GitCommand.Input.NONE);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread worker = Thread.ofVirtual().start(() -> {
+            try {
+                runner.stream(command, output -> output.readAllBytes());
+            } catch (Throwable throwable) {
+                failure.set(throwable);
+            }
+        });
+        waitFor(childPid);
+
+        worker.interrupt();
+        worker.join(5_000);
+
+        assertFalse(worker.isAlive(), "a cancel must not wait for the silent command to end");
+        assertInstanceOf(InterruptedException.class, failure.get());
+        assertEventuallyDead(Long.parseLong(Files.readString(childPid)));
+    }
+
+    @Test
     void aProcessThatKeepsTheOutputOpenNeverHoldsBackAFinishedCommand() throws Exception {
         Path childPid = temporaryDirectory.resolve("orphan.pid");
         GitCommand command = command(
