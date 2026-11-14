@@ -205,7 +205,8 @@ public final class SerializedBackupCoordinator {
     private CapturedBackup capture(CreateBackupRequest request, CaptureKind kind, Progress progress)
             throws IOException, InterruptedException {
         progress.report(OperationPhase.PREPARING, 0, 0, "Preparing private world capture");
-        try (WorldOperationGate.Permit ignored = captureMutex.enter(request.worldId())) {
+        try (WorldOperationGate.Permit copying = captureFactory.markCopying(request.worldDirectory());
+                WorldOperationGate.Permit turn = captureMutex.enter(request.worldId())) {
             Optional<WorldInventory> previous = previousInventory(request.worldId(), progress);
             return captureFactory.capture(
                     request,

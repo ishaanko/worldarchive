@@ -35,6 +35,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
@@ -43,6 +44,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -183,6 +185,36 @@ class LiveWorldBackupsTest {
                 .findFirst()
                 .orElseThrow();
         TestWorld.assertSameFiles(server.world.files(), restore(exit.manifest().backupId()));
+    }
+
+    /**
+     * The player opens the world again while its world-exit backup still copies it. The new server
+     * waits before it loads the world, so its first save never reaches the exit backup.
+     */
+    @Test
+    void reopeningAWorldWaitsUntilItsExitBackupHasCopiedIt() throws Exception {
+        start(Engine.defaultConfig(), holdFirstCapture());
+        FakeServer server = new FakeServer(TestWorld.create(engine, "Reopened"));
+        open(server);
+        stop(server, true);
+        assertTrue(copying.await(30, TimeUnit.SECONDS));
+        Map<String, byte[]> atExit = server.world.files();
+
+        CompletableFuture<Void> reopened = CompletableFuture.runAsync(() -> {
+            live.starting(new FakeServer(server.world));
+            try {
+                server.world.write("region/r.0.0.mca", bytes(256 * 1_024, 77));
+            } catch (IOException exception) {
+                throw new UncheckedIOException(exception);
+            }
+        });
+        assertThrows(TimeoutException.class, () -> reopened.get(300, TimeUnit.MILLISECONDS));
+        release.countDown();
+        reopened.get(30, TimeUnit.SECONDS);
+
+        assertEquals("screen.worldarchive.notice.exit_done", reports.exitOutcome.get(30, TimeUnit.SECONDS).key());
+        awaitIdle();
+        TestWorld.assertSameFiles(atExit, restore(onlyRecord(server.world.id()).manifest().backupId()));
     }
 
     /**
