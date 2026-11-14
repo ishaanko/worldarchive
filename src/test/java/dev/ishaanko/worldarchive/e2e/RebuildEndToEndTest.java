@@ -5,6 +5,7 @@ import static dev.ishaanko.worldarchive.e2e.TestWorld.bytes;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -22,8 +23,10 @@ import dev.ishaanko.worldarchive.model.DestinationType;
 import dev.ishaanko.worldarchive.model.SyncStatus;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -118,6 +121,52 @@ class RebuildEndToEndTest {
         assertTrue(summary.issues() > 0, summary.message());
         assertEquals(Set.of(DestinationType.ZIP), copies(brokenBackup));
         assertEquals(Set.of(DestinationType.GIT, DestinationType.ZIP), copies(healthyBackup));
+    }
+
+    /**
+     * A stray archive the catalog does not list is read at every start, but the archives it lists
+     * are not opened: in a synced folder, opening one can download it. Reads are seen in the
+     * files' access times, so the test is skipped on a drive that does not record them.
+     */
+    @Test
+    void aStrayArchiveOpensNoListedArchive() throws Exception {
+        WorldArchiveConfig config = Engine.onlyDestination(DestinationType.ZIP);
+        engine = start(config);
+        TestWorld world = TestWorld.create(engine, "Stray");
+        for (int backup = 0; backup < 3; backup++) {
+            world.write("level.dat", bytes(4_096, 90 + backup));
+            engine.backupNow(world, BackupTrigger.MANUAL);
+            engine.clock.advance(Duration.ofMinutes(1));
+        }
+        engine.close();
+        Path folder = engine.zipFolder(world.id()).resolve(world.id().toString());
+        List<Path> listed;
+        try (Stream<Path> files = Files.list(folder)) {
+            listed = files.filter(file -> file.getFileName().toString().endsWith(".zip")).toList();
+        }
+        assertEquals(3, listed.size());
+        Files.writeString(folder.resolve("20260901T120000000Z_" + BackupId.create() + ".zip"), "not a zip");
+        assumeTrue(readsAreRecorded(root.resolve("probe")), "this drive does not record when a file is read");
+        for (Path archive : listed) {
+            Files.setAttribute(archive, "lastAccessTime", FileTime.fromMillis(0));
+        }
+
+        engine = start(config);
+        ImportSummary summary = await(engine.imports.rebuildLocal());
+
+        assertEquals(1, summary.issues(), summary.message());
+        assertEquals(0, summary.added(), summary.message());
+        for (Path archive : listed) {
+            assertEquals(FileTime.fromMillis(0), Files.getAttribute(archive, "lastAccessTime"), archive + " was opened");
+        }
+    }
+
+    /** Whether reading a file whose access time lies in the past moves that time. */
+    private static boolean readsAreRecorded(Path probe) throws Exception {
+        Files.writeString(probe, "probe");
+        Files.setAttribute(probe, "lastAccessTime", FileTime.fromMillis(0));
+        Files.readAllBytes(probe);
+        return !Files.getAttribute(probe, "lastAccessTime").equals(FileTime.fromMillis(0));
     }
 
     /** The rebuild waits for the world, so the backup records its own result, sync status included. */
