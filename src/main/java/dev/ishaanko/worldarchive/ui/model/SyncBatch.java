@@ -27,7 +27,7 @@ import java.util.stream.Collectors;
 public record SyncBatch(List<BackupRow> rows) {
     private static final int MAXIMUM_MESSAGE_LENGTH = 512;
 
-    private static final int MAXIMUM_REASON_LENGTH = 160;
+    private static final int MAXIMUM_REASON_LENGTH = 60;
 
     public SyncBatch {
         rows = List.copyOf(rows);
@@ -101,8 +101,11 @@ public record SyncBatch(List<BackupRow> rows) {
 
     /** How many backups uploaded out of how many, and each one that did not. */
     public record Summary(int uploaded, int total, List<Failure> failures) {
-        /** The failures the result screen names; it counts the rest. */
-        public static final int MAXIMUM_SHOWN = 6;
+        /**
+         * The failures the result screen names; it counts the rest. Three names with a short
+         * reason each fit the screen's seven rows; every row in the list keeps its full reason.
+         */
+        public static final int MAXIMUM_SHOWN = 3;
 
         public Summary {
             failures = List.copyOf(failures);

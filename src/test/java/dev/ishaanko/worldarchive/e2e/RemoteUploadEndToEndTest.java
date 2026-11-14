@@ -256,6 +256,27 @@ class RemoteUploadEndToEndTest {
         assertEquals(List.of(uploaded.backupId()), onRemote(remote));
     }
 
+    /** Cleanup can leave a backup only on the remote; Sync must neither fail it nor move main behind it. */
+    @Test
+    void syncLeavesABackupThatIsOnlyOnTheRemoteAsItIs() throws Exception {
+        Path remote = bareRepository("remote-only.git");
+        TestWorld world = TestWorld.create(root.resolve("saves"), "RemoteOnly");
+        engine = start(config(world, remote, RemoteUpload.EVERY_BACKUP));
+        BackupResult older = backup(world, 1);
+        engine.clock.advance(Duration.ofHours(1));
+        BackupResult newer = backup(world, 2);
+        String newest = branchCommit(remote, newer.backupId());
+        assertTrue(await(engine.git.deleteLocalSnapshot(world.id(), newer.backupId())));
+
+        BackupResult remoteOnly = await(engine.recovery.syncBackup(newer.backupId(), ProgressListener.NO_OP));
+        await(engine.recovery.syncBackup(older.backupId(), ProgressListener.NO_OP));
+
+        assertEquals(SyncStatus.SYNCED, git(remoteOnly).syncStatus());
+        assertEquals(DestinationStatus.SUCCESS, listed(newer.backupId()).status());
+        assertEquals(SyncStatus.SYNCED, listed(newer.backupId()).syncStatus());
+        assertEquals(newest, remoteGit(remote, "rev-parse", "refs/heads/main").strip());
+    }
+
     @Test
     void deletingABackupThatNeverUploadedLeavesTheRemoteAsItWas() throws Exception {
         Path remote = bareRepository("kept.git");

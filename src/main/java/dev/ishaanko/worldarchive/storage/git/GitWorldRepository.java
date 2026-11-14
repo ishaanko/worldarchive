@@ -30,7 +30,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
-import java.util.stream.Collectors;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -441,16 +440,15 @@ final class GitWorldRepository {
 
     /**
      * Whether a Sync moves {@code main} to the snapshot: only when the remote holds no newer
-     * snapshot of this repository. A newer snapshot that never uploaded does not count, or
-     * {@code main} would stay behind every backup the remote has.
+     * backup. The remote's branch names carry each backup's time, so a newer backup that never
+     * uploaded does not count, and one whose copy on this computer is gone still does.
      */
     private GitRemote.MainBranch mainAfterSync(GitSnapshot snapshot)
             throws IOException, InterruptedException, GitStorageException {
-        Set<BackupId> uploaded = remote.orElseThrow().branches().snapshots().stream()
-                .map(GitRemote.Branch::backupId)
-                .collect(Collectors.toSet());
-        return snapshots().stream().anyMatch(other -> uploaded.contains(other.backupId())
-                        && other.committedAt().isAfter(snapshot.committedAt()))
+        Instant own = snapshot.committedAt().truncatedTo(ChronoUnit.SECONDS);
+        return remote.orElseThrow().branches().snapshots().stream()
+                .flatMap(branch -> GitRemoteSnapshotRef.committedAt(branch.refName()).stream())
+                .anyMatch(time -> time.isAfter(own))
                 ? GitRemote.MainBranch.KEEP
                 : GitRemote.MainBranch.MOVE;
     }
