@@ -38,14 +38,30 @@ final class RegionBucketReader implements Closeable {
 
     private boolean finished;
 
-    /** Reads and checks the header of bucket object {@code number}; the reader owns the stream. */
+    /**
+     * Reads and checks the header of bucket object {@code number}. The reader owns the stream from
+     * here on: it is closed when this throws, so a refused bucket never keeps its file open.
+     */
     RegionBucketReader(InputStream input, int number) throws IOException, GitStorageException {
         Objects.requireNonNull(input, "input");
+        this.input = new DataInputStream(new BufferedInputStream(input));
+        this.number = number;
+        try {
+            checkHeader();
+        } catch (IOException | GitStorageException | RuntimeException failure) {
+            try {
+                input.close();
+            } catch (IOException closing) {
+                failure.addSuppressed(closing);
+            }
+            throw failure;
+        }
+    }
+
+    private void checkHeader() throws IOException, GitStorageException {
         if (number < 0 || number >= RegionEntry.BUCKETS) {
             throw new IllegalArgumentException("A region bucket number must be between 0 and 15");
         }
-        this.input = new DataInputStream(new BufferedInputStream(input));
-        this.number = number;
         byte[] header = new byte[MAGIC.length + 2];
         readFully(header, "is too short");
         if (!Arrays.equals(header, 0, MAGIC.length, MAGIC, 0, MAGIC.length)) {

@@ -54,9 +54,11 @@ final class RegionAssembler {
      * names). Two passes, so memory stays a few buffers per bucket: the first reads each bucket in
      * turn and skips its payloads to learn every entry's length for the location table; the
      * second opens all buckets at once and copies payloads in ascending chunk index, taking each
-     * from its bucket's stream. A bucket that reads differently the second time is rejected. The
-     * output is flushed, not closed; pass {@link OutputStream#nullOutputStream()} for the digest
-     * alone.
+     * from its bucket's stream. A bucket whose entries (index, timestamp, length) read differently
+     * the second time is rejected. The payload bytes are the ones the second pass reads, and the
+     * returned digest covers them, so a caller that needs to prove the bytes compares that digest.
+     * The output is flushed, not closed; pass {@link OutputStream#nullOutputStream()} for the
+     * digest alone.
      */
     static StoredRegion fromBuckets(List<Integer> numbers, BucketStreams buckets, OutputStream output)
             throws IOException, GitStorageException {

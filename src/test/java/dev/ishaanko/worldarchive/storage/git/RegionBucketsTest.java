@@ -105,7 +105,7 @@ class RegionBucketsTest {
     }
 
     @Test
-    void rejectsABucketThatChangesBetweenPasses() throws Exception {
+    void rejectsABucketWhoseEntriesChangeBetweenPasses() throws Exception {
         byte[] source = scattered(new RegionFileBuilder(40), 0).bytes();
         Map<Integer, byte[]> buckets = encode(parse(source), source);
         byte[] other = bucket(0, entry(0, 1, new byte[] {2, 3}));
@@ -115,6 +115,21 @@ class RegionBucketsTest {
                 number -> new ByteArrayInputStream(number == 0 && opens.getAndIncrement() > 0
                         ? other : buckets.get(number)),
                 OutputStream.nullOutputStream()));
+    }
+
+    /** A refused bucket is a file in the LFS store; left open on Windows, it could not be set aside. */
+    @Test
+    void closesTheStreamOfABucketItRefuses() {
+        AtomicInteger closes = new AtomicInteger();
+        ByteArrayInputStream wrongMarker = new ByteArrayInputStream(new byte[] {'X', 'A', 'R', 'B', 1, 5}) {
+            @Override
+            public void close() {
+                closes.incrementAndGet();
+            }
+        };
+
+        assertThrows(GitStorageException.class, () -> new RegionBucketReader(wrongMarker, 5));
+        assertEquals(1, closes.get());
     }
 
     @Test
