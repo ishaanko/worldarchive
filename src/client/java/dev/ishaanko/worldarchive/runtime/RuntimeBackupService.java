@@ -69,6 +69,14 @@ final class RuntimeBackupService implements BackupService {
         return calls.withPermit(state -> state.recovery().syncBackup(backupId, progressListener));
     }
 
+    @Override
+    public CompletionStage<List<BackupResult>> syncBackups(
+            WorldId worldId,
+            List<BackupId> backupIds,
+            ProgressListener progressListener) {
+        return calls.withPermit(state -> state.recovery().syncBackups(worldId, backupIds, progressListener));
+    }
+
     /**
      * The restore's result once its world is registered. Cancelling it cancels the restore; like
      * the restore's own stage, it completes only once the restore has stopped.
