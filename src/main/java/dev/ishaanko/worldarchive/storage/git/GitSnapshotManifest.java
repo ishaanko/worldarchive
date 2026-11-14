@@ -9,23 +9,27 @@ import java.util.Objects;
 import java.util.Set;
 
 /**
- * The metadata stored in every snapshot tree: the backup manifest, the LFS patterns the snapshot
- * was written with, and a source identity that the commit message repeats, which binds the
- * commit to exactly this manifest.
+ * The metadata stored in every snapshot tree: the storage format of the tree, the backup
+ * manifest, the LFS patterns the snapshot was written with, and a source identity that the commit
+ * message repeats, which binds the commit to exactly this manifest.
  */
 record GitSnapshotManifest(
         int storageFormatVersion,
         BackupManifest manifest,
         List<String> lfsPatterns,
         String sourceIdentity) {
-    static final int CURRENT_STORAGE_FORMAT_VERSION = 1;
+    /** A tree whose every file is stored whole, as a blob or as one LFS object. */
+    static final int WHOLE_FILES_VERSION = 1;
+
+    /** A tree that also holds region files as buckets under {@code .worldarchive/regions/}. */
+    static final int REGION_BUCKETS_VERSION = 2;
 
     private static final int MAXIMUM_PATTERNS = 128;
 
     private static final int MAXIMUM_PATTERN_LENGTH = 256;
 
     GitSnapshotManifest {
-        if (storageFormatVersion != CURRENT_STORAGE_FORMAT_VERSION) {
+        if (storageFormatVersion != WHOLE_FILES_VERSION && storageFormatVersion != REGION_BUCKETS_VERSION) {
             throw new IllegalArgumentException("Unsupported Git snapshot metadata version");
         }
         Objects.requireNonNull(manifest, "manifest");
@@ -37,8 +41,12 @@ record GitSnapshotManifest(
     }
 
     static GitSnapshotManifest create(BackupManifest manifest, List<String> lfsPatterns) {
+        return create(WHOLE_FILES_VERSION, manifest, lfsPatterns);
+    }
+
+    static GitSnapshotManifest create(int storageFormatVersion, BackupManifest manifest, List<String> lfsPatterns) {
         return new GitSnapshotManifest(
-                CURRENT_STORAGE_FORMAT_VERSION,
+                storageFormatVersion,
                 manifest,
                 lfsPatterns,
                 computeSourceIdentity(manifest));

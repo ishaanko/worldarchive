@@ -2,6 +2,8 @@ package dev.ishaanko.worldarchive.storage.git;
 
 import dev.ishaanko.worldarchive.support.AtomicFiles;
 import dev.ishaanko.worldarchive.support.Digests;
+import java.io.BufferedOutputStream;
+import java.io.FilterOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -77,6 +79,11 @@ final class GitLfsObjects {
         copyTo(pointer, OutputStream.nullOutputStream());
     }
 
+    /** Opens the object for reading; callers check its size or content themselves. */
+    InputStream open(GitLfsPointer pointer) throws IOException {
+        return Files.newInputStream(path(pointer.sha256()), LinkOption.NOFOLLOW_LINKS);
+    }
+
     /**
      * Copies the object into a restored file, proving on the way that its bytes match the pointer.
      * An object whose bytes do not match is set aside before this fails.
@@ -84,33 +91,55 @@ final class GitLfsObjects {
     void copyTo(GitLfsPointer pointer, OutputStream target) throws IOException, InterruptedException, GitStorageException {
         requireSize(pointer);
         Path object = path(pointer.sha256());
-        GitLfsPointer read;
+        Hashing read = new Hashing(target);
         try (InputStream input = Files.newInputStream(object, LinkOption.NOFOLLOW_LINKS)) {
-            read = copy(input, target);
+            copy(input, read);
         }
-        if (!read.equals(pointer)) {
+        if (!read.pointer().equals(pointer)) {
             GitStorageException damaged = missing(pointer);
             setAside(object, damaged);
             throw damaged;
         }
     }
 
+    /** Writes the bytes of one object to a stream; called once by {@link #store(GitLfsPointer, String, Content)}. */
+    @FunctionalInterface
+    interface Content {
+        void writeTo(OutputStream output) throws IOException, InterruptedException;
+    }
+
     /**
-     * Writes a captured file's bytes as the object for its SHA-256, replacing a damaged copy. The
-     * copy is hashed on the way and must match before it is flushed and moved into place.
+     * Writes a captured file's bytes as the object for its SHA-256, replacing a damaged copy.
      *
      * @param name the file's path in the world, for the message when it no longer matches
      */
     void store(Path source, String name, GitLfsPointer pointer)
             throws IOException, InterruptedException, GitStorageException {
+        store(pointer, name, output -> {
+            try (InputStream input = Files.newInputStream(source, LinkOption.NOFOLLOW_LINKS)) {
+                copy(input, output);
+            }
+        });
+    }
+
+    /**
+     * Writes the object for {@code pointer} from {@code content}, replacing a damaged copy. The
+     * bytes are hashed on the way and must match the pointer before they are flushed and moved
+     * into place, so a source that changed fails here and leaves the store as it was.
+     *
+     * @param name the world file the bytes come from, for the message when they no longer match
+     */
+    void store(GitLfsPointer pointer, String name, Content content)
+            throws IOException, InterruptedException, GitStorageException {
         Files.createDirectories(temporary);
         Path partial = temporary.resolve("lfs-" + UUID.randomUUID());
         try {
-            try (InputStream input = Files.newInputStream(source, LinkOption.NOFOLLOW_LINKS);
-                    FileChannel channel = FileChannel.open(partial, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
-                GitLfsPointer copied = copy(input, Channels.newOutputStream(channel));
+            try (FileChannel channel = FileChannel.open(partial, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
+                Hashing written = new Hashing(new BufferedOutputStream(Channels.newOutputStream(channel), BUFFER_BYTES));
+                content.writeTo(written);
+                written.flush();
                 channel.force(true);
-                if (!copied.equals(pointer)) {
+                if (!written.pointer().equals(pointer)) {
                     throw new GitStorageException("The captured file " + name + " changed. Try the backup again.");
                 }
             }
@@ -221,21 +250,46 @@ final class GitLfsObjects {
         }
     }
 
-    /** Copies every byte and returns what they describe as a pointer: their SHA-256 and count. */
-    private static GitLfsPointer copy(InputStream input, OutputStream target) throws IOException, InterruptedException {
-        MessageDigest digest = Digests.sha256();
+    /** Copies every byte, stopping when the thread is interrupted. */
+    private static void copy(InputStream input, OutputStream target) throws IOException, InterruptedException {
         byte[] buffer = new byte[BUFFER_BYTES];
-        long copied = 0;
         int read;
         while ((read = input.read(buffer)) >= 0) {
             if (Thread.interrupted()) {
                 throw new InterruptedException("Copying a Git LFS object was cancelled");
             }
-            digest.update(buffer, 0, read);
             target.write(buffer, 0, read);
-            copied += read;
         }
-        return new GitLfsPointer(Digests.hex(digest.digest()), copied);
+    }
+
+    /** Passes bytes on to a stream and describes what passed as a pointer: their SHA-256 and count. */
+    static final class Hashing extends FilterOutputStream {
+        private final MessageDigest digest = Digests.sha256();
+
+        private long count;
+
+        Hashing(OutputStream target) {
+            super(Objects.requireNonNull(target, "target"));
+        }
+
+        @Override
+        public void write(int value) throws IOException {
+            digest.update((byte) value);
+            count++;
+            out.write(value);
+        }
+
+        @Override
+        public void write(byte[] bytes, int offset, int length) throws IOException {
+            digest.update(bytes, offset, length);
+            count += length;
+            out.write(bytes, offset, length);
+        }
+
+        /** The pointer of the bytes written so far; call it once, after the last write. */
+        GitLfsPointer pointer() {
+            return new GitLfsPointer(Digests.hex(digest.digest()), count);
+        }
     }
 
     private static GitStorageException missing(GitLfsPointer pointer) {

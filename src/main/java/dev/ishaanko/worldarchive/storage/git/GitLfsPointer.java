@@ -8,9 +8,10 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * A Git LFS pointer: the tree stores this small text in place of a file, and the file's bytes
- * live in the repository's LFS object store under their SHA-256. A blob is recognized as a
- * pointer by its content, never by mutable attributes.
+ * A Git LFS pointer: the tree stores this small text in place of a file, or of one bucket of a
+ * bucketed region, and the bytes live in the repository's LFS object store under their SHA-256.
+ * A blob is recognized as a pointer by its content, never by mutable attributes, which is also
+ * how Git LFS finds the bucket objects to upload and download.
  */
 record GitLfsPointer(String sha256, long size) {
     /** Git LFS never treats a blob of this many bytes or more as a pointer. */
