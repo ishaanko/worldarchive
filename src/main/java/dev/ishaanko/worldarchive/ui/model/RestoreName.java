@@ -2,6 +2,7 @@ package dev.ishaanko.worldarchive.ui.model;
 
 import dev.ishaanko.worldarchive.core.RestoreBackupRequest;
 import dev.ishaanko.worldarchive.support.PortablePath;
+import java.time.LocalDate;
 import java.util.Optional;
 
 /**
@@ -13,7 +14,7 @@ import java.util.Optional;
 public final class RestoreName {
     private static final String UNSAFE_CHARACTERS = "<>:\"/\\|?*";
 
-    private static final String SUFFIX = " - Restored";
+    private static final String SUFFIX = " - Restored ";
 
     private static final String COPY_SUFFIX = " Copy";
 
@@ -31,11 +32,13 @@ public final class RestoreName {
     }
 
     /**
-     * The suggested name: the world's display name followed by {@code - Restored}, with unsafe
-     * characters replaced and cut to fit, and never the folder name of the original world.
+     * The suggested name: the world's display name followed by {@code - Restored} and the local
+     * date the backup was made, such as {@code My World - Restored 2026-09-22}, so copies restored
+     * from different backups get different names. Unsafe characters are replaced, the name is cut
+     * to fit, and it is never the folder name of the original world.
      */
-    public static String suggest(String displayName, String originalFolder) {
-        String name = trimFolderName(replaceUnsafe(displayName + SUFFIX));
+    public static String suggest(String displayName, String originalFolder, LocalDate backupDate) {
+        String name = trimFolderName(replaceUnsafe(displayName + SUFFIX + backupDate));
         if (name.isBlank()) {
             name = "Restored World";
         }
