@@ -86,7 +86,8 @@ public final class WorldGitSnapshotStore implements BackupBackend {
 
     /**
      * Writes the snapshot on the calling thread. When the upload is cut short, the local
-     * snapshot is still returned as pending sync.
+     * snapshot is still returned as pending sync; when the upload setting keeps it here, it is a
+     * success that is not synced.
      */
     @Override
     public DestinationResult createBackup(BackupCapture capture, ProgressListener progressListener)

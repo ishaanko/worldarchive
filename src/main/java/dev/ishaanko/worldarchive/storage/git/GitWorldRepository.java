@@ -1,5 +1,6 @@
 package dev.ishaanko.worldarchive.storage.git;
 
+import dev.ishaanko.worldarchive.config.RemoteUpload;
 import dev.ishaanko.worldarchive.core.BackupCapture;
 import dev.ishaanko.worldarchive.core.WorldInventory;
 import dev.ishaanko.worldarchive.model.BackupId;
@@ -11,6 +12,7 @@ import dev.ishaanko.worldarchive.model.ProgressListener;
 import dev.ishaanko.worldarchive.model.SafeText;
 import dev.ishaanko.worldarchive.model.SyncStatus;
 import dev.ishaanko.worldarchive.model.WorldId;
+import dev.ishaanko.worldarchive.support.AtomicFiles;
 import dev.ishaanko.worldarchive.support.PortablePath;
 import java.io.IOException;
 import java.nio.channels.ClosedByInterruptException;
@@ -18,6 +20,7 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -27,6 +30,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -50,6 +54,11 @@ final class GitWorldRepository {
 
     /** Git repacks when a repository holds more packs than this; see {@code gc.autoPackLimit}. */
     private static final int PACK_LIMIT = 50;
+
+    /** Holds the local day of the last upload and the remote it went to; see {@link RemoteUpload#ONCE_A_DAY}. */
+    private static final String LAST_UPLOAD = "last-upload";
+
+    private static final int LAST_UPLOAD_BYTES = 4_096;
 
     private final WorldId worldId;
 
@@ -94,25 +103,31 @@ final class GitWorldRepository {
         return GitRepositoryLock.withLock(repository.directory(), repository.settings().commandTimeout(), work);
     }
 
-    /** Writes, verifies and publishes a snapshot of the capture, then uploads it when the world has a remote. */
+    /**
+     * Writes, verifies and publishes a snapshot of the capture, then uploads it when the world has
+     * a remote and the upload setting allows it now. A snapshot that stays here is NOT_SYNCED.
+     */
     DestinationResult createBackup(BackupCapture capture, ProgressListener listener) {
         GitProgress progress = new GitProgress(listener, capture.manifest());
         try {
             requireStorablePaths(capture.inventory());
             return locked(() -> {
+                LocalDate day = LocalDate.ofInstant(capture.manifest().createdAt(), repository.settings().clock().getZone());
+                boolean uploads = remote.isPresent() && uploadsOn(day);
                 // Decided before the publish, so after it only the upload can stop, and a cancel leaves it pending.
-                GitRemote.MainBranch main = remote.isPresent()
+                GitRemote.MainBranch main = uploads
                         ? mainBranch(capture.manifest().createdAt().truncatedTo(ChronoUnit.SECONDS))
                         : GitRemote.MainBranch.KEEP;
                 progress.report(OperationPhase.WRITING, "Writing the Git snapshot");
                 GitSnapshot snapshot = writeAndPublish(capture, progress);
                 packIfNeeded();
-                if (remote.isEmpty()) {
+                if (!uploads) {
                     progress.report(OperationPhase.COMPLETE, "Git snapshot complete");
-                    return DestinationResult.success(DestinationType.GIT, snapshot.refName());
+                    DestinationResult local = DestinationResult.success(DestinationType.GIT, snapshot.refName());
+                    return remote.isPresent() ? local.withSync(SyncStatus.NOT_SYNCED) : local;
                 }
                 progress.report(OperationPhase.PUBLISHING, "Uploading the Git snapshot");
-                return upload(snapshot, main);
+                return upload(snapshot, () -> main, day);
             });
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
@@ -300,7 +315,8 @@ final class GitWorldRepository {
             }
             // A repository that an older version wrote gets the current settings before it uploads.
             repository.prepare();
-            return upload(snapshot, mainBranch(snapshot.committedAt()));
+            LocalDate today = LocalDate.now(repository.settings().clock());
+            return upload(snapshot, () -> mainAfterSync(snapshot), today);
         });
     }
 
@@ -385,10 +401,71 @@ final class GitWorldRepository {
                 : GitRemote.MainBranch.MOVE;
     }
 
-    /** Uploads a published snapshot; a failed or cancelled upload leaves it pending. */
-    private DestinationResult upload(GitSnapshot snapshot, GitRemote.MainBranch main) {
+    /** Whether a backup made on {@code day} uploads on its own, by the upload setting. */
+    private boolean uploadsOn(LocalDate day) {
+        return switch (repository.settings().remoteUpload()) {
+            case EVERY_BACKUP -> true;
+            case ONLY_WITH_SYNC -> false;
+            case ONCE_A_DAY -> !lastUpload().equals(Optional.of(uploadMark(day)));
+        };
+    }
+
+    /** What the marker of the last upload holds; empty when there is none or it cannot be read, so the backup uploads. */
+    private Optional<String> lastUpload() {
+        Path marker = repository.directory().resolve("worldarchive").resolve(LAST_UPLOAD);
+        if (!Files.isRegularFile(marker, LinkOption.NOFOLLOW_LINKS)) {
+            return Optional.empty();
+        }
         try {
-            remote.orElseThrow().upload(snapshot, main);
+            return Optional.of(AtomicFiles.readUtf8(marker, LAST_UPLOAD_BYTES));
+        } catch (IOException exception) {
+            LOGGER.warn("Git could not read when world {} last uploaded: {}", worldId, SafeText.from(exception, "", 512));
+            return Optional.empty();
+        }
+    }
+
+    /** The day and the remote, so a new remote gets the next backup even on a day the old one had one. */
+    private String uploadMark(LocalDate day) {
+        return day + "\n" + repository.settings().remoteUrl().orElse("") + "\n";
+    }
+
+    /** Records an upload on {@code day}; a failure only means the next backup uploads too. */
+    private void recordUpload(LocalDate day) {
+        try {
+            AtomicFiles.writeUtf8(repository.directory().resolve("worldarchive").resolve(LAST_UPLOAD),
+                    uploadMark(day), LAST_UPLOAD_BYTES);
+        } catch (IOException exception) {
+            LOGGER.warn("Git could not record the upload of world {}: {}", worldId, SafeText.from(exception, "", 512));
+        }
+    }
+
+    /**
+     * Whether a Sync moves {@code main} to the snapshot: only when the remote holds no newer
+     * snapshot of this repository. A newer snapshot that never uploaded does not count, or
+     * {@code main} would stay behind every backup the remote has.
+     */
+    private GitRemote.MainBranch mainAfterSync(GitSnapshot snapshot)
+            throws IOException, InterruptedException, GitStorageException {
+        Set<BackupId> uploaded = remote.orElseThrow().branches().snapshots().stream()
+                .map(GitRemote.Branch::backupId)
+                .collect(Collectors.toSet());
+        return snapshots().stream().anyMatch(other -> uploaded.contains(other.backupId())
+                        && other.committedAt().isAfter(snapshot.committedAt()))
+                ? GitRemote.MainBranch.KEEP
+                : GitRemote.MainBranch.MOVE;
+    }
+
+    /** Decides what an upload does with {@code main}; asking the remote can fail like the upload itself. */
+    @FunctionalInterface
+    private interface MainChoice {
+        GitRemote.MainBranch decide() throws IOException, InterruptedException, GitStorageException;
+    }
+
+    /** Uploads a published snapshot and records the day; a failed or cancelled upload leaves it pending. */
+    private DestinationResult upload(GitSnapshot snapshot, MainChoice main, LocalDate day) {
+        try {
+            remote.orElseThrow().upload(snapshot, main.decide());
+            recordUpload(day);
             return DestinationResult.success(DestinationType.GIT, snapshot.refName()).withSync(SyncStatus.SYNCED);
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();

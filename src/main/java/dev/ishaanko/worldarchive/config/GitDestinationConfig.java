@@ -10,15 +10,16 @@ import java.util.regex.Pattern;
 
 /**
  * Settings of the Git destination: one repository per world inside {@code repository}, each
- * pushed to its world's own remote. An empty repository means the default folder
- * ({@link DefaultDestinations}).
+ * pushed to its world's own remote when {@code remoteUpload} says so. An empty repository means
+ * the default folder ({@link DefaultDestinations}).
  */
 public record GitDestinationConfig(
         boolean enabled,
         Optional<Path> repository,
         String remoteName,
         DestinationTriggerConfig triggers,
-        List<String> lfsPatterns) {
+        List<String> lfsPatterns,
+        RemoteUpload remoteUpload) {
     public static final String DEFAULT_REMOTE_NAME = "origin";
 
     public static final List<String> DEFAULT_LFS_PATTERNS = List.of(
@@ -41,6 +42,7 @@ public record GitDestinationConfig(
         validateRemoteName(remoteName);
         Objects.requireNonNull(triggers, "triggers");
         lfsPatterns = validateLfsPatterns(lfsPatterns);
+        Objects.requireNonNull(remoteUpload, "remoteUpload");
     }
 
     public static GitDestinationConfig defaults() {
@@ -49,11 +51,12 @@ public record GitDestinationConfig(
                 Optional.empty(),
                 DEFAULT_REMOTE_NAME,
                 DestinationTriggerConfig.defaults(),
-                DEFAULT_LFS_PATTERNS);
+                DEFAULT_LFS_PATTERNS,
+                RemoteUpload.EVERY_BACKUP);
     }
 
     public GitDestinationConfig withRepository(Optional<Path> repository) {
-        return new GitDestinationConfig(enabled, repository, remoteName, triggers, lfsPatterns);
+        return new GitDestinationConfig(enabled, repository, remoteName, triggers, lfsPatterns, remoteUpload);
     }
 
     /**

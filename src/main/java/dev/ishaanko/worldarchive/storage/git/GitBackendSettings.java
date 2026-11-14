@@ -2,8 +2,10 @@ package dev.ishaanko.worldarchive.storage.git;
 
 import dev.ishaanko.worldarchive.config.FolderOrigin;
 import dev.ishaanko.worldarchive.config.GitDestinationConfig;
+import dev.ishaanko.worldarchive.config.RemoteUpload;
 import dev.ishaanko.worldarchive.config.RemoteUrlPolicy;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
@@ -26,6 +28,9 @@ import java.util.regex.Pattern;
  * @param commandTimeout how long a network command or a tool check may run without printing
  *        anything before it is stopped; local commands have no limit because Cancel stops them
  * @param maximumOutputBytes the most standard output or error kept from one command
+ * @param remoteUpload when a backup uploads to its world's remote on its own
+ * @param clock its zone decides the local day for {@link RemoteUpload#ONCE_A_DAY}, and its time is
+ *        the day a Sync uploads on
  */
 public record GitBackendSettings(
         boolean enabled,
@@ -36,7 +41,9 @@ public record GitBackendSettings(
         Optional<String> remoteUrl,
         List<String> lfsPatterns,
         Duration commandTimeout,
-        int maximumOutputBytes) {
+        int maximumOutputBytes,
+        RemoteUpload remoteUpload,
+        Clock clock) {
     public static final List<String> DEFAULT_LFS_PATTERNS = GitDestinationConfig.DEFAULT_LFS_PATTERNS;
 
     public static final Duration DEFAULT_COMMAND_TIMEOUT = Duration.ofMinutes(5);
@@ -65,6 +72,23 @@ public record GitBackendSettings(
         if (maximumOutputBytes < 1_024 || maximumOutputBytes > 64 * 1_024 * 1_024) {
             throw new IllegalArgumentException("Git output limit must be between 1 KiB and 64 MiB");
         }
+        Objects.requireNonNull(remoteUpload, "remoteUpload");
+        Objects.requireNonNull(clock, "clock");
+    }
+
+    /** Settings that upload every backup, for a repository whose upload timing does not matter. */
+    public GitBackendSettings(
+            boolean enabled,
+            Path repository,
+            FolderOrigin folderOrigin,
+            String executable,
+            String remoteName,
+            Optional<String> remoteUrl,
+            List<String> lfsPatterns,
+            Duration commandTimeout,
+            int maximumOutputBytes) {
+        this(enabled, repository, folderOrigin, executable, remoteName, remoteUrl, lfsPatterns, commandTimeout,
+                maximumOutputBytes, RemoteUpload.EVERY_BACKUP, Clock.systemDefaultZone());
     }
 
     /**
@@ -72,7 +96,7 @@ public record GitBackendSettings(
      * {@link dev.ishaanko.worldarchive.config.DefaultDestinations#resolve} does. They name no
      * remote: each world's remote comes from that world's settings and is given to the store separately.
      */
-    public static GitBackendSettings from(GitDestinationConfig config, FolderOrigin folderOrigin) {
+    public static GitBackendSettings from(GitDestinationConfig config, FolderOrigin folderOrigin, Clock clock) {
         Objects.requireNonNull(config, "config");
         return new GitBackendSettings(
                 config.enabled(),
@@ -83,7 +107,9 @@ public record GitBackendSettings(
                 Optional.empty(),
                 config.lfsPatterns(),
                 DEFAULT_COMMAND_TIMEOUT,
-                DEFAULT_MAXIMUM_OUTPUT_BYTES);
+                DEFAULT_MAXIMUM_OUTPUT_BYTES,
+                config.remoteUpload(),
+                clock);
     }
 
     /** The same settings for one repository and its remote. */
@@ -97,6 +123,8 @@ public record GitBackendSettings(
                 singleRemoteUrl,
                 lfsPatterns,
                 commandTimeout,
-                maximumOutputBytes);
+                maximumOutputBytes,
+                remoteUpload,
+                clock);
     }
 }

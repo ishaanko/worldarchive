@@ -244,14 +244,20 @@ public final class WorldArchiveConfigStore {
                 FIELDS.requiredInt(object, "scheduleIntervalMinutes"));
     }
 
-    /** Fields that older versions wrote here (health, the 0.1.0 shared repository) are ignored. */
+    /**
+     * Fields that older versions wrote here (health, the 0.1.0 shared repository) are ignored. A
+     * file from before {@code remoteUpload} existed uploads every backup, as those versions did.
+     */
     private GitDestinationConfig parseGit(JsonObject object) throws ConfigurationException {
         return new GitDestinationConfig(
                 FIELDS.requiredBoolean(object, "enabled"),
                 optionalPath(object, "repositoryRoot"),
                 FIELDS.requiredString(object, "remoteName"),
                 parseDestinationTriggers(FIELDS.requiredObject(object, "triggers")),
-                FIELDS.requiredStrings(object, "lfsPatterns"));
+                FIELDS.requiredStrings(object, "lfsPatterns"),
+                object.has("remoteUpload")
+                        ? FIELDS.requiredEnum(object, "remoteUpload", RemoteUpload.class)
+                        : RemoteUpload.EVERY_BACKUP);
     }
 
     private ZipDestinationConfig parseZip(JsonObject object) throws ConfigurationException {
@@ -363,6 +369,7 @@ public final class WorldArchiveConfigStore {
         JsonArray lfsPatterns = new JsonArray();
         config.lfsPatterns().forEach(lfsPatterns::add);
         git.add("lfsPatterns", lfsPatterns);
+        git.addProperty("remoteUpload", config.remoteUpload().name());
         git.add("health", healthPlaceholder());
         return git;
     }

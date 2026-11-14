@@ -398,7 +398,8 @@ class FailureEndToEndTest {
                         gitRepository,
                         git.remoteName(),
                         DestinationTriggerConfig.defaults(),
-                        git.lfsPatterns()),
+                        git.lfsPatterns(),
+                        git.remoteUpload()),
                 new ZipDestinationConfig(
                         true,
                         zipFolder,
