@@ -232,6 +232,34 @@ class BackupRestoreEndToEndTest {
         assertEquals(List.of("Undone"), savesFolders());
     }
 
+    /** The game lists every folder in saves that holds a level.dat, so a crash must not leave one behind. */
+    @Test
+    void aWorldBeingRestoredIsNotAWorldTheGameWouldListUntilItIsPublished() throws Exception {
+        engine = start(Engine.onlyDestination(DestinationType.ZIP));
+        TestWorld world = TestWorld.create(engine, "Hidden");
+        BackupResult result = engine.backupNow(world, BackupTrigger.MANUAL);
+        CompletableFuture<List<String>> listedBeforePublish = new CompletableFuture<>();
+        ProgressListener lookWhenWritten = progress -> {
+            if (progress.phase() == OperationPhase.PUBLISHING) {
+                try (Stream<Path> folders = Files.list(engine.saves)) {
+                    listedBeforePublish.complete(folders
+                            .filter(folder -> Files.isRegularFile(folder.resolve("level.dat")))
+                            .map(folder -> folder.getFileName().toString())
+                            .toList());
+                } catch (IOException exception) {
+                    listedBeforePublish.completeExceptionally(exception);
+                }
+            }
+        };
+
+        RestoreBackupResult restored = await(engine.recovery.restoreBackup(
+                new RestoreBackupRequest(result.backupId(), engine.saves, "Hidden restored"), lookWhenWritten));
+
+        assertEquals(List.of("Hidden"), listedBeforePublish.getNow(List.of("no PUBLISHING progress")));
+        assertEquals(engine.saves.toRealPath().resolve("Hidden restored"), restored.restoredWorldDirectory());
+        assertEquals(List.of("Hidden", "Hidden restored"), savesFolders());
+    }
+
     @Test
     void aRestoreCannotBeCancelledOnceItsWorldIsPublished() throws Exception {
         engine = start(Engine.onlyDestination(DestinationType.ZIP));
