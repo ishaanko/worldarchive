@@ -3,6 +3,7 @@ package dev.ishaanko.worldarchive.runtime;
 import dev.ishaanko.worldarchive.core.CaptureKind;
 import dev.ishaanko.worldarchive.core.CreateBackupRequest;
 import dev.ishaanko.worldarchive.core.PreparedBackup;
+import dev.ishaanko.worldarchive.core.WorldOperationGate;
 import dev.ishaanko.worldarchive.model.BackupResult;
 import dev.ishaanko.worldarchive.model.BackupTrigger;
 import dev.ishaanko.worldarchive.model.ProgressListener;
@@ -455,9 +456,17 @@ public final class LiveWorldBackups {
             return;
         }
         exitBackups.incrementAndGet();
+        // Counted as being copied from here on, so a server that opens the world again waits even
+        // before the worker gets to the copy.
+        WorldOperationGate.Permit copying = graph.captures().markCopying(ended.selection.worldDirectory());
         try {
-            graph.executor().execute(() -> runExitBackup(ended, permit));
+            graph.executor().execute(() -> {
+                try (copying) {
+                    runExitBackup(ended, permit);
+                }
+            });
         } catch (RejectedExecutionException shuttingDown) {
+            copying.close();
             exitBackups.decrementAndGet();
             permit.close();
             reports.exitNotMade(BackgroundNotices.exitNotMade("WorldArchive is shutting down"));

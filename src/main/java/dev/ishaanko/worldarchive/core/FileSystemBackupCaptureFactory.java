@@ -145,9 +145,10 @@ public final class FileSystemBackupCaptureFactory {
 
     /**
      * Counts the world as being copied until the returned permit is closed. The coordinator holds
-     * it from before a capture waits for its turn until the capture ends.
+     * it from before a capture waits for its turn until the capture ends, and a world-exit backup
+     * holds one from the moment the world stops.
      */
-    WorldOperationGate.Permit markCopying(Path worldDirectory) {
+    public WorldOperationGate.Permit markCopying(Path worldDirectory) {
         Path world = copyKey(worldDirectory);
         synchronized (copying) {
             copying.merge(world, 1, Integer::sum);
