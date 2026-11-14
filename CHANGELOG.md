@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.5.0 (2026-11-14)
+
+### Added
+
+- The World Backups list shows when each world's newest backup was made.
+- The Restore screen names the backup it restores. The suggested name for the new world
+  includes the backup date, such as `My World - Restored 2026-09-22`.
+- Enter confirms in the label box of Create Backup and in the name box of Restore.
+- A disabled **Sync** on a backup with no Git copy says why.
+
+### Changed
+
+- Settings accept a folder pasted with quotes around it, as Windows "Copy as path" gives it,
+  and a path or Git remote with spaces or a line break around it.
+- Settings errors use the names shown on the screen and say what to change.
+- The screens use shorter wording, and their text is in the language file, so it can be
+  translated. Result summaries are still English only.
+- If quitting has to stop a backup, WorldArchive waits up to 5 seconds for that backup to stop
+  its Git processes and remove its partial files.
+- WorldArchive is built against Fabric Loader 0.20.1, Fabric API 0.166.2, and Mod Menu 21.0.1.
+  The oldest versions it runs on are unchanged.
+
+### Fixed
+
+- With a filter on, the backup browser could restore, sync, verify, or delete a selected
+  backup that the filter was hiding. Actions now apply only to selected backups you can see.
+- Opening a world again right after leaving it could make its world-exit backup fail with
+  "World file contents changed". The world now waits on its loading screen, for up to 2
+  minutes, until the backup has copied it.
+- A world that was still being restored could show up in the world list if the game closed or
+  crashed during the restore.
+- Quitting from the title screen while a world-exit backup ran froze the window. A message
+  now shows until the backup finishes.
+- **Cancel** could wait several seconds while Git was silent. It now stops a Git backup,
+  verify, or restore at once.
+- Git uploads and remote deletes failed when the global Git configuration signs every push
+  (`push.gpgSign`).
+- A damaged or unknown file in the ZIP folder made every game start open every ZIP backup,
+  which in OneDrive or Google Drive can download all of them. The start now opens only the
+  archives that the backup list lacks.
+- A backup could fail with "Catalog already contains a different record" when a second game
+  that uses the same backup folder listed its copy first.
+- A restore to a world named `COM0` or `LPT0` made a folder that Windows cannot use.
+- The storage screen said that labeled backups are never deleted. It now says that cleanup
+  never deletes them. **Delete** still can.
+
 ## 0.4.0 (2026-09-22)
 
 ### Changed
