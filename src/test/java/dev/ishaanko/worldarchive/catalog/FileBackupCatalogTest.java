@@ -288,21 +288,28 @@ final class FileBackupCatalogTest {
 
     /** The other instance can sync and verify the copy it listed before the backup records itself. */
     @Test
-    void aFinishedBackupKeepsListedCopiesItLacksOrThatChangedSinceTheyWereListed() throws IOException {
+    void aFinishedBackupKeepsListedCopiesItLacksAndWhatASyncOrVerifyFound() throws IOException {
         Path file = temporaryDirectory.resolve("catalog.json");
         FileBackupCatalog catalog = new FileBackupCatalog(file);
-        BackupRecord finished = record(WorldId.create(), "2026-07-17T10:00:00Z");
-        String ref = "refs/heads/worldarchive/" + finished.manifest().worldId() + "/" + finished.manifest().backupId();
-        DestinationResult synced = DestinationResult.success(DestinationType.GIT, ref)
-                .withSync(SyncStatus.SYNCED).withVerification(VerificationStatus.VERIFIED);
-        DestinationResult zip = finished.result().destinations().getFirst();
-        catalog.mergeAll(List.of(withDestinations(finished, List.of(synced, zip))));
+        BackupRecord synced = record(WorldId.create(), "2026-07-17T10:00:00Z");
+        BackupRecord verified = record(WorldId.create(), "2026-07-17T10:05:00Z");
+        DestinationResult zip = synced.result().destinations().getFirst();
+        DestinationResult git = DestinationResult.success(DestinationType.GIT, "refs/heads/worldarchive/a");
+        DestinationResult pending = DestinationResult.pendingSync(
+                DestinationType.GIT, "refs/heads/worldarchive/a", "The remote was not reached");
+        catalog.mergeAll(List.of(
+                withDestinations(synced, List.of(
+                        git.withSync(SyncStatus.SYNCED).withVerification(VerificationStatus.VERIFIED), zip)),
+                withDestinations(verified, List.of(git.withVerification(VerificationStatus.VERIFIED)))));
 
-        catalog.add(withDestinations(finished,
-                List.of(DestinationResult.pendingSync(DestinationType.GIT, ref, "The remote was not reached"))));
+        catalog.add(withDestinations(synced, List.of(pending)));
+        catalog.add(withDestinations(verified, List.of(pending)));
 
-        assertEquals(List.of(synced, zip), new FileBackupCatalog(file)
-                .find(finished.manifest().backupId()).orElseThrow().result().destinations());
+        FileBackupCatalog reloaded = new FileBackupCatalog(file);
+        assertEquals(List.of(git.withSync(SyncStatus.SYNCED).withVerification(VerificationStatus.VERIFIED), zip),
+                reloaded.find(synced.manifest().backupId()).orElseThrow().result().destinations());
+        assertEquals(List.of(pending.withVerification(VerificationStatus.VERIFIED)),
+                reloaded.find(verified.manifest().backupId()).orElseThrow().result().destinations());
     }
 
     @Test

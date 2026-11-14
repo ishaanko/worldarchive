@@ -159,22 +159,29 @@ public final class FileBackupCatalog implements BackupCatalog {
 
     /**
      * The record a finished backup adds over one already listed for it, such as when another game
-     * instance's rebuild listed a copy first. A copy listed only before is kept, and so is a listed
-     * copy that a sync or a verify changed since; the backup's own outcome replaces the rest.
+     * instance's rebuild listed a copy first. A copy listed only before is kept. For a copy both
+     * have, the backup's own outcome wins, except for what a sync or a verify of the listed copy
+     * found since.
      */
     private static BackupRecord overlay(BackupRecord existing, BackupRecord added) {
         Map<DestinationType, DestinationResult> destinations = new EnumMap<>(DestinationType.class);
         existing.result().destinations().forEach(destination -> destinations.put(destination.destination(), destination));
-        added.result().destinations().forEach(own -> destinations.merge(own.destination(), own,
-                (listed, finished) -> changedSinceListed(listed) ? listed : finished));
+        added.result().destinations().forEach(own -> destinations.merge(own.destination(), own, FileBackupCatalog::finished));
         return new BackupRecord(added.manifest(), new BackupResult(added.manifest().backupId(),
                 added.manifest().worldId(), List.copyOf(destinations.values()), added.result().completedAt()));
     }
 
-    /** True for a listed copy that no longer reads as a rebuild first lists it. */
-    private static boolean changedSinceListed(DestinationResult listed) {
-        return listed.isDurable() && !listed.equals(
-                DestinationResult.success(listed.destination(), listed.artifactId().orElseThrow()));
+    /** The backup's own outcome of a copy, with the upload and the check that the listed copy already has. */
+    private static DestinationResult finished(DestinationResult listed, DestinationResult own) {
+        if (!listed.isDurable() || !own.isDurable()) {
+            return own;
+        }
+        DestinationResult result = listed.syncStatus() == SyncStatus.SYNCED
+                ? own.withState(DestinationStatus.SUCCESS, Optional.empty(), SyncStatus.SYNCED)
+                : own;
+        return listed.verificationStatus() == VerificationStatus.NOT_VERIFIED
+                ? result
+                : result.withVerification(listed.verificationStatus());
     }
 
     private static void requireSameIdentity(
