@@ -120,7 +120,7 @@ public final class ZipBackupStore {
         List<ZipBackupArtifact> artifacts = new ArrayList<>();
         for (Path folder : worldFolders()) {
             for (Path file : archiveFiles(folder)) {
-                readListed(file).ifPresent(artifacts::add);
+                readArchive(file).ifPresent(artifacts::add);
             }
         }
         artifacts.sort(NEWEST_FIRST);
@@ -442,7 +442,14 @@ public final class ZipBackupStore {
         return files;
     }
 
-    private Optional<ZipBackupArtifact> readListed(Path file) throws IOException {
+    /**
+     * Reads one archive of this store from its file name and the manifest at its start, the way
+     * {@link #listArchives} reads each, so a caller that needs a few archives opens only those.
+     * Empty, and logged, when the archive cannot be read, is damaged, or names another backup.
+     *
+     * @throws IOException when the thread is interrupted, or the file is not an archive of this store
+     */
+    public Optional<ZipBackupArtifact> readArchive(Path file) throws IOException {
         ManagedZipArchive archive = ManagedZipArchive.resolve(root, file);
         BackupManifest manifest;
         try (InputStream input = new BufferedInputStream(Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS))) {

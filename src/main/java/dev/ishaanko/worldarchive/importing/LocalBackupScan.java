@@ -314,42 +314,49 @@ final class LocalBackupScan {
             found.unreadable("the ZIP folder " + store.root(), failure);
             return;
         }
-        Set<String> unlisted = new HashSet<>();
         for (WorldId world : worlds) {
             if (!zipStores.store(world).root().equals(store.root())) {
                 continue;
             }
+            List<ZipArchiveSize> unlisted = new ArrayList<>();
             try {
                 for (ZipArchiveSize archive : store.listSizes(world)) {
-                    String artifactId = world + "/" + archive.archivePath().getFileName();
-                    if (found.unlisted(archive.backupId(), DestinationType.ZIP, artifactId)) {
-                        unlisted.add(artifactId);
+                    if (found.unlisted(archive.backupId(), DestinationType.ZIP, artifactId(world, archive))) {
+                        unlisted.add(archive);
                     }
                 }
             } catch (IOException failure) {
                 found.unreadable("the ZIP folder " + store.root().resolve(world.toString()), failure);
+                continue;
             }
-        }
-        if (!unlisted.isEmpty()) {
-            discoverZip(found, store, unlisted);
+            discoverZip(found, store, world, unlisted);
         }
     }
 
-    /** Reads the manifest at the start of each archive in the folder and keeps the unlisted ones. */
-    private void discoverZip(Found found, ZipBackupStore store, Set<String> unlisted) {
-        List<ZipBackupArtifact> artifacts;
-        try {
-            artifacts = store.listArchives();
-        } catch (IOException failure) {
-            found.issue("the ZIP folder " + store.root(), failure);
-            return;
-        }
-        for (ZipBackupArtifact artifact : artifacts) {
-            if (unlisted.remove(artifact.artifactId())) {
-                found.discover(record(artifact.manifest(), DestinationResult.success(DestinationType.ZIP, artifact.artifactId())));
+    /**
+     * Reads the manifest at the start of each unlisted archive, and of no other: opening a file in
+     * a synced folder can download it. An archive that cannot be read is read again at the next
+     * scan, which costs that one file.
+     */
+    private static void discoverZip(Found found, ZipBackupStore store, WorldId world, List<ZipArchiveSize> unlisted) {
+        for (ZipArchiveSize archive : unlisted) {
+            String artifactId = artifactId(world, archive);
+            Optional<ZipBackupArtifact> artifact;
+            try {
+                artifact = store.readArchive(archive.archivePath());
+            } catch (IOException failure) {
+                found.issue(artifactId, failure);
+                continue;
             }
+            artifact.ifPresentOrElse(
+                    read -> found.discover(record(read.manifest(), DestinationResult.success(DestinationType.ZIP, artifactId))),
+                    () -> found.issue(artifactId, new IOException("It cannot be read; Verify says why")));
         }
-        unlisted.forEach(artifactId -> found.issue(artifactId, new IOException("It cannot be read; Verify says why")));
+    }
+
+    /** The {@code <world id>/<file name>} under which the catalog records an archive. */
+    private static String artifactId(WorldId world, ZipArchiveSize archive) {
+        return world + "/" + archive.archivePath().getFileName();
     }
 
     /** The worlds that have a repository in the Git folder, by the store's own naming rule. */
