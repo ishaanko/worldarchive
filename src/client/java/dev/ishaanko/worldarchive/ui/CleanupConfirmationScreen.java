@@ -16,6 +16,7 @@ import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.StringWidget;
 import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.network.chat.CommonComponents;
 import net.minecraft.network.chat.Component;
 
 /**
@@ -60,7 +61,7 @@ final class CleanupConfirmationScreen extends Screen {
             BackupClientFacade facade,
             CleanupPlan plan,
             Set<BackupId> selected) {
-        super(Component.literal("Confirm Cleanup"));
+        super(Component.translatable("screen.worldarchive.cleanup.confirm_title"));
         this.preview = Objects.requireNonNull(preview, "preview");
         this.returnTo = Objects.requireNonNull(returnTo, "returnTo");
         this.world = Objects.requireNonNull(world, "world");
@@ -82,7 +83,7 @@ final class CleanupConfirmationScreen extends Screen {
                 31,
                 contentWidth,
                 18,
-                Component.literal("These backups will be deleted from this computer. This cannot be undone.")
+                Component.translatable("screen.worldarchive.cleanup.confirm_warning")
                         .withStyle(ChatFormatting.RED),
                 font));
         Paging paging = Paging.of(items.size(), Math.min(6, (height - 142) / ROW_HEIGHT), page);
@@ -100,7 +101,7 @@ final class CleanupConfirmationScreen extends Screen {
 
     private void addFooter(int x, int contentWidth, Paging paging) {
         Button acknowledgement = Button.builder(
-                        Widgets.checkbox(acknowledged, Component.literal("I reviewed every item")),
+                        Widgets.checkbox(acknowledged, Component.translatable("screen.worldarchive.cleanup.reviewed")),
                         ignored -> {
                             acknowledged = !acknowledged;
                             rebuildWidgets();
@@ -115,12 +116,15 @@ final class CleanupConfirmationScreen extends Screen {
             rebuildWidgets();
         }));
         Button delete = Button.builder(
-                        Component.literal("Delete " + items.size() + " Backup(s)").withStyle(ChatFormatting.RED),
+                        (items.size() == 1
+                                ? Component.translatable("screen.worldarchive.cleanup.delete_one")
+                                : Component.translatable("screen.worldarchive.cleanup.delete_many", items.size()))
+                                .withStyle(ChatFormatting.RED),
                         ignored -> apply())
                 .build();
         delete.active = acknowledged;
         buttons.add(delete);
-        buttons.add(Button.builder(Component.literal("Back"), ignored -> onClose()).build());
+        buttons.add(Button.builder(CommonComponents.GUI_BACK, ignored -> onClose()).build());
         buttons.forEach(button -> button.active &= !busy);
         Widgets.row(x, height - 28, contentWidth, buttons);
         buttons.forEach(this::addRenderableWidget);

@@ -5,6 +5,7 @@ import java.util.Objects;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.MultiLineTextWidget;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.network.chat.CommonComponents;
 import net.minecraft.network.chat.Component;
 
 /**
@@ -67,7 +68,7 @@ final class BackupConfirmationScreen extends Screen {
         addRenderableWidget(Button.builder(confirmLabel, ignored -> confirm())
                 .bounds(width / 2 - buttonWidth - 3, buttonY, buttonWidth, 20)
                 .build());
-        addRenderableWidget(Button.builder(Component.literal("Cancel"), ignored -> onClose())
+        addRenderableWidget(Button.builder(CommonComponents.GUI_CANCEL, ignored -> onClose())
                 .bounds(width / 2 + 3, buttonY, buttonWidth, 20)
                 .build());
     }

@@ -16,7 +16,9 @@ import net.minecraft.client.gui.components.MultiLineTextWidget;
 import net.minecraft.client.gui.components.StringWidget;
 import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.network.chat.CommonComponents;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.MutableComponent;
 
 /**
  * Lets the player choose which backups of a cleanup plan to delete. Nothing changes on this
@@ -48,7 +50,7 @@ final class CleanupPreviewScreen extends Screen {
             BackupWorldContext world,
             BackupClientFacade facade,
             CleanupPlan plan) {
-        super(Component.literal("Review Cleanup"));
+        super(Component.translatable("screen.worldarchive.cleanup.review_title"));
         this.parent = Objects.requireNonNull(parent, "parent");
         this.world = Objects.requireNonNull(world, "world");
         this.facade = Objects.requireNonNull(facade, "facade");
@@ -62,7 +64,7 @@ final class CleanupPreviewScreen extends Screen {
         int x = ScreenGeometry.centerX(width, contentWidth);
         addRenderableOnly(Widgets.title(font, x, 9, contentWidth, 20, title));
         Component summary = plan.items().isEmpty()
-                ? Component.literal("Nothing to clean up right now. Your keep settings protect every backup.")
+                ? Component.translatable("screen.worldarchive.cleanup.nothing")
                 : Component.translatable("screen.worldarchive.cleanup.choose");
         addRenderableOnly(new MultiLineTextWidget(x, 31, summary, font)
                 .setMaxWidth(contentWidth)
@@ -89,20 +91,23 @@ final class CleanupPreviewScreen extends Screen {
     }
 
     private void addFooter(int x, int contentWidth, Paging paging) {
-        String total = selection.selected().size() + " backup(s) selected · frees about "
-                + BackupText.bytes(selection.freedBytes());
         CleanupSelection.Coverage coverage = selection.coverage();
-        total += switch (coverage) {
-            case REACHES_TARGET -> "";
-            case SELECT_MORE -> " · still over the limit; select more backups";
-            case REST_PROTECTED -> " · still over the limit; the rest is protected";
-        };
+        MutableComponent total = Component.translatable(
+                "screen.worldarchive.cleanup.selected",
+                selection.selected().size(),
+                BackupText.bytes(selection.freedBytes()));
+        if (coverage != CleanupSelection.Coverage.REACHES_TARGET) {
+            total.append(BackupText.SEPARATOR).append(Component.translatable(
+                    coverage == CleanupSelection.Coverage.SELECT_MORE
+                            ? "screen.worldarchive.cleanup.select_more"
+                            : "screen.worldarchive.cleanup.rest_protected"));
+        }
         addRenderableOnly(new StringWidget(
                 x,
                 height - 52,
                 contentWidth,
                 16,
-                Component.literal(total).withStyle(coverage == CleanupSelection.Coverage.REACHES_TARGET
+                total.withStyle(coverage == CleanupSelection.Coverage.REACHES_TARGET
                         ? ChatFormatting.GRAY
                         : ChatFormatting.YELLOW),
                 font));
@@ -111,7 +116,7 @@ final class CleanupPreviewScreen extends Screen {
             page = index;
             rebuildWidgets();
         }));
-        Button continueButton = Button.builder(Component.literal("Continue"), ignored ->
+        Button continueButton = Button.builder(CommonComponents.GUI_CONTINUE, ignored ->
                         minecraft.setScreenAndShow(new CleanupConfirmationScreen(
                                 this,
                                 parent,
@@ -122,7 +127,7 @@ final class CleanupPreviewScreen extends Screen {
                 .build();
         continueButton.active = !selection.selected().isEmpty();
         buttons.add(continueButton);
-        buttons.add(Button.builder(Component.literal("Cancel"), ignored -> onClose()).build());
+        buttons.add(Button.builder(CommonComponents.GUI_CANCEL, ignored -> onClose()).build());
         Widgets.row(x, height - 28, contentWidth, buttons);
         buttons.forEach(this::addRenderableWidget);
     }
