@@ -9,7 +9,7 @@ Read CONTRIBUTING.md first.
 - Do not mix unrelated fixes together.
 -->
 
-## What Changed
+## What changed
 
 <!-- Describe the change clearly and keep the scope tight. -->
 
@@ -17,7 +17,7 @@ Read CONTRIBUTING.md first.
 
 <!-- Explain the problem and why this approach is correct. Link the issue or discussion. -->
 
-## UI Changes
+## UI changes
 
 <!-- If this PR changes a screen, include clear before/after screenshots.
      Delete this section if not applicable. -->
