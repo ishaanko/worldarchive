@@ -40,10 +40,11 @@ import net.minecraft.network.chat.Component;
  * the selected backups.
  *
  * <p>A plain click selects one row, Ctrl or Cmd click toggles a row, and Shift click extends the
- * selection from the last clicked row on the page. The selection survives paging and filtering,
- * so a delete of many backups can be put together across pages. Select all replaces the selection
- * with every backup that matches the filter, and Clear empties it. Only Delete accepts more than
- * one backup.</p>
+ * selection from the last clicked row on the page. The selection survives paging, so a delete of
+ * many backups can be put together across pages. The actions and the selected count cover only
+ * the selected backups that match the filter: a backup the filter hides is never acted on. Select
+ * all replaces the selection with every backup that matches the filter, and Clear empties it. Only
+ * Delete accepts more than one backup.</p>
  */
 public final class BackupBrowserScreen extends Screen {
     private static final int ROW_HEIGHT = 38;
@@ -99,7 +100,7 @@ public final class BackupBrowserScreen extends Screen {
 
     private int pageIndex;
 
-    private Component status = Component.literal("Loading backups…").withStyle(ChatFormatting.GRAY);
+    private Component status = loadingStatus();
 
     private boolean loading = true;
 
@@ -110,7 +111,7 @@ public final class BackupBrowserScreen extends Screen {
     private EditBox filterBox;
 
     public BackupBrowserScreen(Screen parent, BackupWorldContext world, BackupClientFacade facade) {
-        super(Component.literal("Backups"));
+        super(Component.translatable("screen.worldarchive.browser.title"));
         this.parent = Objects.requireNonNull(parent, "parent");
         this.world = Objects.requireNonNull(world, "world");
         this.facade = Objects.requireNonNull(facade, "facade");
@@ -182,21 +183,24 @@ public final class BackupBrowserScreen extends Screen {
         int sortWidth = Math.min(120, Math.max(72, contentWidth / 4));
         int selectWidth = Math.min(90, Math.max(60, contentWidth / 5));
         int filterWidth = contentWidth - sortWidth - selectWidth - 8;
-        filterBox = new EditBox(font, x, FILTER_Y, filterWidth, 20, Component.literal("Filter backups"));
+        Component filterHint = Component.translatable("screen.worldarchive.browser.filter_hint");
+        filterBox = new EditBox(font, x, FILTER_Y, filterWidth, 20, filterHint);
         filterBox.setMaxLength(128);
         filterBox.setValue(filter);
-        filterBox.setHint(Component.literal("Filter backups"));
+        filterBox.setHint(filterHint);
         filterBox.setResponder(this::filterChanged);
         addRenderableWidget(filterBox);
 
-        Button sortButton = Button.builder(Component.literal("Sort: " + sortLabel(sort)), ignored -> nextSort())
+        Button sortButton = Button.builder(
+                        Component.translatable("screen.worldarchive.browser.sort", Component.translatable(sortKey(sort))),
+                        ignored -> nextSort())
                 .bounds(x + filterWidth + 4, FILTER_Y, sortWidth, 20)
                 .build();
         addRenderableWidget(sortButton);
 
         List<BackupId> matchingIds = ids(matching);
         Button selectButton = Button.builder(
-                        Component.literal(selection.coversAll(matchingIds) ? "Clear" : "Select all"),
+                        Component.translatable(selection.coversAll(matchingIds) ? "screen.worldarchive.browser.clear" : "screen.worldarchive.browser.select_all"),
                         ignored -> {
                             selection.selectAllOrClear(matchingIds);
                             refresh();
@@ -204,8 +208,7 @@ public final class BackupBrowserScreen extends Screen {
                 .bounds(x + filterWidth + sortWidth + 8, FILTER_Y, selectWidth, 20)
                 .build();
         selectButton.active = !matchingIds.isEmpty();
-        selectButton.setTooltip(Tooltip.create(Component.literal(
-                "Selects every backup that matches the filter, on every page")));
+        selectButton.setTooltip(Tooltip.create(Component.translatable("screen.worldarchive.browser.select_all_tooltip")));
         addRenderableWidget(selectButton);
     }
 
@@ -235,7 +238,7 @@ public final class BackupBrowserScreen extends Screen {
             y += ROW_HEIGHT + ROW_GAP;
         }
         if (!loading && pageRows.isEmpty()) {
-            Component empty = Component.literal(filter.isBlank() ? "No backups yet" : "No backups match the filter")
+            Component empty = Component.translatable(filter.isBlank() ? "screen.worldarchive.browser.empty" : "screen.worldarchive.browser.no_match")
                     .withStyle(ChatFormatting.GRAY);
             addRenderableOnly(new StringWidget(x, ROWS_TOP + 10, contentWidth, 20, empty, font));
         }
@@ -263,16 +266,17 @@ public final class BackupBrowserScreen extends Screen {
         pager.getFirst().setRectangle(buttonWidth, 18, x, y);
         pager.getLast().setRectangle(buttonWidth, 18, x + contentWidth - buttonWidth, y);
         pager.forEach(this::addRenderableWidget);
-        String selected = selection.size() == 0 ? "" : " · " + selection.size() + " selected";
+        int selectedCount = selection.rows(matching).size();
+        Component summary = selectedCount == 0
+                ? Component.translatable("screen.worldarchive.browser.page", paging.pageIndex() + 1, paging.pageCount(), matching.size())
+                : Component.translatable(
+                        "screen.worldarchive.browser.page_selected", paging.pageIndex() + 1, paging.pageCount(), matching.size(), selectedCount);
         addRenderableOnly(new StringWidget(
                 x + buttonWidth + 4,
                 y,
                 contentWidth - buttonWidth * 2 - 8,
                 18,
-                Component.literal("Page " + (paging.pageIndex() + 1)
-                        + " of " + paging.pageCount()
-                        + " · " + matching.size() + " backups"
-                        + selected),
+                summary,
                 font));
     }
 
@@ -283,7 +287,7 @@ public final class BackupBrowserScreen extends Screen {
     }
 
     private void addActions(int x, int contentWidth, Layout layout) {
-        List<BackupRow> selected = selection.rows(rows);
+        List<BackupRow> selected = selection.rows(matching);
         Map<BackupAction, ActionDisabledReason> reasons = BackupActionPolicy.evaluate(
                 loading ? capabilities.withOperationInProgress() : capabilities,
                 selected);
@@ -301,7 +305,7 @@ public final class BackupBrowserScreen extends Screen {
                         BackupAction.SETTINGS)
                 .map(action -> actionButton(action, reasons.get(action), selected.size()))
                 .toList());
-        secondary.add(Button.builder(Component.literal("Done"), ignored -> onClose()).build());
+        secondary.add(Button.builder(CommonComponents.GUI_DONE, ignored -> onClose()).build());
         Widgets.row(x, layout.primaryActionsY(), contentWidth, primary);
         Widgets.row(x, layout.secondaryActionsY(), contentWidth, secondary);
         primary.forEach(this::addRenderableWidget);
@@ -309,38 +313,39 @@ public final class BackupBrowserScreen extends Screen {
     }
 
     private Button actionButton(BackupAction action, ActionDisabledReason reason, int selectedCount) {
-        String label = action == BackupAction.DELETE && selectedCount > 1
-                ? "Delete (" + selectedCount + ")"
-                : actionLabel(action);
-        Button button = Button.builder(Component.literal(label), ignored -> runAction(action)).build();
+        Component label = action == BackupAction.DELETE && selectedCount > 1
+                ? Component.translatable("screen.worldarchive.browser.action.delete_count", selectedCount)
+                : Component.translatable(actionKey(action));
+        Button button = Button.builder(label, ignored -> runAction(action)).build();
         button.active = reason == ActionDisabledReason.NONE;
         if (!button.active) {
-            button.setTooltip(Tooltip.create(disabledReason(reason)));
+            button.setTooltip(Tooltip.create(disabledReason(action, reason)));
         }
         return button;
     }
 
     /**
-     * Runs a button's action; the policy has already checked the selection it needs. The selected
-     * backups keep the browser's sort order, so a delete prompt lists them as the browser does.
+     * Runs a button's action on the selected backups that match the filter; the policy has already
+     * checked the selection it needs. They keep the browser's sort order, so a delete prompt lists
+     * them as the browser does.
      */
     private void runAction(BackupAction action) {
-        List<BackupRow> selected = BackupFilter.apply(selection.rows(rows), "", sort);
+        List<BackupRow> selected = selection.rows(matching);
         Runnable run = switch (action) {
             case CREATE -> () -> minecraft.setScreenAndShow(new BackupCreateScreen(this, label -> openOperation(
                     BackupOperation.CREATE,
-                    "Creating backup",
+                    "screen.worldarchive.browser.creating",
                     listener -> facade.createManualBackup(world, label, listener))));
             case RESTORE -> () -> minecraft.setScreenAndShow(
                     new BackupRestoreScreen(this, parent, world, selected.getFirst(), facade));
             case DELETE -> () -> confirmDelete(selected);
             case SYNC -> () -> openOperation(
                     BackupOperation.SYNC,
-                    "Syncing backup",
+                    "screen.worldarchive.browser.syncing",
                     listener -> service.syncBackup(selected.getFirst().backupId(), listener));
             case VERIFY -> () -> openOperation(
                     BackupOperation.VERIFY,
-                    "Checking backup integrity",
+                    "screen.worldarchive.browser.verifying",
                     listener -> service.verifyBackup(selected.getFirst().backupId(), listener));
             case OPEN_FOLDER -> () -> openFolder(selected);
             case STORAGE -> () -> minecraft.setScreenAndShow(new StorageScreen(this, world, facade));
@@ -351,9 +356,10 @@ public final class BackupBrowserScreen extends Screen {
 
     private void openOperation(
             BackupOperation operation,
-            String title,
+            String titleKey,
             BackupOperationScreen.OperationStarter<BackupResult> starter) {
-        minecraft.setScreenAndShow(BackupOperationScreen.backupResult(this, operation, title, starter));
+        minecraft.setScreenAndShow(BackupOperationScreen.backupResult(
+                this, operation, Component.translatable(titleKey).getString(), starter));
     }
 
     /**
@@ -373,10 +379,10 @@ public final class BackupBrowserScreen extends Screen {
                 this,
                 title,
                 deletePromptText(prompt),
-                Component.literal("Delete").withStyle(ChatFormatting.RED),
+                Component.translatable("screen.worldarchive.browser.action.delete").withStyle(ChatFormatting.RED),
                 () -> minecraft.setScreenAndShow(BackupOperationScreen.deleteBatch(
                         this,
-                        prompt.count() == 1 ? "Deleting backup" : "Deleting backups",
+                        Component.translatable(prompt.count() == 1 ? "screen.worldarchive.browser.deleting_one" : "screen.worldarchive.browser.deleting_many").getString(),
                         listener -> service.deleteBackups(requests, listener),
                         selected))));
     }
@@ -431,7 +437,7 @@ public final class BackupBrowserScreen extends Screen {
 
     private void reload() {
         loading = true;
-        status = Component.literal("Loading backups…").withStyle(ChatFormatting.GRAY);
+        status = loadingStatus();
         refresh();
         calls.dropPending();
         calls.start(this::load, this::loaded, this::showFailure);
@@ -450,8 +456,7 @@ public final class BackupBrowserScreen extends Screen {
         capabilities = load.capabilities();
         selection.retain(rows.stream().map(BackupRow::backupId).collect(Collectors.toSet()));
         rematch();
-        status = Component.literal(rows.isEmpty() ? "No backups yet" : rows.size() + " backups loaded")
-                .withStyle(ChatFormatting.GRAY);
+        status = Component.empty();
         refresh();
     }
 
@@ -489,40 +494,47 @@ public final class BackupBrowserScreen extends Screen {
         return rows.stream().map(BackupRow::backupId).toList();
     }
 
-    private static String sortLabel(BackupSort value) {
+    private static Component loadingStatus() {
+        return Component.translatable("screen.worldarchive.browser.loading").withStyle(ChatFormatting.GRAY);
+    }
+
+    private static String sortKey(BackupSort value) {
         return switch (value) {
-            case NEWEST -> "Newest";
-            case OLDEST -> "Oldest";
-            case LABEL -> "Label";
-            case SIZE_DESCENDING -> "Largest";
-            case CHANGED_FILES_DESCENDING -> "Most changed";
+            case NEWEST -> "screen.worldarchive.browser.sort.newest";
+            case OLDEST -> "screen.worldarchive.browser.sort.oldest";
+            case LABEL -> "screen.worldarchive.browser.sort.label";
+            case SIZE_DESCENDING -> "screen.worldarchive.browser.sort.largest";
+            case CHANGED_FILES_DESCENDING -> "screen.worldarchive.browser.sort.most_changed";
         };
     }
 
-    private static String actionLabel(BackupAction action) {
+    private static String actionKey(BackupAction action) {
         return switch (action) {
-            case CREATE -> "Create";
-            case RESTORE -> "Restore";
-            case DELETE -> "Delete";
-            case SYNC -> "Sync";
-            case VERIFY -> "Verify";
-            case OPEN_FOLDER -> "Open Folder";
-            case STORAGE -> "Storage";
-            case SETTINGS -> "Settings";
+            case CREATE -> "screen.worldarchive.browser.action.create";
+            case RESTORE -> "screen.worldarchive.browser.action.restore";
+            case DELETE -> "screen.worldarchive.browser.action.delete";
+            case SYNC -> "screen.worldarchive.browser.action.sync";
+            case VERIFY -> "screen.worldarchive.browser.action.verify";
+            case OPEN_FOLDER -> "screen.worldarchive.browser.action.open_folder";
+            case STORAGE -> "screen.worldarchive.browser.action.storage";
+            case SETTINGS -> "screen.worldarchive.browser.action.settings";
         };
     }
 
-    private Component disabledReason(ActionDisabledReason reason) {
+    /** The tooltip of a disabled button; Sync names the Git copy it needs. */
+    private Component disabledReason(BackupAction action, ActionDisabledReason reason) {
         return switch (reason) {
             case NONE -> throw new IllegalArgumentException("An available action has no disabled reason");
-            case OPERATION_IN_PROGRESS -> Component.literal("Wait for the current operation");
-            case SOURCE_UNAVAILABLE -> Component.literal("The original world is unavailable");
             case CREATE_BLOCKED -> createBlocked();
-            case NO_SELECTION -> Component.literal("Select a backup");
-            case MULTIPLE_SELECTED -> Component.literal("Select one backup");
-            case NO_DURABLE_COPY -> Component.literal("This backup has no available copy");
-            case REMOTE_NOT_CONFIGURED -> Component.literal("Configure a Git remote first");
-            case FOLDER_UNAVAILABLE -> Component.literal("No managed backup folder is available");
+            case NO_DURABLE_COPY -> Component.translatable(action == BackupAction.SYNC
+                    ? "screen.worldarchive.browser.disabled.no_git_copy"
+                    : "screen.worldarchive.browser.disabled.no_copy");
+            case OPERATION_IN_PROGRESS -> Component.translatable("screen.worldarchive.browser.disabled.busy");
+            case SOURCE_UNAVAILABLE -> Component.translatable("screen.worldarchive.browser.disabled.world_missing");
+            case NO_SELECTION -> Component.translatable("screen.worldarchive.browser.disabled.no_selection");
+            case MULTIPLE_SELECTED -> Component.translatable("screen.worldarchive.browser.disabled.select_one");
+            case REMOTE_NOT_CONFIGURED -> Component.translatable("screen.worldarchive.browser.disabled.no_remote");
+            case FOLDER_UNAVAILABLE -> Component.translatable("screen.worldarchive.browser.disabled.no_folder");
         };
     }
 

@@ -9,9 +9,14 @@ import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.components.MultiLineTextWidget;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.input.KeyEvent;
+import net.minecraft.network.chat.CommonComponents;
 import net.minecraft.network.chat.Component;
 
-/** Optional label prompt before the runtime performs a save-gated manual capture. */
+/**
+ * Optional label prompt before the runtime performs a save-gated manual capture. Enter in the
+ * label box creates the backup.
+ */
 final class BackupCreateScreen extends Screen {
     private static final int CONTENT_MIN = 180;
 
@@ -25,10 +30,12 @@ final class BackupCreateScreen extends Screen {
 
     private String label = "";
 
+    private EditBox labelBox;
+
     private boolean consumed;
 
     BackupCreateScreen(Screen parent, Consumer<Optional<String>> confirmed) {
-        super(Component.literal("Create Backup"));
+        super(Component.translatable("screen.worldarchive.create.title"));
         this.parent = Objects.requireNonNull(parent, "parent");
         this.confirmed = Objects.requireNonNull(confirmed, "confirmed");
     }
@@ -42,36 +49,39 @@ final class BackupCreateScreen extends Screen {
         MultiLineTextWidget explanation = new MultiLineTextWidget(
                         contentX,
                         top + 24,
-                        Component.literal("Add an optional label, or leave it blank.\n"
-                                + "Large worlds may take a while. Keep Minecraft open until it finishes."),
+                        Component.translatable("screen.worldarchive.create.explanation"),
                         font)
                 .setMaxWidth(contentWidth)
                 .setCentered(true);
         explanation.setWidth(contentWidth);
         addRenderableOnly(explanation);
 
-        EditBox labelBox = new EditBox(
-                font,
-                contentX,
-                top + 52,
-                contentWidth,
-                20,
-                Component.literal("Optional backup label"));
+        Component labelHint = Component.translatable("screen.worldarchive.create.label_hint");
+        labelBox = new EditBox(font, contentX, top + 52, contentWidth, 20, labelHint);
         labelBox.setMaxLength(BackupManifest.MAXIMUM_LABEL_LENGTH);
         labelBox.setValue(label);
-        labelBox.setHint(Component.literal("Optional backup label"));
+        labelBox.setHint(labelHint);
         labelBox.setResponder(value -> label = value);
         addRenderableWidget(labelBox);
 
         int buttonWidth = Math.min(150, Math.max(80, (contentWidth - 6) / 2));
         int buttonY = top + 82;
-        addRenderableWidget(Button.builder(Component.literal("Create"), ignored -> confirm())
+        addRenderableWidget(Button.builder(Component.translatable("screen.worldarchive.create.create"), ignored -> confirm())
                 .bounds(width / 2 - buttonWidth - 3, buttonY, buttonWidth, 20)
                 .build());
-        addRenderableWidget(Button.builder(Component.literal("Cancel"), ignored -> onClose())
+        addRenderableWidget(Button.builder(CommonComponents.GUI_CANCEL, ignored -> onClose())
                 .bounds(width / 2 + 3, buttonY, buttonWidth, 20)
                 .build());
         setInitialFocus(labelBox);
+    }
+
+    @Override
+    public boolean keyPressed(KeyEvent event) {
+        if (event.isConfirmation() && getFocused() == labelBox) {
+            confirm();
+            return true;
+        }
+        return super.keyPressed(event);
     }
 
     private void confirm() {

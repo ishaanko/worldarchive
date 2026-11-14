@@ -14,6 +14,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 /**
@@ -32,13 +33,14 @@ public final class BackupWorldList {
         Map<WorldId, BackupWorldEntry> entries = new HashMap<>();
         for (WorldConfig world : config.worlds()) {
             boolean present = isWorldFolder(world.path());
-            int backups = byWorld.getOrDefault(world.worldId(), List.of()).size();
-            if (present || backups > 0) {
+            List<BackupRecord> backups = byWorld.getOrDefault(world.worldId(), List.of());
+            if (present || !backups.isEmpty()) {
                 String name = world.path().getFileName().toString();
                 entries.put(world.worldId(), new BackupWorldEntry(
                         new BackupWorldContext(world.worldId(), world.path(), savesDirectory, name, name),
                         !present,
-                        backups));
+                        backups.size(),
+                        newest(backups).map(record -> record.manifest().createdAt())));
             }
         }
         byWorld.forEach((worldId, backups) -> entries.computeIfAbsent(worldId, ignored -> missingWorld(
@@ -55,14 +57,17 @@ public final class BackupWorldList {
     }
 
     private static BackupWorldEntry missingWorld(WorldId worldId, List<BackupRecord> backups, Path savesDirectory) {
-        BackupRecord newest = backups.stream()
-                .max(Comparator.comparing(record -> record.manifest().createdAt()))
-                .orElseThrow();
+        BackupRecord newest = newest(backups).orElseThrow();
         String folder = ".worldarchive-missing-" + worldId;
         return new BackupWorldEntry(
                 new BackupWorldContext(
                         worldId, savesDirectory.resolve(folder), savesDirectory, folder, newest.manifest().worldName()),
                 true,
-                backups.size());
+                backups.size(),
+                Optional.of(newest.manifest().createdAt()));
+    }
+
+    private static Optional<BackupRecord> newest(List<BackupRecord> backups) {
+        return backups.stream().max(Comparator.comparing(record -> record.manifest().createdAt()));
     }
 }

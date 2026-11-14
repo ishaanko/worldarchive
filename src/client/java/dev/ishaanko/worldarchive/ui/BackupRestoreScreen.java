@@ -8,6 +8,8 @@ import dev.ishaanko.worldarchive.ui.model.GameVersionNotice;
 import dev.ishaanko.worldarchive.ui.model.RestoreChoice;
 import dev.ishaanko.worldarchive.ui.model.RestoreName;
 import dev.ishaanko.worldarchive.ui.model.ScreenGeometry;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -17,12 +19,15 @@ import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.components.MultiLineTextWidget;
 import net.minecraft.client.gui.components.StringWidget;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.input.KeyEvent;
+import net.minecraft.network.chat.CommonComponents;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.MutableComponent;
 
 /**
- * Asks for the folder name of a restored world copy and what to do after the restore: show it in
- * the world list, or play it. A restore never replaces the world the backup came from.
+ * Names the backup to restore and asks for the folder name of the new world copy and what to do
+ * after the restore: show it in the world list, or play it. Enter in the name box restores. A
+ * restore never replaces the world the backup came from.
  */
 final class BackupRestoreScreen extends Screen {
     private static final int CONTENT_MIN = 180;
@@ -49,19 +54,24 @@ final class BackupRestoreScreen extends Screen {
 
     private StringWidget validationWidget;
 
+    private EditBox nameBox;
+
     BackupRestoreScreen(
             Screen parent,
             Screen selectWorldParent,
             BackupWorldContext world,
             BackupRow row,
             BackupClientFacade facade) {
-        super(Component.literal("Restore Backup"));
+        super(Component.translatable("screen.worldarchive.restore.title"));
         this.parent = Objects.requireNonNull(parent, "parent");
         this.selectWorldParent = Objects.requireNonNull(selectWorldParent, "selectWorldParent");
         this.world = Objects.requireNonNull(world, "world");
         this.row = Objects.requireNonNull(row, "row");
         this.facade = Objects.requireNonNull(facade, "facade");
-        restoredName = RestoreName.suggest(world.displayName(), world.storageName());
+        restoredName = RestoreName.suggest(
+                world.displayName(),
+                world.storageName(),
+                LocalDate.ofInstant(row.createdAt(), ZoneId.systemDefault()));
     }
 
     @Override
@@ -70,12 +80,17 @@ final class BackupRestoreScreen extends Screen {
         int contentX = ScreenGeometry.centerX(width, contentWidth);
         int top = ScreenGeometry.anchorMiddle(12, height, -100);
         addRenderableOnly(Widgets.title(font, contentX, top, contentWidth, 20, title));
+        MultiLineTextWidget backup = paragraph(
+                contentX,
+                top + 22,
+                contentWidth,
+                Component.literal(BackupRowText.title(row)).withStyle(ChatFormatting.WHITE));
+        addRenderableOnly(backup);
         MultiLineTextWidget explanation = paragraph(
                 contentX,
-                top + 24,
+                backup.getY() + backup.getHeight() + 4,
                 contentWidth,
-                Component.literal(
-                        "A new world copy will be created. The selected world is never replaced."));
+                Component.translatable("screen.worldarchive.restore.explanation"));
         addRenderableOnly(explanation);
 
         GameVersionNotice notice = GameVersionNotice.of(row.gameVersion(), facade.runningGameVersion());
@@ -87,16 +102,11 @@ final class BackupRestoreScreen extends Screen {
         addRenderableOnly(versionNotice);
 
         int nameTop = versionNotice.getY() + versionNotice.getHeight() + 9;
-        EditBox nameBox = new EditBox(
-                font,
-                contentX,
-                nameTop,
-                contentWidth,
-                20,
-                Component.literal("Restored world name"));
+        Component nameHint = Component.translatable("screen.worldarchive.restore.name_hint");
+        nameBox = new EditBox(font, contentX, nameTop, contentWidth, 20, nameHint);
         nameBox.setMaxLength(RestoreBackupRequest.MAXIMUM_NAME_LENGTH);
         nameBox.setValue(restoredName);
-        nameBox.setHint(Component.literal("Restored world name"));
+        nameBox.setHint(nameHint);
         nameBox.setResponder(value -> {
             restoredName = value;
             updateValidation();
@@ -105,9 +115,15 @@ final class BackupRestoreScreen extends Screen {
 
         validationWidget = new StringWidget(contentX, nameTop + 23, contentWidth, 18, Component.empty(), font);
         addRenderableOnly(validationWidget);
-        selectButton = Button.builder(Component.literal("Restore"), ignored -> choose(RestoreChoice.SELECT)).build();
-        playButton = Button.builder(Component.literal("Restore & Play"), ignored -> choose(RestoreChoice.PLAY)).build();
-        Button cancel = Button.builder(Component.literal("Cancel"), ignored -> onClose()).build();
+        selectButton = Button.builder(
+                        Component.translatable("screen.worldarchive.restore.restore"),
+                        ignored -> choose(RestoreChoice.SELECT))
+                .build();
+        playButton = Button.builder(
+                        Component.translatable("screen.worldarchive.restore.restore_and_play"),
+                        ignored -> choose(RestoreChoice.PLAY))
+                .build();
+        Button cancel = Button.builder(CommonComponents.GUI_CANCEL, ignored -> onClose()).build();
         Widgets.row(contentX, nameTop + 49, contentWidth, List.of(selectButton, playButton, cancel));
         addRenderableWidget(selectButton);
         addRenderableWidget(playButton);
@@ -138,8 +154,18 @@ final class BackupRestoreScreen extends Screen {
         playButton.active = problem.isEmpty();
         validationWidget.setMessage(problem
                 .map(value -> message(value).withStyle(ChatFormatting.RED))
-                .orElseGet(() -> Component.literal("Restore returns to the world list")
+                .orElseGet(() -> Component.translatable("screen.worldarchive.restore.returns_to_list")
                         .withStyle(ChatFormatting.GRAY)));
+    }
+
+    /** Enter in the name box restores and shows the copy in the world list, like Restore. */
+    @Override
+    public boolean keyPressed(KeyEvent event) {
+        if (event.isConfirmation() && getFocused() == nameBox) {
+            choose(RestoreChoice.SELECT);
+            return true;
+        }
+        return super.keyPressed(event);
     }
 
     private void choose(RestoreChoice choice) {
@@ -150,20 +176,20 @@ final class BackupRestoreScreen extends Screen {
                 row.backupId(),
                 world.worldsDirectory(),
                 restoredName);
-        MutableComponent prompt = Component.literal("Create a new world named \"" + restoredName
-                + "\"? If that name is taken, the next free name is used.");
+        MutableComponent prompt = Component.translatable(
+                "screen.worldarchive.restore.prompt", BackupRowText.title(row), restoredName);
         if (minecraft.level != null || minecraft.hasSingleplayerServer()) {
             // The runtime leaves the running world before it shows or opens the restored copy.
             prompt.append("\n").append(Component.translatable("screen.worldarchive.restore.leaves_world"));
         }
         minecraft.setScreenAndShow(new BackupConfirmationScreen(
                 this,
-                Component.literal("Restore backup?"),
+                Component.translatable("screen.worldarchive.restore.confirm_title"),
                 prompt,
-                Component.literal("Restore"),
+                Component.translatable("screen.worldarchive.restore.restore"),
                 () -> minecraft.setScreenAndShow(BackupOperationScreen.restore(
                         parent,
-                        "Restoring backup",
+                        Component.translatable("screen.worldarchive.restore.running").getString(),
                         listener -> facade.backupService().restoreBackup(request, listener),
                         result -> finishRestore(choice, result)))));
     }
@@ -178,13 +204,12 @@ final class BackupRestoreScreen extends Screen {
 
     private static MutableComponent message(RestoreName.Problem problem) {
         return switch (problem) {
-            case BLANK -> Component.literal("Enter a name for the restored copy");
+            case BLANK -> Component.translatable("screen.worldarchive.restore.name_blank");
             case TOO_LONG -> Component.translatable("screen.worldarchive.restore.name_too_long");
-            case ENDS_WITH_DOT_OR_SPACE -> Component.literal("The name cannot end with a dot or space");
-            case UNSAFE_CHARACTER -> Component.literal("The name contains a character that is unsafe in a folder name");
-            case RESERVED_BY_WINDOWS -> Component.literal("That name is reserved by Windows");
-            case SAME_AS_ORIGINAL -> Component.literal(
-                    "Choose a different name; restores never replace the selected world");
+            case ENDS_WITH_DOT_OR_SPACE -> Component.translatable("screen.worldarchive.restore.name_ends_with_dot");
+            case UNSAFE_CHARACTER -> Component.translatable("screen.worldarchive.restore.name_unsafe");
+            case RESERVED_BY_WINDOWS -> Component.translatable("screen.worldarchive.restore.name_reserved");
+            case SAME_AS_ORIGINAL -> Component.translatable("screen.worldarchive.restore.name_same");
         };
     }
 

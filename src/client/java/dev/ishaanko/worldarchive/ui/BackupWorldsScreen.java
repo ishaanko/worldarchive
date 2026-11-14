@@ -1,6 +1,7 @@
 package dev.ishaanko.worldarchive.ui;
 
 import dev.ishaanko.worldarchive.model.WorldId;
+import dev.ishaanko.worldarchive.ui.model.BackupText;
 import dev.ishaanko.worldarchive.ui.model.BackupWorldContext;
 import dev.ishaanko.worldarchive.ui.model.BackupWorldEntry;
 import dev.ishaanko.worldarchive.ui.model.Paging;
@@ -16,10 +17,12 @@ import net.minecraft.client.gui.components.MultiLineTextWidget;
 import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.MutableComponent;
 
 /**
- * The worlds that have backups: live saves, and archived worlds whose save is gone. A world whose
- * backups use too much space is marked for a storage review.
+ * The worlds that have backups: live saves, and archived worlds whose save is gone. Each row shows
+ * how many backups the world has and when the newest was made. A world whose backups use too much
+ * space is marked for a storage review.
  */
 public final class BackupWorldsScreen extends Screen {
     private static final int ROW_HEIGHT = 24;
@@ -50,7 +53,7 @@ public final class BackupWorldsScreen extends Screen {
 
     private List<BackupWorldEntry> worlds = List.of();
 
-    private Component status = Component.literal("Loading worlds...").withStyle(ChatFormatting.GRAY);
+    private Component status = Component.translatable("screen.worldarchive.worlds.loading").withStyle(ChatFormatting.GRAY);
 
     private boolean loading = true;
 
@@ -100,7 +103,7 @@ public final class BackupWorldsScreen extends Screen {
         loading = false;
         worlds = List.copyOf(loaded);
         status = worlds.isEmpty()
-                ? Component.literal("No live or archived backup worlds were found").withStyle(ChatFormatting.GRAY)
+                ? Component.translatable("screen.worldarchive.worlds.empty").withStyle(ChatFormatting.GRAY)
                 : Component.empty();
         page = 0;
         rebuildWidgets();
@@ -130,23 +133,41 @@ public final class BackupWorldsScreen extends Screen {
     private Button worldButton(BackupWorldEntry entry, int x, int y, int contentWidth) {
         BackupWorldContext world = entry.context();
         boolean review = storageReviews.contains(world.worldId());
-        String label = (entry.recoveryOnly() ? "Archived: " : "")
-                + world.displayName() + "  [" + world.worldId().displayCode() + "]  "
-                + entry.backupCount() + " backup(s)"
-                + (review ? "  · Storage review" : "");
-        String tooltip = entry.recoveryOnly()
-                ? "The original save is missing. Restore and delete remain available."
-                : world.worldDirectory().toString();
+        Component label = worldLabel(entry, review);
+        Component tooltip = entry.recoveryOnly()
+                ? Component.translatable("screen.worldarchive.worlds.archived_tooltip")
+                : Component.literal(world.worldDirectory().toString());
         if (review) {
-            tooltip += "\nManaged storage is near or above this world's budget.";
+            tooltip = tooltip.copy().append("\n").append(Component.translatable("screen.worldarchive.worlds.review_tooltip"));
         }
         Button open = Button.builder(
-                        Component.literal(label),
+                        label,
                         ignored -> minecraft.setScreenAndShow(new BackupBrowserScreen(this, world, facade)))
                 .bounds(x, y, contentWidth, 20)
                 .build();
-        open.setTooltip(Tooltip.create(Component.literal(tooltip)));
+        open.setTooltip(Tooltip.create(tooltip));
         return open;
+    }
+
+    /**
+     * Name, short world code, backup count and the time of the newest backup, such as
+     * {@code Base [3F2A] · 12 backups · 9/22/26, 3:41 PM}.
+     */
+    private static Component worldLabel(BackupWorldEntry entry, boolean review) {
+        BackupWorldContext world = entry.context();
+        Component name = Component.literal(world.displayName() + " [" + world.worldId().displayCode() + "]");
+        Component count = entry.backupCount() == 1
+                ? Component.translatable("screen.worldarchive.worlds.one_backup")
+                : Component.translatable("screen.worldarchive.worlds.backups", entry.backupCount());
+        MutableComponent label = entry.recoveryOnly()
+                ? Component.translatable("screen.worldarchive.worlds.archived", name)
+                : name.copy();
+        label.append(BackupText.SEPARATOR).append(count);
+        entry.lastBackupAt().ifPresent(last -> label.append(BackupText.SEPARATOR + BackupText.dateTime(last)));
+        if (review) {
+            label.append(BackupText.SEPARATOR).append(Component.translatable("screen.worldarchive.worlds.review"));
+        }
+        return label;
     }
 
     private void addFooter(int x, int contentWidth, Paging paging) {
@@ -156,7 +177,7 @@ public final class BackupWorldsScreen extends Screen {
         }));
         buttons.forEach(button -> button.active &= !loading);
         buttons.add(Button.builder(
-                        Component.literal("Import"),
+                        Component.translatable("screen.worldarchive.worlds.import"),
                         ignored -> minecraft.setScreenAndShow(new BackupImportScreen(this, facade)))
                 .build());
         buttons.add(Button.builder(
