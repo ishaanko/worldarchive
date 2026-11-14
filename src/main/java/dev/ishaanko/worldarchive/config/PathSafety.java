@@ -83,7 +83,8 @@ public final class PathSafety {
         Path canonical = canonicalize(written);
         for (Path world : canonicalWorlds) {
             if (canonical.startsWith(world) || written.startsWith(world)) {
-                throw new IOException("Backup destination must not be inside a source world: " + canonical);
+                throw new IOException("Backup destination must not be inside a source world: "
+                        + canonical + " is inside " + world);
             }
         }
         return canonical;

@@ -13,11 +13,13 @@ import dev.ishaanko.worldarchive.model.BackupTrigger;
 import dev.ishaanko.worldarchive.model.DestinationType;
 import dev.ishaanko.worldarchive.model.WorldId;
 import java.io.IOException;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -99,6 +101,36 @@ class SettingsDraftTest {
         WorldArchiveConfig config = validation.config().orElseThrow();
         assertEquals(List.of("*.mca", "*.dat", "*.nbt"), config.git().lfsPatterns());
         assertEquals(Optional.of("https://example.com/user/forever-world.git"), config.worlds().getFirst().remoteUrl());
+    }
+
+    @Test
+    void readsAPastedQuotedPathAndAPaddedRemoteAndStillRefusesAQuotedWorldFolder() throws IOException {
+        Path world = Files.createDirectory(temporaryDirectory.resolve("My World"));
+        Path archives = Files.createDirectory(temporaryDirectory.resolve("Backups ünïcode"));
+        SettingsDraft draft = draftWithWorld(world);
+        WorldId worldId = draft.base().worlds().getFirst().worldId();
+        draft.setZipDestination(" \"" + archives + "\" ");
+        draft.setWorldRemoteUrl(worldId, "https://example.com/user/world.git\n");
+
+        WorldArchiveConfig config = draft.validate(List.of(world)).config().orElseThrow();
+
+        assertEquals(Optional.of(archives.toRealPath()), config.zip().destination());
+        assertEquals(Optional.of("https://example.com/user/world.git"), config.worlds().getFirst().remoteUrl());
+        draft.setZipDestination("\"" + world.resolve("zips") + "\"");
+        assertTrue(draft.validate(List.of(world)).issue(SettingsField.ZIP_DESTINATION).isPresent());
+    }
+
+    /** A folder name can end in a space outside Windows; saving must not move backups out of it. */
+    @Test
+    void keepsAFolderWhoseNameEndsInASpace() throws IOException {
+        Assumptions.assumeTrue(FileSystems.getDefault().supportedFileAttributeViews().contains("posix"));
+        Path archives = Files.createDirectory(temporaryDirectory.resolve("archive "));
+        SettingsDraft draft = draftWithWorld(temporaryDirectory.resolve("spaced-world"));
+        draft.setZipDestination(archives.toString());
+
+        WorldArchiveConfig config = draft.validate(List.of()).config().orElseThrow();
+
+        assertEquals(Optional.of(archives.toRealPath()), config.zip().destination());
     }
 
     @Test
