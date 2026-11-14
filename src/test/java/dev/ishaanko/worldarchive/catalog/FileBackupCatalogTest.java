@@ -270,6 +270,22 @@ final class FileBackupCatalogTest {
         assertEquals(List.of(original), catalog.listAll());
     }
 
+    /** Another game instance's rebuild can list a backup's Git copy before the backup records itself. */
+    @Test
+    void aFinishedBackupIsAddedOverTheCopyARebuildListedFirst() throws IOException {
+        FileBackupCatalog catalog = new FileBackupCatalog(temporaryDirectory.resolve("catalog.json"));
+        BackupRecord finished = record(WorldId.create(), "2026-07-17T10:00:00Z");
+        String ref = "refs/heads/worldarchive/" + finished.manifest().worldId() + "/" + finished.manifest().backupId();
+        DestinationResult git = DestinationResult.success(DestinationType.GIT, ref);
+        DestinationResult zip = finished.result().destinations().getFirst();
+        catalog.mergeAll(List.of(withDestinations(finished, List.of(git))));
+
+        catalog.add(withDestinations(finished, List.of(git.withVerification(VerificationStatus.VERIFIED), zip)));
+
+        assertEquals(List.of(git.withVerification(VerificationStatus.VERIFIED), zip),
+                catalog.find(finished.manifest().backupId()).orElseThrow().result().destinations());
+    }
+
     @Test
     void mergesOnlyAddWhatTheCatalogLacks() throws IOException {
         FileBackupCatalog catalog = new FileBackupCatalog(temporaryDirectory.resolve("merge.json"));

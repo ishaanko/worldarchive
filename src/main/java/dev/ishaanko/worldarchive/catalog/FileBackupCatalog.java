@@ -29,6 +29,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -88,12 +89,15 @@ public final class FileBackupCatalog implements BackupCatalog {
         Objects.requireNonNull(record, "record");
         lock.withLock(() -> {
             Map<BackupId, BackupRecord> records = readForChange();
-            BackupRecord existing = records.putIfAbsent(record.manifest().backupId(), record);
-            if (existing == null) {
+            BackupId backupId = record.manifest().backupId();
+            BackupRecord existing = records.get(backupId);
+            if (existing != null && !existing.manifest().equals(record.manifest())) {
+                throw new IOException("Catalog already contains a different record for backup " + backupId);
+            }
+            BackupRecord added = existing == null ? record : overlay(existing, record);
+            if (!added.equals(existing)) {
+                records.put(backupId, added);
                 write(records.values());
-            } else if (!existing.equals(record)) {
-                throw new IOException("Catalog already contains a different record for backup "
-                        + record.manifest().backupId());
             }
             return null;
         });
@@ -151,6 +155,19 @@ public final class FileBackupCatalog implements BackupCatalog {
             }
             return results;
         });
+    }
+
+    /**
+     * The record a finished backup adds over one already listed for it, such as when another game
+     * instance's rebuild listed a copy first: the backup's own outcome of each destination wins,
+     * and a copy listed only before is kept.
+     */
+    private static BackupRecord overlay(BackupRecord existing, BackupRecord added) {
+        Map<DestinationType, DestinationResult> destinations = new EnumMap<>(DestinationType.class);
+        existing.result().destinations().forEach(destination -> destinations.put(destination.destination(), destination));
+        added.result().destinations().forEach(destination -> destinations.put(destination.destination(), destination));
+        return new BackupRecord(added.manifest(), new BackupResult(added.manifest().backupId(),
+                added.manifest().worldId(), List.copyOf(destinations.values()), added.result().completedAt()));
     }
 
     private static void requireSameIdentity(

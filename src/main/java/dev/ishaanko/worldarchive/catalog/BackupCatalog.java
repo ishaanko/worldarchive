@@ -19,7 +19,11 @@ import java.util.function.UnaryOperator;
  * nothing else changes the catalog in between. A catalog never deletes a backup's files.
  */
 public interface BackupCatalog {
-    /** Adds a new record; an identical record is accepted, a different one with the same ID is refused. */
+    /**
+     * Adds the record of a finished backup. When the catalog already lists the same backup, the
+     * record's destinations replace the listed ones of the same kind and the others are kept; a
+     * record of the same ID with a different manifest is refused.
+     */
     void add(BackupRecord record) throws IOException;
 
     Optional<BackupRecord> find(BackupId backupId) throws IOException;
