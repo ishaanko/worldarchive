@@ -3,6 +3,7 @@ package dev.ishaanko.worldarchive.settings;
 import dev.ishaanko.worldarchive.config.DestinationTriggerConfig;
 import dev.ishaanko.worldarchive.config.GitDestinationConfig;
 import dev.ishaanko.worldarchive.config.PathSafety;
+import dev.ishaanko.worldarchive.config.RemoteUpload;
 import dev.ishaanko.worldarchive.config.RemoteUrlPolicy;
 import dev.ishaanko.worldarchive.config.TriggerConfig;
 import dev.ishaanko.worldarchive.config.WorldArchiveConfig;
@@ -64,6 +65,8 @@ public final class SettingsDraft {
 
     private String gitLfsPatterns;
 
+    private RemoteUpload gitRemoteUpload;
+
     private boolean zipEnabled;
 
     private String zipDestination;
@@ -79,6 +82,7 @@ public final class SettingsDraft {
         gitRepository = pathText(values.git().repository());
         gitRemoteName = values.git().remoteName();
         gitLfsPatterns = String.join(", ", values.git().lfsPatterns());
+        gitRemoteUpload = values.git().remoteUpload();
         zipEnabled = values.zip().enabled();
         zipDestination = pathText(values.zip().destination());
         triggers.put(DestinationType.GIT, enabledTriggers(values.triggers(), values.git().triggers()));
@@ -93,6 +97,7 @@ public final class SettingsDraft {
         gitRepository = source.gitRepository;
         gitRemoteName = source.gitRemoteName;
         gitLfsPatterns = source.gitLfsPatterns;
+        gitRemoteUpload = source.gitRemoteUpload;
         zipEnabled = source.zipEnabled;
         zipDestination = source.zipDestination;
         source.triggers.forEach((destination, enabled) -> triggers.put(destination, EnumSet.copyOf(enabled)));
@@ -161,8 +166,8 @@ public final class SettingsDraft {
                         anyDestination(BackupTrigger.WORLD_EXIT),
                         anyDestination(BackupTrigger.SCHEDULED),
                         interval),
-                new GitDestinationConfig(
-                        gitEnabled, repository, gitRemoteName, destinationTriggers(DestinationType.GIT), patterns),
+                new GitDestinationConfig(gitEnabled, repository, gitRemoteName,
+                        destinationTriggers(DestinationType.GIT), patterns, gitRemoteUpload),
                 new ZipDestinationConfig(zipEnabled, zipFolder, destinationTriggers(DestinationType.ZIP)),
                 editedWorlds));
     }
@@ -202,7 +207,8 @@ public final class SettingsDraft {
                         pick(openedGit, editedGit, currentGit, GitDestinationConfig::repository),
                         pick(openedGit, editedGit, currentGit, GitDestinationConfig::remoteName),
                         pick(openedGit, editedGit, currentGit, GitDestinationConfig::triggers),
-                        pick(openedGit, editedGit, currentGit, GitDestinationConfig::lfsPatterns)),
+                        pick(openedGit, editedGit, currentGit, GitDestinationConfig::lfsPatterns),
+                        pick(openedGit, editedGit, currentGit, GitDestinationConfig::remoteUpload)),
                 new ZipDestinationConfig(
                         pick(openedZip, editedZip, currentZip, ZipDestinationConfig::enabled),
                         pick(openedZip, editedZip, currentZip, ZipDestinationConfig::destination),
@@ -403,6 +409,14 @@ public final class SettingsDraft {
 
     public void setGitLfsPatterns(String value) {
         gitLfsPatterns = Objects.requireNonNull(value, "value");
+    }
+
+    public RemoteUpload gitRemoteUpload() {
+        return gitRemoteUpload;
+    }
+
+    public void setGitRemoteUpload(RemoteUpload value) {
+        gitRemoteUpload = Objects.requireNonNull(value, "value");
     }
 
     public boolean zipEnabled() {

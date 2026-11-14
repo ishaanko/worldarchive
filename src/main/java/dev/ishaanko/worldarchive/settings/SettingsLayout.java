@@ -28,13 +28,13 @@ public record SettingsLayout(
 
     private static final int GIT_PAGED_FIRST_ROW = 77;
 
-    // Full git page: checkbox, repository, remote name, patterns, trigger row. The gap before
-    // the trigger row is 23px (not 22) to match the current screen's hand-tuned spacing.
-    private static final int[] GIT_FULL_ROW_OFFSETS = {0, 22, 44, 66, 89};
+    // Full git page: checkbox, repository, remote name, upload timing, patterns, trigger row. The
+    // gap before the trigger row is 23px (not 22) to match the current screen's hand-tuned spacing.
+    private static final int[] GIT_FULL_ROW_OFFSETS = {0, 22, 44, 66, 88, 111};
 
-    // Paged git sections: location (repository), remote (remote name + patterns), timing
-    // (trigger row).
-    private static final int[] GIT_PAGED_SECTION_ROW_COUNTS = {1, 2, 1};
+    // Paged git sections: location (repository), remote (remote name, upload timing, patterns),
+    // timing (trigger row).
+    private static final int[] GIT_PAGED_SECTION_ROW_COUNTS = {1, 3, 1};
 
     private static final int ZIP_FULL_FIRST_ROW = 53;
 

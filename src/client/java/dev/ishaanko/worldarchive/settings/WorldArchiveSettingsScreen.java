@@ -1,5 +1,6 @@
 package dev.ishaanko.worldarchive.settings;
 
+import dev.ishaanko.worldarchive.config.RemoteUpload;
 import dev.ishaanko.worldarchive.config.UnreadableConfigurationException;
 import dev.ishaanko.worldarchive.config.WorldArchiveConfig;
 import dev.ishaanko.worldarchive.model.BackupTrigger;
@@ -11,6 +12,7 @@ import dev.ishaanko.worldarchive.ui.model.FolderSelectionResult;
 import dev.ishaanko.worldarchive.ui.model.ScreenGeometry;
 import java.nio.file.Path;
 import java.util.EnumMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -21,6 +23,7 @@ import java.util.function.Supplier;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.Checkbox;
+import net.minecraft.client.gui.components.CycleButton;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.components.MultiLineTextWidget;
 import net.minecraft.client.gui.components.StringWidget;
@@ -281,10 +284,11 @@ public final class WorldArchiveSettingsScreen extends Screen {
         if (full || section == 1) {
             int firstIndex = full ? 2 : 0;
             addGitRemoteNameRow(x, layout.gitRowY(section, firstIndex), contentWidth);
-            addGitPatternsRow(x, layout.gitRowY(section, firstIndex + 1), contentWidth);
+            addGitRemoteUploadRow(x, layout.gitRowY(section, firstIndex + 1), contentWidth);
+            addGitPatternsRow(x, layout.gitRowY(section, firstIndex + 2), contentWidth);
         }
         if (full || section == 2) {
-            addTriggerRow(x, layout.gitRowY(section, full ? 4 : 0), contentWidth, DestinationType.GIT);
+            addTriggerRow(x, layout.gitRowY(section, full ? 5 : 0), contentWidth, DestinationType.GIT);
         }
     }
 
@@ -381,6 +385,23 @@ public final class WorldArchiveSettingsScreen extends Screen {
                 value -> draft.setGitRemoteName(value));
         remoteName.setHint(Component.translatable(
                 "screen.worldarchive.settings.remote_name_hint"));
+    }
+
+    /** When backups upload to each world's remote: every backup, once a day, or only with Sync. */
+    private void addGitRemoteUploadRow(int x, int y, int contentWidth) {
+        CycleButton<RemoteUpload> upload = CycleButton.builder(
+                        (RemoteUpload value) -> Component.translatable(
+                                "screen.worldarchive.settings.remote_upload." + value.name().toLowerCase(Locale.ROOT)),
+                        draft.gitRemoteUpload())
+                .withValues(RemoteUpload.values())
+                .create(x, y, contentWidth, 20, Component.translatable("screen.worldarchive.settings.remote_upload"),
+                        (ignored, value) -> {
+                            draft.setGitRemoteUpload(value);
+                            refreshValidation();
+                        });
+        upload.setTooltip(Tooltip.create(Component.translatable("screen.worldarchive.settings.remote_upload_tooltip")));
+        upload.active = !controlsLocked();
+        addRenderableWidget(upload);
     }
 
     private void addZipPage(int x, int contentWidth) {

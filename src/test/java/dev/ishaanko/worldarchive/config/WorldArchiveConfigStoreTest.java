@@ -40,7 +40,8 @@ final class WorldArchiveConfigStoreTest {
         WorldArchiveConfig expected = new WorldArchiveConfig(
                 new TriggerConfig(true, false, true, 45),
                 new GitDestinationConfig(true, Optional.of(gitRepository), "backup-origin",
-                        new DestinationTriggerConfig(true, false, false), List.of("*.mca", "*.nbt")),
+                        new DestinationTriggerConfig(true, false, false), List.of("*.mca", "*.nbt"),
+                        RemoteUpload.ONCE_A_DAY),
                 new ZipDestinationConfig(false, Optional.of(zipDestination), new DestinationTriggerConfig(false, true, false)),
                 List.of(new WorldConfig(
                         WorldId.create(),
@@ -146,6 +147,7 @@ final class WorldArchiveConfigStoreTest {
 
         WorldConfig upgradedWorld = upgraded.worlds().getFirst();
         assertEquals(StoragePolicy.defaults(), upgradedWorld.storagePolicy());
+        assertEquals(RemoteUpload.EVERY_BACKUP, upgraded.git().remoteUpload());
         assertEquals(Optional.of("git@github.com:player/world.git"), upgradedWorld.remoteUrl());
         assertEquals(original, Files.readString(backup(6), StandardCharsets.UTF_8));
         JsonObject written = written();

@@ -98,6 +98,7 @@ public final class ServiceGraph {
      * @param finalizer gives a restored world the name the player chose
      * @param executor runs all background work; {@link #shutdown} stops it at quit
      * @param clock the clock of backup times; its zone decides the local days of the storage history
+     *        and of Git uploads set to once a day
      */
     public ServiceGraph(
             Path storageRoot,
@@ -322,7 +323,7 @@ public final class ServiceGraph {
     private RuntimeState build(WorldArchiveConfig config) {
         RuntimeStoragePaths paths = RuntimeStoragePaths.from(config);
         WorldGitSnapshotStore git = new WorldGitSnapshotStore(
-                GitBackendSettings.from(config.git(), origin(paths.gitRepository())),
+                GitBackendSettings.from(config.git(), origin(paths.gitRepository()), clock),
                 config.worlds().stream()
                         .filter(world -> world.remoteUrl().isPresent())
                         .collect(Collectors.toUnmodifiableMap(WorldConfig::worldId, world -> world.remoteUrl().get())),

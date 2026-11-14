@@ -129,7 +129,8 @@ final class Engine implements AutoCloseable {
                         git.repository(),
                         git.remoteName(),
                         DestinationTriggerConfig.defaults(),
-                        git.lfsPatterns()),
+                        git.lfsPatterns(),
+                        git.remoteUpload()),
                 new ZipDestinationConfig(
                         destination == DestinationType.ZIP,
                         Optional.empty(),
