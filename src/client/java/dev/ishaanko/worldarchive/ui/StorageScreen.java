@@ -23,8 +23,9 @@ import net.minecraft.network.chat.CommonComponents;
 import net.minecraft.network.chat.Component;
 
 /**
- * One world's storage use, its storage limit and keep counts, and the way into a cleanup that the
- * player reviews before anything is deleted.
+ * One world's storage use, its storage limit and keep counts, the way into a cleanup that the
+ * player reviews before anything is deleted, and, while any of the world's Git backups are in the
+ * old format, the way into converting them.
  */
 final class StorageScreen extends Screen {
     private static final int CONTENT_MIN = 230;
@@ -55,6 +56,9 @@ final class StorageScreen extends Screen {
     private String monthly = Integer.toString(StoragePolicy.DEFAULT_MONTHLY_COPIES);
 
     private boolean busy = true;
+
+    /** The world's Git backups in the old format; the convert line shows only when there is one. */
+    private int oldGitBackups;
 
     /** The fields differ from the saved policy; cleanup would still use the saved one. */
     private boolean edited;
@@ -91,7 +95,37 @@ final class StorageScreen extends Screen {
         }
         addUsage(x, contentWidth);
         addPolicyFields(x, contentWidth);
+        if (oldGitBackups > 0) {
+            addConversion(x, contentWidth);
+        }
         addActions(x, contentWidth);
+    }
+
+    /** How many Git backups are in the old format, and a button that converts them after a confirmation. */
+    private void addConversion(int x, int contentWidth) {
+        int buttonWidth = 80;
+        Component line = oldGitBackups == 1
+                ? Component.translatable("screen.worldarchive.storage.old_git_one")
+                : Component.translatable("screen.worldarchive.storage.old_git_many", oldGitBackups);
+        StringWidget lineWidget = new StringWidget(x, 214, contentWidth - buttonWidth - Widgets.GAP, 20,
+                line.copy().withStyle(ChatFormatting.GRAY), font);
+        lineWidget.setTooltip(Tooltip.create(line));
+        addRenderableOnly(lineWidget);
+        Button convert = Button.builder(Component.translatable("screen.worldarchive.storage.convert"),
+                        ignored -> confirmConversion())
+                .bounds(x + contentWidth - buttonWidth, 214, buttonWidth, 20)
+                .build();
+        convert.active = !busy;
+        addRenderableWidget(convert);
+    }
+
+    private void confirmConversion() {
+        Component title = Component.translatable("screen.worldarchive.storage.convert_title");
+        minecraft.setScreenAndShow(new BackupConfirmationScreen(this, title,
+                Component.translatable("screen.worldarchive.storage.convert_prompt", oldGitBackups, world.displayName()),
+                Component.translatable("screen.worldarchive.storage.convert"),
+                () -> minecraft.setScreenAndShow(BackupOperationScreen.conversion(this, title.getString(),
+                        listener -> facade.convertGitBackups(world.worldId(), listener)))));
     }
 
     private void addUsage(int x, int contentWidth) {
@@ -199,6 +233,13 @@ final class StorageScreen extends Screen {
     private void load() {
         busy = true;
         calls.start(() -> facade.storageOverview(world.worldId()), this::showOverview, this::showFailure);
+        calls.start(() -> facade.oldFormatGitBackups(world.worldId()), count -> {
+            oldGitBackups = count;
+            rebuildWidgets();
+        }, failure -> {
+            oldGitBackups = 0;
+            rebuildWidgets();
+        });
     }
 
     private void showOverview(StorageOverview loaded) {

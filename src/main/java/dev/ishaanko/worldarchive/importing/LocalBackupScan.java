@@ -256,19 +256,20 @@ final class LocalBackupScan {
             if (manifest == null || !manifest.worldId().equals(world)) {
                 found.issue(snapshot.refName(), new IOException("Its manifest is missing or does not match"));
             } else {
-                found.discover(record(manifest, gitCopy(snapshot, imports, onRemote)));
+                found.discover(record(manifest, gitCopy(snapshot, imports, git.remoteConfigured(world), onRemote)));
             }
         }
     }
 
     /**
      * The Git copy of a snapshot: imported when an import recorded this exact commit, otherwise
-     * WorldArchive's own, synced when the remote has the same commit. Nothing was checked yet, so
-     * it is not verified.
+     * WorldArchive's own, synced when the remote has the same commit and not synced when the world
+     * has a remote without it. Nothing was checked yet, so it is not verified.
      */
     private static DestinationResult gitCopy(
             GitSnapshot snapshot,
             List<ImportSource> imports,
+            boolean remote,
             Map<BackupId, String> onRemote) {
         for (ImportSource source : imports) {
             boolean boundHere = source.mode() != ImportSourceMode.ZIP_LINK && source.artifact(snapshot.backupId())
@@ -284,7 +285,12 @@ final class LocalBackupScan {
             }
         }
         DestinationResult own = DestinationResult.success(DestinationType.GIT, snapshot.refName());
-        return snapshot.commitId().equals(onRemote.get(snapshot.backupId())) ? own.withSync(SyncStatus.SYNCED) : own;
+        if (!remote) {
+            return own;
+        }
+        return own.withSync(snapshot.commitId().equals(onRemote.get(snapshot.backupId()))
+                ? SyncStatus.SYNCED
+                : SyncStatus.NOT_SYNCED);
     }
 
     /**

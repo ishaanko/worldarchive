@@ -17,6 +17,7 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -47,6 +48,9 @@ import java.util.UUID;
  * region under {@code .worldarchive/regions/}, the bytes of every other file, and the manifest,
  * whose storage format is 2 when the tree holds a bucketed region and 1 otherwise, all written by
  * one {@code git fast-import} to a private ref.
+ *
+ * <p>{@link #convert} writes the format 2 form of an older snapshot the same way, taking each
+ * region file's bytes from its LFS object instead of a capture.
  */
 final class GitSnapshotWriter {
     private static final int BUFFER_BYTES = 64 * 1_024;
@@ -101,6 +105,43 @@ final class GitSnapshotWriter {
         return new Written(commit, privateRef);
     }
 
+    /**
+     * Writes a storage format 2 commit for an older snapshot without publishing it: the same
+     * manifest, message and time, and the old tree with each region file that passes the strict
+     * parse replaced by its index and bucket pointers. Each region's bytes come from its LFS
+     * object, which must still have its SHA-256, and its buckets must rebuild the file, exactly as
+     * for a capture. Every other entry keeps its blob, so no other file is read or copied.
+     *
+     * @param regionFiles the LFS pointer of each region file in the old tree, by world path
+     * @param previous the bucketed regions of a snapshot converted or written before, which
+     *     unchanged region files reuse
+     * @return empty when no region file parses, so there is nothing to convert
+     */
+    Optional<Written> convert(String oldCommit, GitSnapshotManifest old, Map<String, GitLfsPointer> regionFiles,
+            Map<String, GitRegionFile> previous) throws IOException, InterruptedException, GitStorageException {
+        Map<String, GitRegionFile> regions = new TreeMap<>();
+        for (Map.Entry<String, GitLfsPointer> file : new TreeMap<>(regionFiles).entrySet()) {
+            if (Thread.interrupted()) {
+                throw new InterruptedException("Converting a Git snapshot was cancelled");
+            }
+            GitLfsPointer pointer = file.getValue();
+            WorldInventory.Entry entry = new WorldInventory.Entry(file.getKey(), pointer.size(), pointer.sha256());
+            region(lfs.path(pointer.sha256()), entry, Optional.ofNullable(previous.get(file.getKey())))
+                    .ifPresent(region -> regions.put(file.getKey(), region));
+        }
+        if (regions.isEmpty()) {
+            return Optional.empty();
+        }
+        GitSnapshotManifest manifest = GitSnapshotManifest.create(
+                GitSnapshotManifest.REGION_BUCKETS_VERSION, old.manifest(), old.lfsPatterns());
+        String tree = GitRepository.objectId(repository.git("rev-parse", "--verify", oldCommit + "^{tree}"));
+        String privateRef = "refs/worldarchive/staging/" + UUID.randomUUID();
+        String commit = GitRepository.objectId(repository.git(
+                output -> conversionStream(tree, regions.values(), manifest, privateRef, output),
+                "fast-import", "--quiet", "--done"));
+        return Optional.of(new Written(commit, privateRef));
+    }
+
     private static boolean isRegionFile(String path) {
         return RegionLayout.isRegionFileName(path.substring(path.lastIndexOf('/') + 1));
     }
@@ -113,11 +154,19 @@ final class GitSnapshotWriter {
      */
     private Optional<GitRegionFile> region(BackupCapture capture, WorldInventory.Entry file,
             Optional<GitRegionFile> previous) throws IOException, InterruptedException, GitStorageException {
+        return region(captured(capture, file), file, previous);
+    }
+
+    /**
+     * The buckets of the region file {@code file} whose bytes are in {@code source}: a captured
+     * file, or the LFS object of a snapshot being converted, which holds the captured bytes.
+     */
+    private Optional<GitRegionFile> region(Path source, WorldInventory.Entry file, Optional<GitRegionFile> previous)
+            throws IOException, InterruptedException, GitStorageException {
         if (previous.isPresent() && previous.get().index().sourceSha256().equals(file.sha256())
                 && previous.get().index().sourceSize() == file.size() && bucketsExist(previous.get())) {
             return previous;
         }
-        Path source = captured(capture, file);
         try (FileChannel channel = FileChannel.open(source, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
             if (channel.size() != file.size()) {
                 throw changed(file);
@@ -272,20 +321,11 @@ final class GitSnapshotWriter {
             String privateRef,
             OutputStream pipe) throws IOException {
         OutputStream output = new BufferedOutputStream(pipe, BUFFER_BYTES);
-        long time = manifest.manifest().createdAt().getEpochSecond();
-        text(output, "commit " + privateRef + "\nmark :1\n"
-                + "author WorldArchive <worldarchive@localhost> " + time + " +0000\n"
-                + "committer WorldArchive <worldarchive@localhost> " + time + " +0000\n");
-        data(output, manifest.commitMessage().getBytes(StandardCharsets.UTF_8));
+        commitHeader(output, manifest, privateRef);
         for (WorldInventory.Entry file : capture.inventory().files()) {
             GitRegionFile region = regions.get(file.path());
             if (region != null) {
-                text(output, "M 100644 inline " + region.indexPath() + "\n");
-                data(output, region.index().encode());
-                for (Map.Entry<Integer, GitLfsPointer> bucket : region.buckets().entrySet()) {
-                    text(output, "M 100644 inline " + region.bucketPath(bucket.getKey()) + "\n");
-                    data(output, bucket.getValue().text().getBytes(StandardCharsets.US_ASCII));
-                }
+                regionEntries(output, region);
                 continue;
             }
             text(output, "M 100644 inline " + file.path() + "\n");
@@ -299,6 +339,48 @@ final class GitSnapshotWriter {
         data(output, GitSnapshotManifestCodec.encode(manifest));
         text(output, "\nget-mark :1\ndone\n");
         output.flush();
+    }
+
+    /**
+     * The fast-import commands for a parentless commit whose tree starts as {@code tree}; each
+     * region's whole file gives way to its index and bucket pointers, and the manifest is replaced.
+     */
+    private static void conversionStream(
+            String tree,
+            Collection<GitRegionFile> regions,
+            GitSnapshotManifest manifest,
+            String privateRef,
+            OutputStream pipe) throws IOException {
+        OutputStream output = new BufferedOutputStream(pipe, BUFFER_BYTES);
+        commitHeader(output, manifest, privateRef);
+        text(output, "M 040000 " + tree + " \"\"\n");
+        for (GitRegionFile region : regions) {
+            text(output, "D " + region.path() + "\n");
+            regionEntries(output, region);
+        }
+        text(output, "M 100644 inline " + GitTreeValidator.MANIFEST_PATH + "\n");
+        data(output, GitSnapshotManifestCodec.encode(manifest));
+        text(output, "\nget-mark :1\ndone\n");
+        output.flush();
+    }
+
+    private static void commitHeader(OutputStream output, GitSnapshotManifest manifest, String privateRef)
+            throws IOException {
+        long time = manifest.manifest().createdAt().getEpochSecond();
+        text(output, "commit " + privateRef + "\nmark :1\n"
+                + "author WorldArchive <worldarchive@localhost> " + time + " +0000\n"
+                + "committer WorldArchive <worldarchive@localhost> " + time + " +0000\n");
+        data(output, manifest.commitMessage().getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** The index and bucket pointers of one bucketed region. */
+    private static void regionEntries(OutputStream output, GitRegionFile region) throws IOException {
+        text(output, "M 100644 inline " + region.indexPath() + "\n");
+        data(output, region.index().encode());
+        for (Map.Entry<Integer, GitLfsPointer> bucket : region.buckets().entrySet()) {
+            text(output, "M 100644 inline " + region.bucketPath(bucket.getKey()) + "\n");
+            data(output, bucket.getValue().text().getBytes(StandardCharsets.US_ASCII));
+        }
     }
 
     /** Streams a captured file as fast-import data, proving on the way that it still matches the inventory. */

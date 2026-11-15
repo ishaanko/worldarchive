@@ -12,6 +12,7 @@ import dev.ishaanko.worldarchive.model.GameVersionStamp;
 import dev.ishaanko.worldarchive.model.ProgressListener;
 import dev.ishaanko.worldarchive.model.WorldId;
 import dev.ishaanko.worldarchive.settings.ClientSettingsAccess;
+import dev.ishaanko.worldarchive.storage.git.GitConversion;
 import dev.ishaanko.worldarchive.storage.management.CleanupPlan;
 import dev.ishaanko.worldarchive.storage.management.CleanupRequest;
 import dev.ishaanko.worldarchive.storage.management.CleanupResult;
@@ -208,6 +209,17 @@ final class RuntimeClientFacade implements BackupClientFacade {
     @Override
     public CompletionStage<CleanupResult> applyCleanup(CleanupRequest request) {
         return calls.withPermit(state -> state.storage().applyCleanup(request));
+    }
+
+    @Override
+    public CompletionStage<Integer> oldFormatGitBackups(WorldId worldId) {
+        return calls.withState(state -> state.git().oldFormatSnapshotCount(worldId));
+    }
+
+    /** Holds a work permit until the conversion has stopped, so no settings save moves the repository under it. */
+    @Override
+    public CompletionStage<GitConversion> convertGitBackups(WorldId worldId, ProgressListener progressListener) {
+        return calls.withPermit(state -> state.recovery().convertGitBackups(worldId, progressListener));
     }
 
     @Override

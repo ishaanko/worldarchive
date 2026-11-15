@@ -278,6 +278,24 @@ class RemoteUploadEndToEndTest {
     }
 
     @Test
+    void aRebuiltBackupListShowsACopyTheRemoteLacksAsNotSynced() throws Exception {
+        Path remote = bareRepository("rebuilt.git");
+        TestWorld world = TestWorld.create(root.resolve("saves"), "Rebuilt");
+        WorldArchiveConfig config = config(world, remote, RemoteUpload.ONCE_A_DAY);
+        engine = start(config);
+        BackupResult uploaded = backup(world, 1);
+        BackupResult local = backup(world, 2);
+        engine.close();
+        Files.writeString(engine.catalogFile(), "not-json");
+
+        engine = start(config);
+        await(engine.imports.rebuildLocal());
+
+        assertEquals(SyncStatus.SYNCED, listed(uploaded.backupId()).syncStatus());
+        assertEquals(SyncStatus.NOT_SYNCED, listed(local.backupId()).syncStatus());
+    }
+
+    @Test
     void deletingABackupThatNeverUploadedLeavesTheRemoteAsItWas() throws Exception {
         Path remote = bareRepository("kept.git");
         TestWorld world = TestWorld.create(root.resolve("saves"), "Kept");

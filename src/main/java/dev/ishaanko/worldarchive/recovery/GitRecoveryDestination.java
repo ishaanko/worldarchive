@@ -11,9 +11,11 @@ import dev.ishaanko.worldarchive.model.DestinationResult;
 import dev.ishaanko.worldarchive.model.DestinationStatus;
 import dev.ishaanko.worldarchive.model.DestinationType;
 import dev.ishaanko.worldarchive.model.ImportSourceId;
+import dev.ishaanko.worldarchive.model.ProgressListener;
 import dev.ishaanko.worldarchive.model.SafeText;
 import dev.ishaanko.worldarchive.model.SyncStatus;
 import dev.ishaanko.worldarchive.model.WorldId;
+import dev.ishaanko.worldarchive.storage.git.GitConversion;
 import dev.ishaanko.worldarchive.storage.git.GitDeletion;
 import dev.ishaanko.worldarchive.storage.git.GitSnapshot;
 import dev.ishaanko.worldarchive.storage.git.GitVerification;
@@ -188,6 +190,11 @@ final class GitRecoveryDestination implements RecoveryDestination {
             return copy;
         }
         return RecoverySupport.awaitStopped(git.syncSnapshot(worldId, backupId));
+    }
+
+    /** Converts the world's old Git backups; a cancel returns what was converted until then. */
+    GitConversion convert(WorldId worldId, ProgressListener listener) throws Exception {
+        return RecoverySupport.awaitStopped(git.convertSnapshots(worldId, listener));
     }
 
     private boolean storedHere(WorldId worldId, BackupId backupId) throws Exception {

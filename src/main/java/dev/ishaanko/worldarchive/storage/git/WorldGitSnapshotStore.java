@@ -228,6 +228,21 @@ public final class WorldGitSnapshotStore implements BackupBackend {
         return submit(() -> world(worldId).sync(backupId));
     }
 
+    /**
+     * Rewrites each old Git backup of the world in the bucket format, then frees the space only
+     * the old forms used. Cancelling stops it between backups, or inside one before its snapshot
+     * moves; the result then still lists the backups converted so far.
+     */
+    public CompletionStage<GitConversion> convertSnapshots(WorldId worldId, ProgressListener progressListener) {
+        Objects.requireNonNull(progressListener, "progressListener");
+        return submit(() -> world(worldId).convert(progressListener));
+    }
+
+    /** How many of the world's Git backups are in the old format and would be converted. */
+    public CompletionStage<Integer> oldFormatSnapshotCount(WorldId worldId) {
+        return submit(() -> world(worldId).oldFormatCount());
+    }
+
     /** The world's repository folder; nothing is created. */
     public Path repositoryFor(WorldId worldId) {
         Objects.requireNonNull(worldId, "worldId");

@@ -62,7 +62,7 @@ final class GitSnapshotDeleter {
             List<GitRemote.Branch> copies = branches.of(backupId);
             if (snapshot.isEmpty() && copies.isEmpty()) {
                 results.put(backupId, GitDeletion.notFound());
-            } else if (!sameCommit(snapshot, copies)) {
+            } else if (!sameCommit(snapshot, copies) && (snapshot.isEmpty() || !sameBackup(snapshot.get(), copies))) {
                 results.put(backupId, GitDeletion.failed("The remote copy of this backup differs from this"
                         + " computer's copy, so neither was deleted"));
             } else if (copies.isEmpty()) {
@@ -83,6 +83,25 @@ final class GitSnapshotDeleter {
         String expected = snapshot.map(GitSnapshot::commitId)
                 .orElseGet(() -> copies.isEmpty() ? "" : copies.getFirst().commitId());
         return copies.stream().allMatch(copy -> copy.commitId().equals(expected));
+    }
+
+    /**
+     * Whether each remote copy that differs from this computer's holds the same backup in its old
+     * form, as after a conversion here (see {@link GitRemote#holdsSameBackup}). A remote that
+     * cannot tell counts as holding something else, so the delete is refused.
+     */
+    private boolean sameBackup(GitSnapshot snapshot, List<GitRemote.Branch> copies) throws InterruptedException {
+        try {
+            for (GitRemote.Branch copy : copies) {
+                if (!copy.commitId().equals(snapshot.commitId())
+                        && !remote.orElseThrow().holdsSameBackup(copy, snapshot.commitId())) {
+                    return false;
+                }
+            }
+            return true;
+        } catch (IOException | GitStorageException exception) {
+            return false;
+        }
     }
 
     /** Removes remote branches batch by batch and returns the backups whose branches are gone. */

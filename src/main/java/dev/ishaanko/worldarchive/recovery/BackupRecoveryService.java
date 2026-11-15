@@ -15,6 +15,7 @@ import dev.ishaanko.worldarchive.model.BackupResult;
 import dev.ishaanko.worldarchive.model.DestinationType;
 import dev.ishaanko.worldarchive.model.ProgressListener;
 import dev.ishaanko.worldarchive.model.WorldId;
+import dev.ishaanko.worldarchive.storage.git.GitConversion;
 import dev.ishaanko.worldarchive.storage.git.WorldGitSnapshotStore;
 import dev.ishaanko.worldarchive.storage.zip.ZipBackupStoreResolver;
 import dev.ishaanko.worldarchive.support.AsyncTasks;
@@ -29,9 +30,10 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 
 /**
- * Lists, restores, deletes, verifies and syncs backups, on worker threads, with no Minecraft
- * code. Restore, delete, verify and sync return a {@link CancellableTask}: cancelling it stops the
- * operation at its next safe point and completes it once the work has stopped.
+ * Lists, restores, deletes, verifies and syncs backups, and converts old Git backups, on worker
+ * threads, with no Minecraft code. Restore, delete, verify, sync and convert return a
+ * {@link CancellableTask}: cancelling it stops the operation at its next safe point and completes
+ * it once the work has stopped.
  */
 public final class BackupRecoveryService implements BackupService {
     private final BackupCatalog catalog;
@@ -120,6 +122,16 @@ public final class BackupRecoveryService implements BackupService {
         List<BackupId> copy = List.copyOf(backupIds);
         Objects.requireNonNull(progressListener, "progressListener");
         return submit(task -> healthOperations.syncAll(worldId, copy, progressListener, task));
+    }
+
+    /**
+     * Rewrites the world's old Git backups in the bucket format and frees the space only the old
+     * forms used. Cancel stops it between backups; the ones converted until then stay converted.
+     */
+    public CompletionStage<GitConversion> convertGitBackups(WorldId worldId, ProgressListener progressListener) {
+        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(progressListener, "progressListener");
+        return submit(task -> healthOperations.convertGit(worldId, progressListener, task));
     }
 
     private <T> CompletionStage<T> submit(CancellableTask.Operation<T> operation) {

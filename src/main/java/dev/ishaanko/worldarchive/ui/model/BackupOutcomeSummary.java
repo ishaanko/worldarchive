@@ -35,14 +35,14 @@ public record BackupOutcomeSummary(
     /**
      * Summarizes the result of a create, sync or verify.
      *
-     * @throws IllegalArgumentException for a restore or a delete
+     * @throws IllegalArgumentException for a restore, a delete or a conversion
      */
     public static BackupOutcomeSummary from(BackupOperation operation, BackupResult result) {
         return switch (operation) {
             case CREATE -> creation(result);
             case SYNC -> synchronization(result);
             case VERIFY -> verification(result);
-            case RESTORE, DELETE -> throw new IllegalArgumentException(operation + " has its own summary");
+            case RESTORE, DELETE, CONVERT -> throw new IllegalArgumentException(operation + " has its own summary");
         };
     }
 

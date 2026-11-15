@@ -9,6 +9,7 @@ import dev.ishaanko.worldarchive.model.BackupResult;
 import dev.ishaanko.worldarchive.model.GameVersionStamp;
 import dev.ishaanko.worldarchive.model.ProgressListener;
 import dev.ishaanko.worldarchive.model.WorldId;
+import dev.ishaanko.worldarchive.storage.git.GitConversion;
 import dev.ishaanko.worldarchive.storage.management.CleanupPlan;
 import dev.ishaanko.worldarchive.storage.management.CleanupRequest;
 import dev.ishaanko.worldarchive.storage.management.CleanupResult;
@@ -59,6 +60,15 @@ public interface BackupClientFacade {
     CompletionStage<CleanupResult> applyCleanup(CleanupRequest request);
 
     CompletionStage<Void> saveStoragePolicy(WorldId worldId, StoragePolicy policy);
+
+    /** How many of the world's Git backups are in the old format; 0 when it has none. */
+    CompletionStage<Integer> oldFormatGitBackups(WorldId worldId);
+
+    /**
+     * Rewrites the world's old Git backups in the bucket format. Cancelling the returned stage
+     * stops it between backups; the ones converted until then stay converted.
+     */
+    CompletionStage<GitConversion> convertGitBackups(WorldId worldId, ProgressListener progressListener);
 
     /** Opens the folder of the selected backup, or of the world's backups, in the file manager. */
     CompletionStage<Void> openManagedFolder(BackupWorldContext world, Optional<BackupId> selectedBackup);
