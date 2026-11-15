@@ -66,6 +66,20 @@ class SyncBatchTest {
         assertEquals(BackupStatus.FAILED, batch.summarize(List.of(rejected, gone)).status());
     }
 
+    @Test
+    void aLongReasonShowsItsEndWhereAnUploadErrorNamesTheCause() {
+        String reason = "This computer's Git copy is safe; Git command failed: fatal: unable to access "
+                + "'https://example.com/world.git/': Could not resolve host: example.com";
+        BackupResult failed = result(oldest, DestinationResult.pendingSync(DestinationType.GIT, "git", reason)
+                .withSync(SyncStatus.FAILED));
+
+        String shown = SyncBatch.of(List.of(oldest)).summarize(List.of(failed)).failures().getFirst().reason().orElseThrow();
+
+        assertEquals("...world.git/': Could not resolve host: example.com", shown.substring(0, 3)
+                + shown.substring(shown.indexOf("world.git")));
+        assertEquals(63, shown.length());
+    }
+
     private static OperationProgress progress(BackupId backupId, long completed, long total, String message) {
         return new OperationProgress(OperationId.create(), WORLD_ID, Optional.of(backupId), BackupOperation.SYNC,
                 OperationPhase.PREPARING, completed, total, message);

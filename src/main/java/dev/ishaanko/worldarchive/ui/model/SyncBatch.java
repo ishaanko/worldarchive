@@ -89,10 +89,25 @@ public record SyncBatch(List<BackupRow> rows) {
             failures.add(new Failure(
                     row == null ? result.backupId().toString() : BackupText.name(row),
                     git.flatMap(DestinationResult::message)
-                            .map(reason -> SafeText.clean(reason, MAXIMUM_REASON_LENGTH))
+                            .map(reason -> ending(SafeText.clean(reason, MAXIMUM_MESSAGE_LENGTH)))
                             .filter(reason -> !reason.isEmpty())));
         }
         return new Summary(uploaded, results.size(), failures);
+    }
+
+    /**
+     * The end of a reason that is too long for the result screen. An upload error opens with the
+     * same words every time and names its cause last, so the end is the part worth showing.
+     */
+    private static String ending(String reason) {
+        if (reason.length() <= MAXIMUM_REASON_LENGTH) {
+            return reason;
+        }
+        int start = reason.length() - MAXIMUM_REASON_LENGTH;
+        if (Character.isLowSurrogate(reason.charAt(start))) {
+            start++;
+        }
+        return "..." + reason.substring(start).stripLeading();
     }
 
     private static boolean onRemote(DestinationResult git) {
@@ -102,8 +117,8 @@ public record SyncBatch(List<BackupRow> rows) {
     /** How many backups uploaded out of how many, and each one that did not. */
     public record Summary(int uploaded, int total, List<Failure> failures) {
         /**
-         * The failures the result screen names; it counts the rest. Three names with a short
-         * reason each fit the screen's seven rows; every row in the list keeps its full reason.
+         * The failures the result screen names; it counts the rest. Three names with the end of
+         * each reason fit the screen's seven rows; every row in the list keeps its full reason.
          */
         public static final int MAXIMUM_SHOWN = 3;
 

@@ -26,6 +26,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -440,14 +441,19 @@ final class GitWorldRepository {
 
     /**
      * Whether a Sync moves {@code main} to the snapshot: only when the remote holds no newer
-     * backup. The remote's branch names carry each backup's time, so a newer backup that never
-     * uploaded does not count, and one whose copy on this computer is gone still does.
+     * backup. A branch name carries its backup's time, so a newer backup that never uploaded does
+     * not count, and one whose copy on this computer is gone still does. A branch that versions
+     * 0.1.0 to 0.1.3 named has no time; its snapshot on this computer supplies it.
      */
     private GitRemote.MainBranch mainAfterSync(GitSnapshot snapshot)
             throws IOException, InterruptedException, GitStorageException {
         Instant own = snapshot.committedAt().truncatedTo(ChronoUnit.SECONDS);
+        Map<BackupId, Instant> here = new HashMap<>();
+        snapshots().forEach(other -> here.put(other.backupId(), other.committedAt()));
         return remote.orElseThrow().branches().snapshots().stream()
-                .flatMap(branch -> GitRemoteSnapshotRef.committedAt(branch.refName()).stream())
+                .flatMap(branch -> GitRemoteSnapshotRef.committedAt(branch.refName())
+                        .or(() -> Optional.ofNullable(here.get(branch.backupId())))
+                        .stream())
                 .anyMatch(time -> time.isAfter(own))
                 ? GitRemote.MainBranch.KEEP
                 : GitRemote.MainBranch.MOVE;
