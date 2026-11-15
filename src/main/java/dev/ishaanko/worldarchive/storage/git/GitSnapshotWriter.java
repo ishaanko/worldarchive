@@ -3,6 +3,7 @@ package dev.ishaanko.worldarchive.storage.git;
 import dev.ishaanko.worldarchive.core.BackupCapture;
 import dev.ishaanko.worldarchive.core.WorldInventory;
 import dev.ishaanko.worldarchive.support.Digests;
+import dev.ishaanko.worldarchive.support.ParallelWork;
 import dev.ishaanko.worldarchive.support.PortablePath;
 import java.io.BufferedOutputStream;
 import java.io.ByteArrayOutputStream;
@@ -14,10 +15,10 @@ import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -27,6 +28,7 @@ import java.util.Set;
 import java.util.SortedMap;
 import java.util.TreeMap;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Writes the commit for one capture without publishing it, using the capture's inventory. Each
@@ -43,6 +45,10 @@ import java.util.UUID;
  * size and SHA-256 reuses that index and its buckets without reading the file, once each bucket
  * object exists with its size.
  *
+ * <p>Up to eight files are stored at once. The snapshot is written only after every
+ * one of them is in place, and its tree follows the inventory's order, not the order in which the
+ * workers finish.
+ *
  * <p>The tree then holds pointers for LFS files, the index and bucket pointers of each bucketed
  * region under {@code .worldarchive/regions/}, the bytes of every other file, and the manifest,
  * whose storage format is 2 when the tree holds a bucketed region and 1 otherwise, all written by
@@ -50,6 +56,12 @@ import java.util.UUID;
  */
 final class GitSnapshotWriter {
     private static final int BUFFER_BYTES = 64 * 1_024;
+
+    /**
+     * Files written at once. Each new object waits for its flush to disk, which is most of the
+     * time a backup takes, so more workers than the capture's four still help.
+     */
+    private static final int WORKERS = 8;
 
     private final GitRepository repository;
 
@@ -73,13 +85,13 @@ final class GitSnapshotWriter {
     Written write(BackupCapture capture, List<String> lfsPatterns, Map<String, GitRegionFile> previous)
             throws IOException, InterruptedException, GitStorageException {
         Set<String> lfsPaths = lfsPaths(capture);
-        Map<String, GitRegionFile> regions = new HashMap<>();
-        for (WorldInventory.Entry file : capture.inventory().files()) {
+        List<WorldInventory.Entry> lfsFiles = capture.inventory().files().stream()
+                .filter(file -> lfsPaths.contains(file.path()))
+                .toList();
+        Map<String, GitRegionFile> regions = new ConcurrentHashMap<>();
+        ParallelWork.forEach(lfsFiles, WORKERS, file -> {
             if (Thread.interrupted()) {
                 throw new InterruptedException("Writing a Git snapshot was cancelled");
-            }
-            if (!lfsPaths.contains(file.path())) {
-                continue;
             }
             Optional<GitRegionFile> region = isRegionFile(file.path())
                     ? region(capture, file, Optional.ofNullable(previous.get(file.path())))
@@ -90,7 +102,7 @@ final class GitSnapshotWriter {
             } else if (!lfs.hasSize(pointer)) {
                 lfs.store(captured(capture, file), file.path(), pointer);
             }
-        }
+        });
         GitSnapshotManifest manifest = GitSnapshotManifest.create(regions.isEmpty()
                 ? GitSnapshotManifest.WHOLE_FILES_VERSION
                 : GitSnapshotManifest.REGION_BUCKETS_VERSION, capture.manifest(), lfsPatterns);
@@ -166,13 +178,17 @@ final class GitSnapshotWriter {
         return pointer;
     }
 
-    /** Whether the bucket objects rebuild exactly the file {@code expected} describes. */
+    /**
+     * Whether the bucket objects rebuild exactly the file {@code expected} describes. A bucket
+     * object that is gone counts as one that does not: another worker whose region shares the
+     * bucket may have set it aside as damaged a moment ago, and the caller then writes it again.
+     */
     private boolean rebuilds(SortedMap<Integer, GitLfsPointer> buckets, RegionAssembler.StoredRegion expected)
             throws IOException {
         try {
             return expected.equals(RegionAssembler.fromBuckets(List.copyOf(buckets.keySet()),
                     number -> lfs.open(buckets.get(number)), OutputStream.nullOutputStream()));
-        } catch (GitStorageException exception) {
+        } catch (GitStorageException | NoSuchFileException exception) {
             return false;
         }
     }

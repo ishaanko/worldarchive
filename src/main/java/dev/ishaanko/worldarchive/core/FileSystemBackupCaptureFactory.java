@@ -9,6 +9,7 @@ import dev.ishaanko.worldarchive.model.CaptureProgressListener;
 import dev.ishaanko.worldarchive.model.GameVersionStamp;
 import dev.ishaanko.worldarchive.support.Digests;
 import dev.ishaanko.worldarchive.support.Observers;
+import dev.ishaanko.worldarchive.support.ParallelWork;
 import dev.ishaanko.worldarchive.support.PortablePath;
 import java.io.IOException;
 import java.io.InputStream;

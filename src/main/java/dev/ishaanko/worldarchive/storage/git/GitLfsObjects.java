@@ -42,6 +42,9 @@ final class GitLfsObjects {
 
     private final Path temporary;
 
+    /** Held while an object is checked and moved into place, so two writers of one object never both move it. */
+    private final Object placing = new Object();
+
     GitLfsObjects(GitRepository repository) {
         Objects.requireNonNull(repository, "repository");
         this.objects = repository.directory().resolve("lfs").resolve("objects");
@@ -109,7 +112,7 @@ final class GitLfsObjects {
     }
 
     /**
-     * Writes a captured file's bytes as the object for its SHA-256, replacing a damaged copy.
+     * Writes a captured file's bytes as the object for its SHA-256, as {@link #store(GitLfsPointer, String, Content)} does.
      *
      * @param name the file's path in the world, for the message when it no longer matches
      */
@@ -123,9 +126,12 @@ final class GitLfsObjects {
     }
 
     /**
-     * Writes the object for {@code pointer} from {@code content}, replacing a damaged copy. The
-     * bytes are hashed on the way and must match the pointer before they are flushed and moved
-     * into place, so a source that changed fails here and leaves the store as it was.
+     * Writes the object for {@code pointer} from {@code content}, replacing a copy of another
+     * size. The bytes are hashed on the way and must match the pointer before they are flushed
+     * and moved into place, so a source that changed fails here and leaves the store as it was.
+     * Each write goes to its own temporary file, so several threads may store the same object at
+     * once: the first to finish moves it into place, and the others drop their copy instead of
+     * replacing a file another thread may be reading, which Windows refuses.
      *
      * @param name the world file the bytes come from, for the message when they no longer match
      */
@@ -145,7 +151,12 @@ final class GitLfsObjects {
             }
             Path target = path(pointer.sha256());
             Files.createDirectories(target.getParent());
-            Files.move(partial, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            synchronized (placing) {
+                if (hasSize(pointer)) {
+                    return;
+                }
+                Files.move(partial, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            }
             AtomicFiles.flushDirectory(target.getParent());
         } finally {
             Files.deleteIfExists(partial);
