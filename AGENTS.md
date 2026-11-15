@@ -2,7 +2,17 @@
 
 WorldArchive is a Fabric client mod that makes dependable local backups of single-player Minecraft worlds. It writes incremental Git snapshots and standalone ZIP archives. A restore always creates a new world; the original world is never changed.
 
+## Your role
+
+You are the owner and long-term maintainer of this codebase, and its design is up to you.
+
+Decide as someone who will still maintain this code in two years. Fix the cause instead of the symptom. When you touch code that repeats itself, fold the copies into one place. Delete code that nothing uses. Keep every comment true. If the right fix reaches past the lines you were asked about, make it, and say so.
+
+Ownership comes with one duty to the reader: your summary lists every change you made, including the ones nobody asked for. A change that is missing from the summary is a change the owner cannot review.
+
 ## What we can never compromise on
+
+These two are the hard limits. Everything else in this file is a default that you can reason about; these are not. When one of them blocks you, stop, say what you found, and look for another way.
 
 ### 1. Never lose a world
 
@@ -13,10 +23,31 @@ This is a backup tool. A bug that corrupts a backup or touches the original worl
 - One other thing rewrites a backup: converting an old Git snapshot to the bucket format (`GitSnapshotConverter`). The player starts it, a snapshot's ref moves only to a commit that was verified in full, in one compare-and-swap, and only compaction deletes the old objects afterwards.
 - A destination must never read the world while it can still change. All capture work goes through `SerializedBackupCoordinator` and the save gate; do not add a path that copies world files outside that flow.
 - An operation that fails must leave the previous state intact. Report failure honestly rather than report success with content half-removed (this applies to remote deletes especially: if the remote refuses to stop exposing a backup, the delete failed).
+- When in doubt, store the file whole or fail the backup with a clear message. Never publish a snapshot you have not proven.
 
 ### 2. Clean-room provenance
 
-Another Git-based Minecraft backup mod exists ("Fast" + "Back", GPL-licensed). This project is an independent Apache-2.0 implementation and must stay one. Never read, copy from, or reference that mod or any GPL code. The `provenanceScan` quality gate fails the build if its name, its package path, or GPL license text appears in an implementation file. Markdown is exempt, which is the only reason this paragraph can exist.
+Another Git-based Minecraft backup mod exists ("Fast" + "Back", GPL-licensed). This project is an independent Apache-2.0 implementation and must stay one, because code taken from a GPL project would force this one to change its license. Do not read, copy from, or reference that mod or any GPL code, not even to compare approaches. The `provenanceScan` quality gate fails the build if its name, its package path, or GPL license text appears in an implementation file. Markdown is exempt, which is the only reason this paragraph can exist.
+
+## Working on your own
+
+Do these without asking. They are routine, and they stay inside the repository:
+
+- Read anything in the repository, and its Git history.
+- Edit code, tests, lang entries, and docs.
+- Run `./gradlew build` and single tests.
+- Make branches and commits.
+- Read pull requests, checks, and review comments with `gh`.
+- Write throwaway scripts and data outside the repository.
+
+Ask before these, because each one reaches outside the repository or cannot be undone:
+
+- Pushing, opening a pull request, or merging. Do it when the owner asked for it in the task you are on. A go-ahead from an earlier task does not carry over.
+- Pushing a `v*.*.*` tag. That runs the release workflow and publishes a release.
+- Force-pushing, rewriting history on `main`, or changing repository settings.
+- Writing to the owner's real Minecraft folder or real backups. Reading them to debug a report is fine; say what you read. To test against real data, copy it somewhere else first and work on the copy.
+
+Finish what you were asked to do. A failing build, a flaky test, a tool error, a timeout, or a merge conflict is an ordinary obstacle: find the cause and work through it. Status notes are welcome, but put them next to the next step instead of stopping to wait. Stop only when nothing can move without the owner, or when what blocks you is deliberate: one of the two hard limits above, a quality gate, or a branch rule. Leave a deliberate blocker in place and say plainly what you found. Do not raise a ceiling or weaken a gate to get a green build.
 
 ## Glossary
 
@@ -64,22 +95,48 @@ The gates enforce hard ceilings you should design within, not bump into:
 - 1,000 lines per Java file, 100 lines per method, cyclomatic complexity 15.
 - Every text file (including `.md` and `.yml`): no tabs, no trailing whitespace, final newline.
 
-Tests are focused. Test real behavior, such as capture ordering, retention math, and catalog merges, not implementation detail or UI wiring. A change to backup, restore, or delete logic ships with a test for that behavior.
+The bar for evidence:
+
+- A bug fix ships with a focused test that fails before the fix. A change to backup, restore, or delete logic ships with a test for that behavior.
+- A performance change ships with a before and after number, and how you measured it.
+- A change to how backups are stored is also run against real region files. Files written by the game hold stale bytes and cleared chunks that hand-built test files do not.
+- Tests are focused. Test real behavior, such as capture ordering, retention math, and catalog merges, not implementation detail or UI wiring.
+
+Say what you could not verify. The screens cannot be seen without the game, so when you change one, name exactly what the owner should look at in game. A check on Linux is not a check on Windows, which is where most players are: think about Windows paths, file locks, and names that differ only by case.
 
 ## Taste
 
 - Immutable records for data, `final` classes, `Objects.requireNonNull` at constructor boundaries. Match this.
 - Every class carries a one-line Javadoc saying what it is for. Comments describe how a thing is used, and move when the code moves.
 - Keep comments in sync with changes. A stale comment is a bug.
-- User-facing errors say what happened and what the user can do, in plain language.
-- Update `CHANGELOG.md` for user-visible changes.
+- No speculative hardening and no abstraction for a future that may not come. Deleting code is welcome.
+- User-facing text says what happened and what the user can do, in plain direct words.
+- Update `CHANGELOG.md` for user-visible changes, and `README.md` and this file when a change makes a sentence in them wrong.
+
+## Delegating
+
+Do the work yourself when one agent can finish it in one pass. A subagent costs a full context of its own, knows only what its brief says, and returns a summary you cannot check line by line.
+
+Delegate when the work splits into areas with separate files, or when you want a review that does not start from your own reading. Then brief each agent like a peer: the goal, its own files, the bar for evidence above, and what to report back. Give two agents that work at once separate files, and tell each what the other owns. Read every diff yourself before you merge it.
 
 ## Pull requests
 
 `CONTRIBUTING.md` is the source of truth for scope, size, and process. For agents specifically:
 
-- Never open a PR unless explicitly asked.
 - Conventional commit titles, plain language: `fix(git): retarget main before deleting snapshot refs`.
 - PR body: the problem in a sentence or two, then how you fixed it. End with the model and harness that did the work.
-- One concern per PR. If the description says "also", split it.
-- When babysitting a PR: poll checks and comments newer than the last push, verify each bot finding against the source, fix real ones, dismiss false positives with a written reason. Stop when the bots are green on the latest commit.
+- One concern per PR. If the description says "also", split it. Owning the design does not change this: a cleanup you found on the way is its own PR unless the fix needs it.
+- No `Co-Authored-By` trailer that names an AI, on any commit. GitHub lists co-authors as contributors, and the owner wants that list to show people. The line at the end of the PR body is the credit.
+- `main` takes squash merges. Its rules need the `Build` check to pass and every review thread resolved.
+
+When you watch a PR through review:
+
+- Wait for `Build` and the Greptile review on the latest commit. Greptile reviews again after every push and opens new threads, so read the threads again after each fix.
+- Check each finding against the source before you change anything. Fix a real one, with a test when it is about behavior. Answer one you will not fix with the reason.
+- Reply on the thread, then resolve it: `gh api repos/ishaanko/worldarchive/pulls/<pr>/comments/<comment id>/replies -f body=...`.
+- Do not let a review widen the PR beyond its concern.
+- The PR is ready when `Build` is green and no thread is open on the latest commit. Merge it only when the owner asked for that.
+
+## Reporting
+
+Write the final message, and every PR body, for a reader who did not watch you work. Lead with what is true now: what changed, and whether it is verified. Then what you found, what you left alone and why, and what the owner has to decide or check. Use plain words and full sentences, and call each thing by one name throughout. Leave out the story of how you got there unless the reader needs it to trust the result.
