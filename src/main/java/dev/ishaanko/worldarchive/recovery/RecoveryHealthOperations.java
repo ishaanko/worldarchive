@@ -2,6 +2,7 @@ package dev.ishaanko.worldarchive.recovery;
 
 import dev.ishaanko.worldarchive.catalog.BackupCatalog;
 import dev.ishaanko.worldarchive.core.WorldOperationGate;
+import dev.ishaanko.worldarchive.model.ArtifactOwnership;
 import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.BackupOperation;
 import dev.ishaanko.worldarchive.model.BackupRecord;
@@ -183,9 +184,15 @@ final class RecoveryHealthOperations {
         }
     }
 
+    /**
+     * A converted Git copy that counted as uploaded is not synced any more: the remote holds its
+     * old form. An imported copy keeps its state, because Sync never uploads one to the remote it
+     * came from, so nothing could clear a not-synced mark on it.
+     */
     private static DestinationResult needsUpload(DestinationResult copy) {
         boolean uploaded = copy.syncStatus() == SyncStatus.SYNCED || copy.syncStatus() == SyncStatus.PENDING;
         return copy.destination() == DestinationType.GIT && copy.isDurable() && uploaded
+                && copy.ownership() == ArtifactOwnership.MANAGED
                 ? copy.withState(DestinationStatus.SUCCESS, Optional.empty(), SyncStatus.NOT_SYNCED)
                 : copy;
     }

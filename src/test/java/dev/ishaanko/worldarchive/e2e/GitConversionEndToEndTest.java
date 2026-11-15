@@ -21,8 +21,10 @@ import dev.ishaanko.worldarchive.model.BackupStatus;
 import dev.ishaanko.worldarchive.model.BackupTrigger;
 import dev.ishaanko.worldarchive.model.DestinationResult;
 import dev.ishaanko.worldarchive.model.DestinationType;
+import dev.ishaanko.worldarchive.model.ImportSourceId;
 import dev.ishaanko.worldarchive.model.ProgressListener;
 import dev.ishaanko.worldarchive.model.SyncStatus;
+import dev.ishaanko.worldarchive.model.VerificationStatus;
 import dev.ishaanko.worldarchive.storage.git.GitConversion;
 import dev.ishaanko.worldarchive.storage.git.GitSnapshot;
 import dev.ishaanko.worldarchive.storage.git.RegionFileBuilder;
@@ -215,6 +217,24 @@ class GitConversionEndToEndTest {
 
         assertNotEquals(SyncStatus.SYNCED, git(refused).syncStatus(), refused.destinations().toString());
         assertEquals(oldOnRemote.get(synced), remoteBranches(remote).get(taken), "the other backup's branch was kept");
+    }
+
+    /** Sync never uploads an imported copy, so a conversion must not leave one marked as not synced for good. */
+    @Test
+    void aConvertedImportedBackupKeepsItsSyncState() throws Exception {
+        engine = start(Engine.onlyDestination(DestinationType.GIT));
+        TestWorld world = regionWorld("Imported");
+        BackupId backup = oldBackups(world, 1).getFirst();
+        DestinationResult imported = DestinationResult.importedSuccess(DestinationType.GIT,
+                gitCopy(backup).artifactId().orElseThrow(), ImportSourceId.derived("a-repository-elsewhere"),
+                VerificationStatus.VERIFIED, SyncStatus.SYNCED);
+        engine.catalog.update(backup, record -> new BackupRecord(record.manifest(), new BackupResult(
+                backup, world.id(), List.of(imported), record.result().completedAt())));
+
+        GitConversion conversion = await(engine.recovery.convertGitBackups(world.id(), ProgressListener.NO_OP));
+
+        assertEquals(List.of(backup), conversion.converted());
+        assertEquals(imported, gitCopy(backup));
     }
 
     /**
