@@ -64,7 +64,7 @@ public final class BackupRecoveryService implements BackupService {
         this.restoreOperation = new RecoveryRestoreOperation(
                 catalog, destinations, identityStore, metadataFinalizer, operationGate, clock);
         this.deleteOperation = new RecoveryDeleteOperation(catalog, destinations, deletions, operationGate, clock);
-        this.healthOperations = new RecoveryHealthOperations(catalog, destinations, gitCopies, operationGate);
+        this.healthOperations = new RecoveryHealthOperations(catalog, destinations, gitCopies, operationGate, clock);
     }
 
     @Override
@@ -109,6 +109,17 @@ public final class BackupRecoveryService implements BackupService {
         Objects.requireNonNull(backupId, "backupId");
         Objects.requireNonNull(progressListener, "progressListener");
         return submit(task -> healthOperations.sync(backupId, progressListener, task));
+    }
+
+    @Override
+    public CompletionStage<List<BackupResult>> syncBackups(
+            WorldId worldId,
+            List<BackupId> backupIds,
+            ProgressListener progressListener) {
+        Objects.requireNonNull(worldId, "worldId");
+        List<BackupId> copy = List.copyOf(backupIds);
+        Objects.requireNonNull(progressListener, "progressListener");
+        return submit(task -> healthOperations.syncAll(worldId, copy, progressListener, task));
     }
 
     private <T> CompletionStage<T> submit(CancellableTask.Operation<T> operation) {

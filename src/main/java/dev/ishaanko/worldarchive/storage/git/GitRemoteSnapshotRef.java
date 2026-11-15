@@ -2,6 +2,7 @@ package dev.ishaanko.worldarchive.storage.git;
 
 import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.WorldId;
+import java.time.DateTimeException;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -29,7 +30,7 @@ final class GitRemoteSnapshotRef {
             .withZone(ZoneOffset.UTC);
 
     private static final Pattern CURRENT = Pattern.compile(
-            "refs/heads/backups/\\d{4}-\\d{2}-\\d{2}/\\d{2}-\\d{2}-\\d{2}Z-([0-9a-f-]{36})");
+            "refs/heads/backups/(\\d{4}-\\d{2}-\\d{2}/\\d{2}-\\d{2}-\\d{2}Z)-([0-9a-f-]{36})");
 
     private GitRemoteSnapshotRef() {
     }
@@ -49,12 +50,22 @@ final class GitRemoteSnapshotRef {
         return "refs/heads/worldarchive/" + Objects.requireNonNull(worldId, "worldId") + "/*";
     }
 
+    /** The backup time in a branch name of the current form; empty for an old name or any other branch. */
+    static Optional<Instant> committedAt(String refName) {
+        Matcher current = CURRENT.matcher(refName);
+        try {
+            return current.matches() ? Optional.of(Instant.from(TIMESTAMP.parse(current.group(1)))) : Optional.empty();
+        } catch (DateTimeException exception) {
+            return Optional.empty();
+        }
+    }
+
     /** The backup a remote branch holds, under either name; empty for any other branch. */
     static Optional<BackupId> backupOf(String refName, WorldId worldId) {
         Matcher current = CURRENT.matcher(refName);
         String legacyPrefix = "refs/heads/worldarchive/" + worldId + "/";
         String backup = current.matches()
-                ? current.group(1)
+                ? current.group(2)
                 : refName.startsWith(legacyPrefix) ? refName.substring(legacyPrefix.length()) : "";
         try {
             return backup.isEmpty() ? Optional.empty() : Optional.of(BackupId.parse(backup));

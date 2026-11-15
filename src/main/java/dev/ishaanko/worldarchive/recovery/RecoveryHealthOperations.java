@@ -15,7 +15,10 @@ import dev.ishaanko.worldarchive.model.ProgressListener;
 import dev.ishaanko.worldarchive.model.SafeText;
 import dev.ishaanko.worldarchive.model.SyncStatus;
 import dev.ishaanko.worldarchive.model.VerificationStatus;
+import dev.ishaanko.worldarchive.model.WorldId;
 import java.io.IOException;
+import java.time.Clock;
+import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
@@ -27,7 +30,8 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Verifies a backup's copies and uploads its pending Git copy. Verify and sync record their outcome in the catalog; a cancelled verify
- * records nothing, and a sync records what the upload did before it stopped.
+ * records nothing, and a sync records what the upload did before it stopped. A sync of several backups records each one as it
+ * finishes.
  */
 final class RecoveryHealthOperations {
     private static final Logger LOGGER = LoggerFactory.getLogger("WorldArchive");
@@ -40,15 +44,19 @@ final class RecoveryHealthOperations {
 
     private final WorldOperationGate operationGate;
 
+    private final Clock clock;
+
     RecoveryHealthOperations(
             BackupCatalog catalog,
             Map<DestinationType, RecoveryDestination> destinations,
             GitRecoveryDestination git,
-            WorldOperationGate operationGate) {
+            WorldOperationGate operationGate,
+            Clock clock) {
         this.catalog = Objects.requireNonNull(catalog, "catalog");
         this.destinations = new EnumMap<>(destinations);
         this.git = Objects.requireNonNull(git, "git");
         this.operationGate = Objects.requireNonNull(operationGate, "operationGate");
+        this.clock = Objects.requireNonNull(clock, "clock");
     }
 
     /**
@@ -87,7 +95,11 @@ final class RecoveryHealthOperations {
         }
     }
 
-    /** Uploads this computer's Git copy to the world's remote; a copy already there is left alone. */
+    /**
+     * Uploads this computer's Git copy to the world's remote. It asks the remote every time, also
+     * for a copy the list calls synced: the remote may have been replaced or emptied since, and
+     * a copy that is already there costs one round trip.
+     */
     BackupResult sync(BackupId backupId, ProgressListener listener, CancellableTask<?> task) throws Exception {
         task.checkpoint();
         BackupRecord record = RecoverySupport.requireRecord(catalog, backupId);
@@ -101,11 +113,6 @@ final class RecoveryHealthOperations {
             }
             DestinationResult local = gitCopy.get();
             OperationId operationId = OperationId.create();
-            if (local.status() == DestinationStatus.SUCCESS && local.syncStatus() == SyncStatus.SYNCED) {
-                report(listener, operationId, current, BackupOperation.SYNC, OperationPhase.COMPLETE, 1, 1,
-                        "Backup is already synchronized");
-                return current.result();
-            }
             report(listener, operationId, current, BackupOperation.SYNC, OperationPhase.PREPARING, 0, 1,
                     "Preparing Git synchronization");
             DestinationResult synced = upload(current, local);
@@ -116,6 +123,40 @@ final class RecoveryHealthOperations {
                     "Git synchronization complete");
             return updated.result();
         }
+    }
+
+    /**
+     * Syncs the backups one after another, in the order given. A backup whose sync fails gets a
+     * failed Git result, and the next one still runs. Cancel stops the backup in progress and
+     * starts no other; the ones that finished stay synced.
+     */
+    List<BackupResult> syncAll(
+            WorldId worldId,
+            List<BackupId> backupIds,
+            ProgressListener listener,
+            CancellableTask<?> task) throws Exception {
+        if (backupIds.isEmpty()) {
+            throw new BackupRecoveryException("Select at least one backup to sync");
+        }
+        if (backupIds.stream().distinct().count() != backupIds.size()) {
+            throw new BackupRecoveryException("The same backup was selected twice");
+        }
+        List<BackupResult> results = new ArrayList<>();
+        for (BackupId backupId : backupIds) {
+            task.checkpoint();
+            try {
+                results.add(sync(backupId, listener, task));
+            } catch (InterruptedException interrupted) {
+                throw interrupted;
+            } catch (Exception failure) {
+                task.checkpoint();
+                String reason = SafeText.from(failure, "The upload failed", 300);
+                LOGGER.warn("Sync: backup {} could not be uploaded: {}", backupId, reason);
+                results.add(new BackupResult(backupId, worldId,
+                        List.of(DestinationResult.failed(DestinationType.GIT, reason)), clock.instant()));
+            }
+        }
+        return results;
     }
 
     /** Checks one copy; one that cannot be read is UNAVAILABLE, and the log says why. */

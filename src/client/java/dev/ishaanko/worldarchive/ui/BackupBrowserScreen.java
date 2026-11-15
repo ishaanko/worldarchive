@@ -17,6 +17,7 @@ import dev.ishaanko.worldarchive.ui.model.BackupWorldContext;
 import dev.ishaanko.worldarchive.ui.model.DeletePrompt;
 import dev.ishaanko.worldarchive.ui.model.Paging;
 import dev.ishaanko.worldarchive.ui.model.ScreenGeometry;
+import dev.ishaanko.worldarchive.ui.model.SyncBatch;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -313,13 +314,13 @@ public final class BackupBrowserScreen extends Screen {
     }
 
     private Button actionButton(BackupAction action, ActionDisabledReason reason, int selectedCount) {
-        Component label = action == BackupAction.DELETE && selectedCount > 1
-                ? Component.translatable("screen.worldarchive.browser.action.delete_count", selectedCount)
+        Component label = selectedCount > 1 && (action == BackupAction.DELETE || action == BackupAction.SYNC)
+                ? Component.translatable(actionKey(action) + "_count", selectedCount)
                 : Component.translatable(actionKey(action));
         Button button = Button.builder(label, ignored -> runAction(action)).build();
         button.active = reason == ActionDisabledReason.NONE;
         if (!button.active) {
-            button.setTooltip(Tooltip.create(disabledReason(action, reason)));
+            button.setTooltip(Tooltip.create(disabledReason(action, reason, selectedCount)));
         }
         return button;
     }
@@ -339,10 +340,7 @@ public final class BackupBrowserScreen extends Screen {
             case RESTORE -> () -> minecraft.setScreenAndShow(
                     new BackupRestoreScreen(this, parent, world, selected.getFirst(), facade));
             case DELETE -> () -> confirmDelete(selected);
-            case SYNC -> () -> openOperation(
-                    BackupOperation.SYNC,
-                    "screen.worldarchive.browser.syncing",
-                    listener -> service.syncBackup(selected.getFirst().backupId(), listener));
+            case SYNC -> () -> sync(selected);
             case VERIFY -> () -> openOperation(
                     BackupOperation.VERIFY,
                     "screen.worldarchive.browser.verifying",
@@ -360,6 +358,23 @@ public final class BackupBrowserScreen extends Screen {
             BackupOperationScreen.OperationStarter<BackupResult> starter) {
         minecraft.setScreenAndShow(BackupOperationScreen.backupResult(
                 this, operation, Component.translatable(titleKey).getString(), starter));
+    }
+
+    /** Syncs one backup with its per-copy outcome, or several, oldest first, as one operation. */
+    private void sync(List<BackupRow> selected) {
+        if (selected.size() == 1) {
+            openOperation(
+                    BackupOperation.SYNC,
+                    "screen.worldarchive.browser.syncing",
+                    listener -> service.syncBackup(selected.getFirst().backupId(), listener));
+            return;
+        }
+        SyncBatch batch = SyncBatch.of(selected);
+        minecraft.setScreenAndShow(BackupOperationScreen.syncBatch(
+                this,
+                Component.translatable("screen.worldarchive.browser.syncing_many", selected.size()).getString(),
+                batch,
+                listener -> service.syncBackups(world.worldId(), batch.backupIds(), listener)));
     }
 
     /**
@@ -522,13 +537,11 @@ public final class BackupBrowserScreen extends Screen {
     }
 
     /** The tooltip of a disabled button; Sync names the Git copy it needs. */
-    private Component disabledReason(BackupAction action, ActionDisabledReason reason) {
+    private Component disabledReason(BackupAction action, ActionDisabledReason reason, int selectedCount) {
         return switch (reason) {
             case NONE -> throw new IllegalArgumentException("An available action has no disabled reason");
             case CREATE_BLOCKED -> createBlocked();
-            case NO_DURABLE_COPY -> Component.translatable(action == BackupAction.SYNC
-                    ? "screen.worldarchive.browser.disabled.no_git_copy"
-                    : "screen.worldarchive.browser.disabled.no_copy");
+            case NO_DURABLE_COPY -> noCopy(action, selectedCount);
             case OPERATION_IN_PROGRESS -> Component.translatable("screen.worldarchive.browser.disabled.busy");
             case SOURCE_UNAVAILABLE -> Component.translatable("screen.worldarchive.browser.disabled.world_missing");
             case NO_SELECTION -> Component.translatable("screen.worldarchive.browser.disabled.no_selection");
@@ -536,6 +549,15 @@ public final class BackupBrowserScreen extends Screen {
             case REMOTE_NOT_CONFIGURED -> Component.translatable("screen.worldarchive.browser.disabled.no_remote");
             case FOLDER_UNAVAILABLE -> Component.translatable("screen.worldarchive.browser.disabled.no_folder");
         };
+    }
+
+    private static Component noCopy(BackupAction action, int selectedCount) {
+        if (action != BackupAction.SYNC) {
+            return Component.translatable("screen.worldarchive.browser.disabled.no_copy");
+        }
+        return Component.translatable(selectedCount > 1
+                ? "screen.worldarchive.browser.disabled.no_git_copy_many"
+                : "screen.worldarchive.browser.disabled.no_git_copy");
     }
 
     private Component createBlocked() {

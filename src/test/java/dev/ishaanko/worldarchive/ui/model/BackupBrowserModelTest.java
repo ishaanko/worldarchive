@@ -107,7 +107,7 @@ class BackupBrowserModelTest {
     }
 
     @Test
-    void multipleSelectionOnlyAllowsDeleteAndOnlyWhenEveryBackupHasACopy() {
+    void multipleSelectionAllowsDeleteAndSyncOnlyWhenEveryBackupHasTheCopyTheyNeed() {
         BackupRow first = row("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1", "one", 1, 10, 1);
         BackupRow second = row("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa2", "two", 2, 10, 1);
         BackupBrowserCapabilities capabilities = capabilities(false, true, true, true, true);
@@ -116,7 +116,7 @@ class BackupBrowserModelTest {
 
         assertEquals(ActionDisabledReason.NONE, states.get(BackupAction.DELETE));
         assertEquals(ActionDisabledReason.MULTIPLE_SELECTED, states.get(BackupAction.RESTORE));
-        assertEquals(ActionDisabledReason.MULTIPLE_SELECTED, states.get(BackupAction.SYNC));
+        assertEquals(ActionDisabledReason.NONE, states.get(BackupAction.SYNC));
         assertEquals(ActionDisabledReason.MULTIPLE_SELECTED, states.get(BackupAction.VERIFY));
 
         BackupRow gone = record(
@@ -130,6 +130,17 @@ class BackupBrowserModelTest {
         assertEquals(
                 ActionDisabledReason.NO_DURABLE_COPY,
                 BackupActionPolicy.evaluate(capabilities, List.of(first, gone)).get(BackupAction.DELETE));
+
+        BackupRow zipOnly = record(
+                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa4", Optional.empty(), BackupTrigger.MANUAL, 4, 10, 1, zip());
+        Map<BackupAction, ActionDisabledReason> withZipOnly =
+                BackupActionPolicy.evaluate(capabilities, List.of(first, zipOnly));
+        assertEquals(ActionDisabledReason.NONE, withZipOnly.get(BackupAction.DELETE));
+        assertEquals(ActionDisabledReason.NO_DURABLE_COPY, withZipOnly.get(BackupAction.SYNC));
+        assertEquals(
+                ActionDisabledReason.REMOTE_NOT_CONFIGURED,
+                BackupActionPolicy.evaluate(capabilities(false, true, true, false, true), List.of(first, second))
+                        .get(BackupAction.SYNC));
     }
 
     private static BackupBrowserCapabilities capabilities(

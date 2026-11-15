@@ -12,7 +12,7 @@ public final class BackupActionPolicy {
 
     /**
      * The reason each action cannot run, or {@link ActionDisabledReason#NONE} when it can. Delete
-     * accepts any number of backups; Restore, Sync and Verify need exactly one.
+     * and Sync accept any number of backups; Restore and Verify need exactly one.
      */
     public static Map<BackupAction, ActionDisabledReason> evaluate(
             BackupBrowserCapabilities capabilities,
@@ -73,11 +73,10 @@ public final class BackupActionPolicy {
     private static ActionDisabledReason sync(
             BackupBrowserCapabilities capabilities,
             List<BackupRow> selection) {
-        ActionDisabledReason count = exactlyOne(selection);
-        if (count != ActionDisabledReason.NONE) {
-            return count;
+        if (selection.isEmpty()) {
+            return ActionDisabledReason.NO_SELECTION;
         }
-        if (!selection.getFirst().git().durable()) {
+        if (!selection.stream().allMatch(row -> row.git().durable())) {
             return ActionDisabledReason.NO_DURABLE_COPY;
         }
         return capabilities.gitRemoteConfigured()

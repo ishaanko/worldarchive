@@ -11,8 +11,11 @@ import dev.ishaanko.worldarchive.model.SafeText;
 import dev.ishaanko.worldarchive.support.AsyncTasks;
 import dev.ishaanko.worldarchive.ui.model.BackupOutcomeSummary;
 import dev.ishaanko.worldarchive.ui.model.BackupRow;
+import dev.ishaanko.worldarchive.ui.model.BackupText;
 import dev.ishaanko.worldarchive.ui.model.DeleteBatchSummary;
 import dev.ishaanko.worldarchive.ui.model.ScreenGeometry;
+import dev.ishaanko.worldarchive.ui.model.SyncBatch;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -61,6 +64,9 @@ final class BackupOperationScreen<T> extends Screen {
 
     private final Consumer<T> finished;
 
+    /** The lang keys of Cancel, or empty when the operation cannot be cancelled. */
+    private final Optional<CancelText> cancelText;
+
     private final ScreenCalls calls = new ScreenCalls(this);
 
     /** The running attempt, kept so Cancel can stop it; null until the screen first shows. */
@@ -92,12 +98,24 @@ final class BackupOperationScreen<T> extends Screen {
             OperationStarter<T> starter,
             Function<T, Presentation> outcome,
             Consumer<T> finished) {
+        this(parent, operation, title, starter, outcome, finished, cancelText(operation));
+    }
+
+    private BackupOperationScreen(
+            Screen parent,
+            BackupOperation operation,
+            String title,
+            OperationStarter<T> starter,
+            Function<T, Presentation> outcome,
+            Consumer<T> finished,
+            Optional<CancelText> cancelText) {
         super(Component.literal(title));
         this.parent = Objects.requireNonNull(parent, "parent");
         this.operation = Objects.requireNonNull(operation, "operation");
         this.starter = Objects.requireNonNull(starter, "starter");
         this.outcome = Objects.requireNonNull(outcome, "outcome");
         this.finished = Objects.requireNonNull(finished, "finished");
+        this.cancelText = Objects.requireNonNull(cancelText, "cancelText");
     }
 
     /** Creates, syncs or verifies one backup and shows its outcome per destination. */
@@ -131,6 +149,60 @@ final class BackupOperationScreen<T> extends Screen {
                     Presentation.lines(summary.details()));
         }, ignored -> {
         });
+    }
+
+    /**
+     * Syncs several backups one after another and shows one combined outcome. The progress line
+     * says which backup the sync is on, and the bar covers the whole batch.
+     */
+    static BackupOperationScreen<List<BackupResult>> syncBatch(
+            Screen parent,
+            String title,
+            SyncBatch batch,
+            OperationStarter<List<BackupResult>> starter) {
+        int total = batch.rows().size();
+        OperationStarter<List<BackupResult>> counting = listener -> starter.start(update -> batch
+                .inBatch(update, position -> Component.translatable(
+                        "screen.worldarchive.operation.sync_batch_progress", position, total, update.message())
+                        .getString())
+                .ifPresent(listener::onProgress));
+        return new BackupOperationScreen<>(parent, BackupOperation.SYNC, title, counting, results -> {
+            SyncBatch.Summary summary = batch.summarize(results);
+            return Presentation.finished(
+                    syncHeadline(summary), color(summary.status(), BackupOperation.SYNC), syncDetails(summary));
+        }, ignored -> {
+        }, Optional.of(new CancelText(
+                "screen.worldarchive.operation.sync_cancelling",
+                "screen.worldarchive.operation.sync_cancelled",
+                "screen.worldarchive.operation.sync_batch_cancelled_detail")));
+    }
+
+    private static Component syncHeadline(SyncBatch.Summary summary) {
+        boolean one = summary.total() == 1;
+        if (summary.failures().isEmpty()) {
+            return one
+                    ? Component.translatable("screen.worldarchive.operation.sync_batch_done_one")
+                    : Component.translatable("screen.worldarchive.operation.sync_batch_done_many", summary.total());
+        }
+        if (summary.uploaded() == 0) {
+            return one
+                    ? Component.translatable("screen.worldarchive.operation.sync_batch_none_one")
+                    : Component.translatable("screen.worldarchive.operation.sync_batch_none_many", summary.total());
+        }
+        return Component.translatable(
+                "screen.worldarchive.operation.sync_batch_partial", summary.uploaded(), summary.total());
+    }
+
+    /** One line for each backup that did not upload, by name, with why. */
+    private static List<Component> syncDetails(SyncBatch.Summary summary) {
+        List<Component> lines = new ArrayList<>();
+        Component fallback = Component.translatable("screen.worldarchive.operation.sync_batch_not_uploaded");
+        summary.shown().forEach(failure -> lines.add(Component.literal(failure.name() + BackupText.SEPARATOR
+                + failure.reason().orElseGet(fallback::getString))));
+        if (summary.more() > 0) {
+            lines.add(Component.translatable("screen.worldarchive.operation.sync_batch_more", summary.more()));
+        }
+        return lines;
     }
 
     /** Restores a backup, then hands the result to {@code restored}, which opens the new world. */
@@ -210,7 +282,7 @@ final class BackupOperationScreen<T> extends Screen {
 
     /** Cancel while the operation can be stopped, otherwise a wait notice. */
     private Button runningButton() {
-        Optional<CancelText> cancel = cancelText(operation);
+        Optional<CancelText> cancel = cancelText;
         if (cancel.isEmpty()) {
             Button wait = Button.builder(Component.translatable("screen.worldarchive.operation.wait"), ignored -> {
             }).build();
@@ -267,7 +339,7 @@ final class BackupOperationScreen<T> extends Screen {
      * passed the point where it can stop.
      */
     private void cancel() {
-        Optional<CancelText> cancel = cancelText(operation);
+        Optional<CancelText> cancel = cancelText;
         if (state != State.RUNNING || attempt == null || cancel.isEmpty()) {
             return;
         }
@@ -310,7 +382,7 @@ final class BackupOperationScreen<T> extends Screen {
     private void fail(Throwable failure) {
         state = SafeText.unwrap(failure) instanceof CaptureChangedException ? State.RETRYABLE : State.FINISHED;
         if (AsyncTasks.isCancellation(failure)) {
-            presentation = cancelText(operation)
+            presentation = cancelText
                     .map(cancel -> Presentation.finished(
                             Component.translatable(cancel.cancelled()),
                             ChatFormatting.YELLOW,
