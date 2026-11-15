@@ -20,6 +20,7 @@ import dev.ishaanko.worldarchive.support.PortablePath;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -102,6 +103,60 @@ class GitRegionSnapshotsTest {
         assertEquals(DestinationStatus.FAILED, result.status());
         assertTrue(result.message().orElseThrow().contains(REGION), result.message().orElseThrow());
         assertEquals(1, await(store.listSnapshots(Optional.of(worldId))).size());
+    }
+
+    @Test
+    void aBackupRewritesAReusedBucketWhoseMarkerRotted() throws Exception {
+        requireRepairOfABucketDamagedAt(0);
+    }
+
+    @Test
+    void aBackupRewritesAReusedBucketWhoseChunkBytesRotted() throws Exception {
+        requireRepairOfABucketDamagedAt(-1);
+    }
+
+    /**
+     * A bucket object rots in place, keeping its size, and then a chunk of another bucket changes.
+     * The next backup finds the rotten object by its size, sees that the buckets no longer rebuild
+     * the captured file, writes that bucket again, and stores a snapshot that restores.
+     *
+     * @param position the byte to flip: 0 for the marker, -1 for the last byte of the last chunk
+     */
+    private void requireRepairOfABucketDamagedAt(int position) throws Exception {
+        Path world = world("Rotten" + position);
+        WorldId worldId = WorldId.create();
+        backup(world, worldId, START);
+        Path rotten;
+        try (Stream<Path> files = Files.walk(store.repositoryFor(worldId).resolve("lfs/objects"))) {
+            rotten = files.filter(Files::isRegularFile)
+                    .filter(GitRegionSnapshotsTest::isBucketOtherThanTheFirst)
+                    .findFirst()
+                    .orElseThrow();
+        }
+        byte[] bytes = Files.readAllBytes(rotten);
+        bytes[position < 0 ? bytes.length + position : position] ^= 0x55;
+        Files.write(rotten, bytes);
+        long objects = lfsObjects(worldId);
+        Files.write(world.resolve(REGION), RegionFileBuilder.scattered(40, 99));
+        BackupCapture second = capture(world, worldId, START.plusSeconds(60));
+
+        DestinationResult result = store.createBackup(second, ProgressListener.NO_OP);
+
+        assertEquals(DestinationStatus.SUCCESS, result.status(), result.message().orElse(""));
+        assertEquals(objects + 1, lfsObjects(worldId), "one new bucket for the changed chunk; the rotten one is replaced");
+        assertEquals(RegionFileBuilder.chunks(world.resolve(REGION)),
+                RegionFileBuilder.chunks(restore(second).resolve(REGION)));
+    }
+
+    /** Whether a file in the LFS store is a bucket object of a bucket other than number 0, which chunk 0 is in. */
+    private static boolean isBucketOtherThanTheFirst(Path object) {
+        try {
+            byte[] bytes = Files.readAllBytes(object);
+            return bytes.length > 6 && bytes[0] == 'W' && bytes[1] == 'A' && bytes[2] == 'R' && bytes[3] == 'B'
+                    && bytes[5] != 0;
+        } catch (IOException exception) {
+            throw new UncheckedIOException(exception);
+        }
     }
 
     /** A snapshot in the layout WorldArchive wrote before buckets: the region file is one LFS object. */
