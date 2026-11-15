@@ -3,6 +3,7 @@ package dev.ishaanko.worldarchive.e2e;
 import static dev.ishaanko.worldarchive.e2e.Engine.await;
 import static dev.ishaanko.worldarchive.e2e.TestWorld.bytes;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.ishaanko.worldarchive.config.GitDestinationConfig;
@@ -17,17 +18,29 @@ import dev.ishaanko.worldarchive.model.BackupTrigger;
 import dev.ishaanko.worldarchive.model.DestinationResult;
 import dev.ishaanko.worldarchive.model.DestinationStatus;
 import dev.ishaanko.worldarchive.model.DestinationType;
+import dev.ishaanko.worldarchive.model.OperationPhase;
 import dev.ishaanko.worldarchive.model.ProgressListener;
 import dev.ishaanko.worldarchive.model.SyncStatus;
+import dev.ishaanko.worldarchive.ui.model.BackupRow;
+import dev.ishaanko.worldarchive.ui.model.BackupText;
+import dev.ishaanko.worldarchive.ui.model.SyncBatch;
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -107,6 +120,161 @@ class RemoteUploadEndToEndTest {
         await(engine.recovery.syncBackup(newer.backupId(), ProgressListener.NO_OP));
         await(engine.recovery.syncBackup(older.backupId(), ProgressListener.NO_OP));
         assertEquals(branchCommit(remote, newer.backupId()), remoteGit(remote, "rev-parse", "refs/heads/main").strip());
+    }
+
+    @Test
+    void syncingSeveralBackupsUploadsThemOldestFirstInOneOperation() throws Exception {
+        Path remote = bareRepository("batch.git");
+        TestWorld world = TestWorld.create(root.resolve("saves"), "Batch");
+        engine = start(config(world, remote, RemoteUpload.ONLY_WITH_SYNC));
+        List<BackupId> made = threeBackups(world);
+        SyncBatch batch = selected(made.get(2), made.get(0), made.get(1));
+
+        List<BackupResult> results = await(engine.recovery.syncBackups(
+                world.id(), batch.backupIds(), ProgressListener.NO_OP));
+
+        assertEquals(made, batch.backupIds());
+        assertEquals(made, results.stream().map(BackupResult::backupId).toList());
+        assertEquals(3, batch.summarize(results).uploaded());
+        for (BackupId backupId : made) {
+            assertEquals(SyncStatus.SYNCED, listed(backupId).syncStatus());
+        }
+        assertEquals(made, onRemote(remote));
+        assertEquals(branchCommit(remote, made.get(2)), remoteGit(remote, "rev-parse", "refs/heads/main").strip());
+    }
+
+    /** The remote is away only while the middle backup uploads; the batch goes on without it. */
+    @Test
+    void aFailedUploadIsNamedAndTheRestOfTheBatchStillUploads() throws Exception {
+        Path remote = bareRepository("flaky.git");
+        Path away = root.resolve("flaky-away.git");
+        TestWorld world = TestWorld.create(root.resolve("saves"), "Flaky");
+        engine = start(config(world, remote, RemoteUpload.ONLY_WITH_SYNC));
+        List<BackupId> made = threeBackups(world);
+        SyncBatch batch = selected(made.toArray(BackupId[]::new));
+        ProgressListener unplugMiddle = update -> {
+            if (update.phase() != OperationPhase.PREPARING) {
+                return;
+            }
+            try {
+                if (update.backupId().equals(Optional.of(made.get(1)))) {
+                    Files.move(remote, away);
+                } else if (update.backupId().equals(Optional.of(made.get(2)))) {
+                    Files.move(away, remote);
+                }
+            } catch (IOException failure) {
+                throw new UncheckedIOException(failure);
+            }
+        };
+
+        List<BackupResult> results = await(engine.recovery.syncBackups(world.id(), batch.backupIds(), unplugMiddle));
+
+        SyncBatch.Summary summary = batch.summarize(results);
+        assertEquals(BackupStatus.PARTIAL_SUCCESS, summary.status());
+        assertEquals(2, summary.uploaded());
+        assertEquals(1, summary.failures().size());
+        assertEquals(BackupText.name(batch.rows().get(1)), summary.failures().getFirst().name());
+        assertTrue(summary.failures().getFirst().reason().isPresent(), summary.toString());
+        assertEquals(SyncStatus.SYNCED, listed(made.get(0)).syncStatus());
+        assertTrue(listed(made.get(1)).syncStatus() != SyncStatus.SYNCED, listed(made.get(1)).toString());
+        assertEquals(SyncStatus.SYNCED, listed(made.get(2)).syncStatus());
+        assertEquals(List.of(made.get(0), made.get(2)), onRemote(remote));
+    }
+
+    @Test
+    void cancelKeepsTheUploadsThatFinishedAndStartsNoMore() throws Exception {
+        Path remote = bareRepository("cancel.git");
+        TestWorld world = TestWorld.create(root.resolve("saves"), "Cancel");
+        engine = start(config(world, remote, RemoteUpload.ONLY_WITH_SYNC));
+        List<BackupId> made = threeBackups(world);
+        AtomicReference<CompletableFuture<List<BackupResult>>> running = new AtomicReference<>();
+        CountDownLatch started = new CountDownLatch(1);
+        ProgressListener cancelAtMiddle = update -> {
+            if (update.backupId().equals(Optional.of(made.get(1))) && update.phase() == OperationPhase.PREPARING) {
+                awaitQuietly(started);
+                running.get().cancel(true);
+            }
+        };
+
+        running.set(engine.recovery.syncBackups(world.id(), made, cancelAtMiddle).toCompletableFuture());
+        started.countDown();
+
+        assertThrows(CancellationException.class, () -> running.get().join());
+        assertEquals(SyncStatus.SYNCED, listed(made.get(0)).syncStatus());
+        assertEquals(SyncStatus.NOT_SYNCED, listed(made.get(1)).syncStatus());
+        assertEquals(SyncStatus.NOT_SYNCED, listed(made.get(2)).syncStatus());
+        assertEquals(List.of(made.get(0)), onRemote(remote));
+    }
+
+    private static void awaitQuietly(CountDownLatch latch) {
+        try {
+            latch.await(30, TimeUnit.SECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /** Three backups an hour apart that stayed on this computer, oldest first. */
+    private List<BackupId> threeBackups(TestWorld world) throws Exception {
+        List<BackupId> made = new ArrayList<>();
+        for (int seed = 1; seed <= 3; seed++) {
+            BackupId backupId = backup(world, seed).backupId();
+            assertEquals(SyncStatus.NOT_SYNCED, listed(backupId).syncStatus());
+            made.add(backupId);
+            engine.clock.advance(Duration.ofHours(1));
+        }
+        return made;
+    }
+
+    /** The browser's batch for these backups, selected in this order. */
+    private SyncBatch selected(BackupId... backupIds) throws Exception {
+        List<BackupRow> rows = new ArrayList<>();
+        for (BackupId backupId : backupIds) {
+            rows.add(BackupRow.from(engine.catalog.find(backupId).orElseThrow()));
+        }
+        return SyncBatch.of(rows);
+    }
+
+    /** A remote that was deleted and created again is empty, whatever the backup list still says. */
+    @Test
+    void syncUploadsAgainToARemoteThatWasReplaced() throws Exception {
+        Path remote = bareRepository("replaced.git");
+        TestWorld world = TestWorld.create(root.resolve("saves"), "Replaced");
+        engine = start(config(world, remote, RemoteUpload.EVERY_BACKUP));
+        BackupResult uploaded = backup(world, 1);
+        assertEquals(SyncStatus.SYNCED, listed(uploaded.backupId()).syncStatus());
+        try (Stream<Path> files = Files.walk(remote)) {
+            for (Path file : files.sorted(Comparator.reverseOrder()).toList()) {
+                Files.delete(file);
+            }
+        }
+        bareRepository("replaced.git");
+
+        BackupResult synced = await(engine.recovery.syncBackup(uploaded.backupId(), ProgressListener.NO_OP));
+
+        assertEquals(SyncStatus.SYNCED, git(synced).syncStatus());
+        assertEquals(List.of(uploaded.backupId()), onRemote(remote));
+    }
+
+    /** Cleanup can leave a backup only on the remote; Sync must neither fail it nor move main behind it. */
+    @Test
+    void syncLeavesABackupThatIsOnlyOnTheRemoteAsItIs() throws Exception {
+        Path remote = bareRepository("remote-only.git");
+        TestWorld world = TestWorld.create(root.resolve("saves"), "RemoteOnly");
+        engine = start(config(world, remote, RemoteUpload.EVERY_BACKUP));
+        BackupResult older = backup(world, 1);
+        engine.clock.advance(Duration.ofHours(1));
+        BackupResult newer = backup(world, 2);
+        String newest = branchCommit(remote, newer.backupId());
+        assertTrue(await(engine.git.deleteLocalSnapshot(world.id(), newer.backupId())));
+
+        BackupResult remoteOnly = await(engine.recovery.syncBackup(newer.backupId(), ProgressListener.NO_OP));
+        await(engine.recovery.syncBackup(older.backupId(), ProgressListener.NO_OP));
+
+        assertEquals(SyncStatus.SYNCED, git(remoteOnly).syncStatus());
+        assertEquals(DestinationStatus.SUCCESS, listed(newer.backupId()).status());
+        assertEquals(SyncStatus.SYNCED, listed(newer.backupId()).syncStatus());
+        assertEquals(newest, remoteGit(remote, "rev-parse", "refs/heads/main").strip());
     }
 
     @Test

@@ -175,13 +175,24 @@ final class GitRecoveryDestination implements RecoveryDestination {
         }
     }
 
-    /** Uploads this computer's copy to the world's remote; imported copies are left as they are. */
+    /**
+     * Uploads this computer's copy to the world's remote. An imported copy is left as it is, and so
+     * is a backup that cleanup left only on the remote: there is nothing here to upload, and its
+     * copy there is not in doubt.
+     */
     DestinationResult sync(BackupRecord record, DestinationResult copy) throws Exception {
         requireArtifact(record, copy);
-        if (copy.ownership() != ArtifactOwnership.MANAGED) {
+        WorldId worldId = record.manifest().worldId();
+        BackupId backupId = record.manifest().backupId();
+        if (copy.ownership() != ArtifactOwnership.MANAGED || !storedHere(worldId, backupId)) {
             return copy;
         }
-        return RecoverySupport.awaitStopped(git.syncSnapshot(record.manifest().worldId(), record.manifest().backupId()));
+        return RecoverySupport.awaitStopped(git.syncSnapshot(worldId, backupId));
+    }
+
+    private boolean storedHere(WorldId worldId, BackupId backupId) throws Exception {
+        return RecoverySupport.awaitStopped(git.listSnapshots(Optional.of(worldId))).stream()
+                .anyMatch(snapshot -> snapshot.backupId().equals(backupId));
     }
 
     private static DestinationResult deleted(DestinationResult copy, Optional<String> note) {

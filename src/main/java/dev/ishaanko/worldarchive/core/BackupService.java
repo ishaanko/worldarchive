@@ -40,4 +40,14 @@ public interface BackupService {
     CompletionStage<BackupResult> syncBackup(
             BackupId backupId,
             ProgressListener progressListener);
+
+    /**
+     * Syncs several backups of one world as one operation, one after another in the order given.
+     * Results arrive in that order; a backup that could not be synced is reported as failed, and
+     * the next one still runs. Cancel stops the backup in progress; earlier ones stay synced.
+     */
+    CompletionStage<List<BackupResult>> syncBackups(
+            WorldId worldId,
+            List<BackupId> backupIds,
+            ProgressListener progressListener);
 }

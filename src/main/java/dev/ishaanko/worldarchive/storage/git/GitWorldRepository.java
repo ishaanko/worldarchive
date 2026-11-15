@@ -27,11 +27,11 @@ import java.util.Collection;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
-import java.util.stream.Collectors;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -443,16 +443,20 @@ final class GitWorldRepository {
 
     /**
      * Whether a Sync moves {@code main} to the snapshot: only when the remote holds no newer
-     * snapshot of this repository. A newer snapshot that never uploaded does not count, or
-     * {@code main} would stay behind every backup the remote has.
+     * backup. A branch name carries its backup's time, so a newer backup that never uploaded does
+     * not count, and one whose copy on this computer is gone still does. A branch that versions
+     * 0.1.0 to 0.1.3 named has no time; its snapshot on this computer supplies it.
      */
     private GitRemote.MainBranch mainAfterSync(GitSnapshot snapshot)
             throws IOException, InterruptedException, GitStorageException {
-        Set<BackupId> uploaded = remote.orElseThrow().branches().snapshots().stream()
-                .map(GitRemote.Branch::backupId)
-                .collect(Collectors.toSet());
-        return snapshots().stream().anyMatch(other -> uploaded.contains(other.backupId())
-                        && other.committedAt().isAfter(snapshot.committedAt()))
+        Instant own = snapshot.committedAt().truncatedTo(ChronoUnit.SECONDS);
+        Map<BackupId, Instant> here = new HashMap<>();
+        snapshots().forEach(other -> here.put(other.backupId(), other.committedAt()));
+        return remote.orElseThrow().branches().snapshots().stream()
+                .flatMap(branch -> GitRemoteSnapshotRef.committedAt(branch.refName())
+                        .or(() -> Optional.ofNullable(here.get(branch.backupId())))
+                        .stream())
+                .anyMatch(time -> time.isAfter(own))
                 ? GitRemote.MainBranch.KEEP
                 : GitRemote.MainBranch.MOVE;
     }
