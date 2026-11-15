@@ -159,6 +159,36 @@ class GitRegionSnapshotsTest {
         }
     }
 
+    /**
+     * The writer stores several files at once. Equal region files and equal whole files make its
+     * workers write the same objects at the same time; every backup still verifies, and two
+     * repositories get the same tree whatever order the workers finish in.
+     */
+    @Test
+    void filesWrittenAtOnceGiveOneTreeWhateverOrderTheyFinish() throws Exception {
+        Path world = world("Parallel");
+        for (int copy = 0; copy < 16; copy++) {
+            Files.write(world.resolve("region/r.1." + copy + ".mca"), RegionFileBuilder.scattered(40, copy % 2));
+            Files.write(world.resolve("region/r.2." + copy + ".mca"), RegionFileBuilder.payload(64 * 1_024, 3));
+        }
+        WorldId worldId = WorldId.create();
+        BackupCapture capture = capture(world, worldId, START);
+        WorldGitSnapshotStore other = new WorldGitSnapshotStore(settings("other-storage"), Map.of(),
+                new SystemGitCommandRunner(), executor);
+        String ref = GitSnapshot.refName(worldId, capture.manifest().backupId());
+
+        List<String> trees = new ArrayList<>();
+        for (WorldGitSnapshotStore target : List.of(store, other)) {
+            DestinationResult result = target.createBackup(capture, ProgressListener.NO_OP);
+            assertEquals(DestinationStatus.SUCCESS, result.status(), result.message().orElse(""));
+            GitVerification verification = await(target.verifyCurrentSnapshot(worldId, capture.manifest().backupId()));
+            assertTrue(verification.valid(), verification.message());
+            trees.add(git(target.repositoryFor(worldId), new byte[0], "rev-parse", ref + "^{tree}").strip());
+        }
+
+        assertEquals(trees.get(0), trees.get(1));
+    }
+
     /** A snapshot in the layout WorldArchive wrote before buckets: the region file is one LFS object. */
     @Test
     void aVersionOneSnapshotStillVerifiesAndRestoresByteForByte() throws Exception {
@@ -274,7 +304,11 @@ class GitRegionSnapshotsTest {
     }
 
     private GitBackendSettings settings() {
-        return new GitBackendSettings(true, temporaryDirectory.resolve("storage"), FolderOrigin.DEFAULT, "git", "origin",
+        return settings("storage");
+    }
+
+    private GitBackendSettings settings(String folder) {
+        return new GitBackendSettings(true, temporaryDirectory.resolve(folder), FolderOrigin.DEFAULT, "git", "origin",
                 Optional.empty(), GitBackendSettings.DEFAULT_LFS_PATTERNS, Duration.ofSeconds(30), 4 * 1_024 * 1_024);
     }
 

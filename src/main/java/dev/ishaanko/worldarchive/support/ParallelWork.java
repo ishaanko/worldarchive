@@ -1,4 +1,4 @@
-package dev.ishaanko.worldarchive.core;
+package dev.ishaanko.worldarchive.support;
 
 import java.io.IOException;
 import java.util.List;
@@ -7,21 +7,27 @@ import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Runs one task per item on a few virtual threads and waits for all of them. The first failure
- * stops the other workers. An interrupt of the waiting thread interrupts every worker and waits
- * until they have stopped, so a cancelled capture never leaves a copy running.
+ * stops the other workers and is thrown as it is. An interrupt of the waiting thread interrupts
+ * every worker and waits until they have stopped, so cancelled work never leaves a worker running.
+ * The capture copies files with it, and the Git writer writes LFS objects with it.
  */
-final class ParallelWork {
+public final class ParallelWork {
     private ParallelWork() {
     }
 
-    /** Blocking work for one item. */
+    /**
+     * Blocking work for one item.
+     *
+     * @param <E> a checked exception the task may throw besides the I/O and interrupt ones, or
+     *     {@link RuntimeException} when it throws none
+     */
     @FunctionalInterface
-    interface Task<T> {
-        void run(T item) throws IOException, InterruptedException;
+    public interface Task<T, E extends Exception> {
+        void run(T item) throws IOException, InterruptedException, E;
     }
 
-    static <T> void forEach(List<T> items, int parallelism, Task<T> task)
-            throws IOException, InterruptedException {
+    public static <T, E extends Exception> void forEach(List<T> items, int parallelism, Task<T, E> task)
+            throws IOException, InterruptedException, E {
         int workers = Math.min(parallelism, items.size());
         if (workers <= 1) {
             for (T item : items) {
@@ -33,7 +39,7 @@ final class ParallelWork {
         AtomicReference<Throwable> failure = new AtomicReference<>();
         Thread[] threads = new Thread[workers];
         for (int worker = 0; worker < workers; worker++) {
-            threads[worker] = Thread.ofVirtual().name("worldarchive-capture-" + worker).unstarted(() -> {
+            threads[worker] = Thread.ofVirtual().name("worldarchive-worker-" + worker).unstarted(() -> {
                 try {
                     for (int index = next.getAndIncrement();
                             index < items.size() && failure.get() == null;
@@ -52,7 +58,7 @@ final class ParallelWork {
             thread.start();
         }
         joinAll(threads);
-        rethrow(failure.get());
+        ParallelWork.<E>rethrow(failure.get());
     }
 
     private static void interruptOthers(Thread[] threads) {
@@ -85,7 +91,10 @@ final class ParallelWork {
         }
     }
 
-    private static void rethrow(Throwable failure) throws IOException, InterruptedException {
+    /** Throws a worker's failure; a checked one that is not I/O or an interrupt can only be the task's {@code E}. */
+    @SuppressWarnings("unchecked")
+    private static <E extends Exception> void rethrow(Throwable failure)
+            throws IOException, InterruptedException, E {
         switch (failure) {
             case null -> {
             }
@@ -93,7 +102,7 @@ final class ParallelWork {
             case InterruptedException exception -> throw exception;
             case RuntimeException exception -> throw exception;
             case Error error -> throw error;
-            default -> throw new IOException(failure);
+            default -> throw (E) failure;
         }
     }
 }
