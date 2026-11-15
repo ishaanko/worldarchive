@@ -14,7 +14,7 @@ Ownership comes with one duty to the reader: your summary lists every change you
 
 These two are the hard limits. Everything else in this file is a default that you can reason about; these are not. When one of them blocks you, stop, say what you found, and look for another way.
 
-### 1. Never lose a world
+### Never lose a world
 
 This is a backup tool. A bug that corrupts a backup or touches the original world is worse than any missing feature. Concretely:
 
@@ -24,10 +24,6 @@ This is a backup tool. A bug that corrupts a backup or touches the original worl
 - A destination must never read the world while it can still change. All capture work goes through `SerializedBackupCoordinator` and the save gate; do not add a path that copies world files outside that flow.
 - An operation that fails must leave the previous state intact. Report failure honestly rather than report success with content half-removed (this applies to remote deletes especially: if the remote refuses to stop exposing a backup, the delete failed).
 - When in doubt, store the file whole or fail the backup with a clear message. Never publish a snapshot you have not proven.
-
-### 2. Clean-room provenance
-
-Another Git-based Minecraft backup mod exists ("Fast" + "Back", GPL-licensed). This project is an independent Apache-2.0 implementation and must stay one, because code taken from a GPL project would force this one to change its license. Do not read, copy from, or reference that mod or any GPL code, not even to compare approaches. The `provenanceScan` quality gate fails the build if its name, its package path, or GPL license text appears in an implementation file. Markdown is exempt, which is the only reason this paragraph can exist.
 
 ## Working on your own
 
