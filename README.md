@@ -64,6 +64,12 @@ The address can't hold a password or token. Git signs in with its credential
 helper or your SSH key, and WorldArchive never stores credentials. A failed
 push leaves the backup marked **pending sync** until you retry.
 
+Backups upload as they are made. To upload less often, set **Upload to remote**
+on the Git settings tab to **Once a day** or **Only with Sync**; **Sync** then
+uploads the backups you select. This matters on GitHub, which keeps every Git
+LFS file you ever uploaded until you delete the repository, and whose free plan
+holds 10 GiB of them.
+
 ## What Delete, cleanup, and restore touch
 
 - **Delete** removes every copy of a backup: the ZIP, the local Git copy, and
@@ -72,7 +78,9 @@ push leaves the backup marked **pending sync** until you retry.
 - **Cleanup** frees space on this computer only. It never touches the remote
   and never deletes a labeled backup.
 - **Restore** copies a backup into a new world. It warns when the backup comes
-  from a different Minecraft version, but never blocks.
+  from a different Minecraft version, but never blocks. A ZIP restore is byte
+  for byte. A Git restore has every chunk, but the unused space inside region
+  files is not kept.
 
 ## Where files live
 
