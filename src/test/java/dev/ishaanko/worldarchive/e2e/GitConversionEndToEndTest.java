@@ -218,6 +218,29 @@ class GitConversionEndToEndTest {
     }
 
     /**
+     * Versions 0.1.0 to 0.1.3 named a backup's branch {@code worldarchive/<world>/<backup>}. Left
+     * behind after a Sync, such a branch would keep the old form on the remote beside the new one.
+     */
+    @Test
+    void syncRemovesABranchWithAnOldNameThatHoldsTheSameBackup() throws Exception {
+        Path remote = Files.createDirectories(root.resolve("old-names.git"));
+        git(remote, "init", "--bare", "--quiet");
+        TestWorld world = regionWorld("OldNames");
+        engine = start(remoteConfig(world, remote));
+        BackupId backup = oldBackups(world, 1).getFirst();
+        await(engine.recovery.syncBackups(world.id(), List.of(backup), ProgressListener.NO_OP));
+        git(remote, "update-ref", "refs/heads/worldarchive/" + world.id() + "/" + backup,
+                remoteBranches(remote).get(backup));
+        await(engine.recovery.convertGitBackups(world.id(), ProgressListener.NO_OP));
+
+        BackupResult uploaded = await(engine.recovery.syncBackup(backup, ProgressListener.NO_OP));
+
+        assertEquals(SyncStatus.SYNCED, git(uploaded).syncStatus(), uploaded.destinations().toString());
+        assertEquals(commit(world, backup), remoteBranches(remote).get(backup));
+        assertEquals("", git(remote, "for-each-ref", "refs/heads/worldarchive/").strip());
+    }
+
+    /**
      * Makes {@code count} backups of the world, changing one region file between them, and turns
      * each snapshot into the old format: each bucketed region becomes one LFS object of the
      * captured file again, and the manifest says format 1. Compaction then drops the buckets.

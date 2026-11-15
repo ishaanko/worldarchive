@@ -128,7 +128,7 @@ final class GitWorldRepository {
                     return remote.isPresent() ? local.withSync(SyncStatus.NOT_SYNCED) : local;
                 }
                 progress.report(OperationPhase.PUBLISHING, "Uploading the Git snapshot");
-                return upload(snapshot, () -> new UploadPlan(main, Optional.empty()), day);
+                return upload(snapshot, () -> new UploadPlan(main, Optional.empty(), List.of()), day);
             });
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
@@ -495,17 +495,31 @@ final class GitWorldRepository {
         GitRemote.Branches branches = remote.orElseThrow().branches();
         String name = GitRemoteSnapshotRef.current(snapshot);
         Optional<String> replacing = Optional.empty();
+        List<GitRemote.Change> oldNames = new ArrayList<>();
         for (GitRemote.Branch branch : branches.of(snapshot.backupId())) {
-            if (branch.refName().equals(name) && !branch.commitId().equals(snapshot.commitId())
-                    && remote.get().holdsSameBackup(branch, snapshot.commitId())) {
+            if (branch.commitId().equals(snapshot.commitId())
+                    || !remote.get().holdsSameBackup(branch, snapshot.commitId())) {
+                continue;
+            }
+            if (branch.refName().equals(name)) {
                 replacing = Optional.of(branch.commitId());
+            } else {
+                oldNames.add(GitRemote.Change.delete(branch.refName(), branch.commitId()));
             }
         }
-        return new UploadPlan(mainAfterSync(snapshot, branches), replacing);
+        return new UploadPlan(mainAfterSync(snapshot, branches), replacing, oldNames);
     }
 
-    /** Whether an upload moves {@code main}, and the remote commit it replaces under a lease, if any. */
-    private record UploadPlan(GitRemote.MainBranch main, Optional<String> replacing) {
+    /**
+     * Whether an upload moves {@code main}, the remote commit it replaces under a lease, if any,
+     * and the branches that versions 0.1.0 to 0.1.3 named for the same backup in its old form,
+     * which are deleted under a lease once the upload is there: left behind, they would keep the
+     * old form on the remote beside the new one.
+     */
+    private record UploadPlan(GitRemote.MainBranch main, Optional<String> replacing, List<GitRemote.Change> oldNames) {
+        UploadPlan {
+            oldNames = List.copyOf(oldNames);
+        }
     }
 
     /** Decides what an upload does; asking the remote can fail like the upload itself. */
@@ -519,6 +533,9 @@ final class GitWorldRepository {
         try {
             UploadPlan plan = choice.decide();
             remote.orElseThrow().upload(snapshot, plan.main(), plan.replacing());
+            if (!plan.oldNames().isEmpty()) {
+                remote.get().change(plan.oldNames());
+            }
             recordUpload(day);
             return DestinationResult.success(DestinationType.GIT, snapshot.refName()).withSync(SyncStatus.SYNCED);
         } catch (InterruptedException exception) {

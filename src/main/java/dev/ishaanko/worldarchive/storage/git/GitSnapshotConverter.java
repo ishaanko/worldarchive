@@ -43,7 +43,7 @@ import org.slf4j.LoggerFactory;
  *
  * <p>Until the swap, the old commit is the backup; after it, the new one is, and there is no
  * state in between. Nothing is deleted here: after the last snapshot, compaction deletes the
- * objects no snapshot uses any more. Cancel stops between snapshots, or inside one before its
+ * objects no snapshot uses any more, also those an earlier run left when it stopped before that. Cancel stops between snapshots, or inside one before its
  * ref moves. The caller holds the repository lock.</p>
  */
 final class GitSnapshotConverter {
@@ -114,7 +114,8 @@ final class GitSnapshotConverter {
         }
         if (cancelled) {
             Thread.currentThread().interrupt();
-        } else if (!converted.isEmpty()) {
+        } else {
+            // Also when nothing was converted now: an earlier run may have stopped before it freed the old objects.
             compactQuietly();
         }
         return new GitConversion(converted.stream().map(GitSnapshot::backupId).toList(), unchanged, failures,
