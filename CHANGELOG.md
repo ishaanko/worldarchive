@@ -9,9 +9,28 @@
   includes the backup date, such as `My World - Restored 2026-09-22`.
 - Enter confirms in the label box of Create Backup and in the name box of Restore.
 - A disabled **Sync** on a backup with no Git copy says why.
+- A new Git setting, **Upload to remote**: Every backup, Once a day, or Only with Sync. A
+  backup that stays on this computer shows "Remote not synced", and **Sync** uploads it.
+- **Sync** works with several selected backups. It uploads them oldest first, shows which one
+  it is on, goes on past a failed upload, and names each backup that did not upload.
+- The **Storage** screen offers to convert old Git backups to the new storage format described
+  below. Each backup is checked before its new form replaces the old one, and the space the
+  old form used is freed. Sync a converted backup to upload its new form.
 
 ### Changed
 
+- **Git backups no longer store the unused space in region files.** A region file is stored in
+  up to 16 pieces, and a later backup stores only the pieces that changed. On a 3.2 GB test
+  world, the first backup stored 1.8 GB where it stored 3.2 GB before, and the next backup
+  stored 215 MB where it stored 483 MB. The same amounts are uploaded to a remote.
+- A world restored from a Git backup has every chunk and every timestamp of the original, but
+  its region files are not byte for byte the same: the unused space in them is empty. A ZIP
+  restore is still byte for byte.
+- Older versions of WorldArchive cannot read Git backups made by this version.
+- **Sync** asks the remote every time. Before, it did nothing for a backup the list called
+  synced, so a remote that was replaced or emptied never got that backup again.
+- After the backup list is rebuilt, a Git backup that the remote does not hold shows as not
+  synced. Before, it showed as having no remote.
 - Settings accept a folder pasted with quotes around it, as Windows "Copy as path" gives it,
   and a path or Git remote with spaces or a line break around it.
 - Settings errors use the names shown on the screen and say what to change.

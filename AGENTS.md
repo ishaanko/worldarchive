@@ -10,6 +10,7 @@ This is a backup tool. A bug that corrupts a backup or touches the original worl
 
 - Restores are copy-only. They create a new world and never write into the source world.
 - The mod never deletes a backup on its own. Every cleanup goes through a user-reviewed plan, and labeled backups are always kept.
+- One other thing rewrites a backup: converting an old Git snapshot to the bucket format (`GitSnapshotConverter`). The player starts it, a snapshot's ref moves only to a commit that was verified in full, in one compare-and-swap, and only compaction deletes the old objects afterwards.
 - A destination must never read the world while it can still change. All capture work goes through `SerializedBackupCoordinator` and the save gate; do not add a path that copies world files outside that flow.
 - An operation that fails must leave the previous state intact. Report failure honestly rather than report success with content half-removed (this applies to remote deletes especially: if the remote refuses to stop exposing a backup, the delete failed).
 
@@ -24,6 +25,7 @@ Another Git-based Minecraft backup mod exists ("Fast" + "Back", GPL-licensed). T
 - **save gate**: for the open world, the save before a capture and the autosave pause during it; autosave then goes back to how the player set it. The world exit backup captures after the final save instead.
 - **destination** / **backend**: where a backup lands: a Git repository or a ZIP archive (`BackupBackend`).
 - **snapshot**: one Git commit of a world. One repository per world; an optional remote per world.
+- **bucket**: one Git LFS object that holds a square of 8x8 chunks of one region file, without the file's unused space. A snapshot stores each region file that parses strictly as up to 16 buckets and an index (`RegionLayout`, `RegionAssembler`); any other file is stored whole.
 - **archive**: one ZIP file with a SHA-256 checksum.
 - **manifest**: the metadata recorded with each backup, including the Minecraft version it was made with.
 - **catalog**: the persistent index of backup records for all worlds (`catalog.json`) that the UI reads.
@@ -40,7 +42,7 @@ A trigger in the runtime asks `SerializedBackupCoordinator` for a backup. For th
 
 The coordinator lets one capture copy a world at a time and writes the backups of one world in order, while different worlds run in parallel. It never merges triggers: each trigger makes its own backup.
 
-The capture (`FileSystemBackupCaptureFactory`) copies the world into `capture-temp` with up to four workers and hashes each file while it copies it. A capture of the open world reads and hashes every file a second time. A capture of a closed world reads a file a second time only when the file changed during the copy, or when its time is within 10 seconds of the newest file's or of the clock, or later. The caller says which kind it is (`CaptureKind`). When the world changed, it tries again and copies only the changed files. Destination work starts only after the capture is complete. Each enabled backend (`WorldGitSnapshotStore`, `ZipBackupBackend`) writes its copy from the capture and returns a `DestinationResult`. The coordinator records one `BackupRecord` in the catalog, updates the world's inventory, and deletes the capture. The UI screens render the catalog.
+The capture (`FileSystemBackupCaptureFactory`) copies the world into `capture-temp` with up to four workers and hashes each file while it copies it. A capture of the open world reads and hashes every file a second time. A capture of a closed world reads a file a second time only when the file changed during the copy, or when its time is within 10 seconds of the newest file's or of the clock, or later. The caller says which kind it is (`CaptureKind`). When the world changed, it tries again and copies only the changed files. Destination work starts only after the capture is complete. Each enabled backend (`WorldGitSnapshotStore`, `ZipBackupBackend`) writes its copy from the capture and returns a `DestinationResult`. The ZIP archive holds the exact files. The Git snapshot holds region files as buckets, after proving that the buckets rebuild the captured file, so a Git restore gives the same chunks and timestamps but not the same bytes. The Git backend then uploads to the world's remote when the upload setting (`RemoteUpload`) allows it; a snapshot that stays local is `NOT_SYNCED`, which is not a failure. The coordinator records one `BackupRecord` in the catalog, updates the world's inventory, and deletes the capture. The UI screens render the catalog.
 
 ## Where code lives
 
