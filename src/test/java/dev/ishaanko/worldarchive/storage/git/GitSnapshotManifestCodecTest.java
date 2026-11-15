@@ -82,7 +82,7 @@ class GitSnapshotManifestCodecTest {
                 IOException.class,
                 () -> GitSnapshotManifestCodec.decode(withVersion(
                         "storageFormatVersion",
-                        GitSnapshotManifest.CURRENT_STORAGE_FORMAT_VERSION + 1)));
+                        GitSnapshotManifest.REGION_BUCKETS_VERSION + 1)));
     }
 
     @Test

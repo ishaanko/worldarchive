@@ -5,6 +5,7 @@ import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.BackupManifest;
 import dev.ishaanko.worldarchive.support.Digests;
 import dev.ishaanko.worldarchive.support.PortablePath;
+import java.io.BufferedOutputStream;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
@@ -26,18 +27,25 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.SortedMap;
+import java.util.TreeMap;
 import java.util.stream.Stream;
 
 /**
  * Reads snapshots back with two Git processes: {@code ls-tree} lists the files and one
- * {@code cat-file --batch} returns the commit, the manifest and every file. Each file is hashed on
- * the way, and the result must match the manifest before a snapshot counts as good. Nothing else
+ * {@code cat-file --batch} returns the commit, the manifest, every file, and the index and bucket
+ * pointers of every bucketed region. Each file is hashed on the way, a bucketed region counts as
+ * the file its index describes, and the result must match the manifest before a snapshot counts
+ * as good. A content check and a restore also rebuild each bucketed region from its bucket
+ * objects and require the size and SHA-256 its index records for the rebuilt file. Nothing else
  * in the repository is read, so a damaged object that no snapshot uses never fails a backup.
  */
 final class GitSnapshotReader {
     private static final int MAXIMUM_MANIFEST_BYTES = 1_024 * 1_024;
 
     private static final int MAXIMUM_COMMIT_BYTES = 64 * 1_024;
+
+    private static final int BUFFER_BYTES = 64 * 1_024;
 
     private final GitRepository repository;
 
@@ -56,12 +64,20 @@ final class GitSnapshotReader {
         CONTENT
     }
 
-    /** What a read proved: the manifest, every file, and the LFS object behind each LFS file. */
-    record Contents(GitSnapshotManifest manifest, WorldInventory inventory, Map<String, GitLfsPointer> lfsFiles) {
+    /**
+     * What a read proved: the manifest, every file, the LFS object behind each LFS file, and the
+     * buckets of each bucketed region.
+     */
+    record Contents(
+            GitSnapshotManifest manifest,
+            WorldInventory inventory,
+            Map<String, GitLfsPointer> lfsFiles,
+            List<GitRegionFile> regions) {
         Contents {
             Objects.requireNonNull(manifest, "manifest");
             Objects.requireNonNull(inventory, "inventory");
             lfsFiles = Map.copyOf(lfsFiles);
+            regions = List.copyOf(regions);
         }
     }
 
@@ -74,6 +90,13 @@ final class GitSnapshotReader {
                 lfs.requireSize(pointer);
             } else {
                 lfs.requireContent(pointer);
+            }
+        }
+        for (GitRegionFile region : contents.regions()) {
+            if (check == LfsCheck.SIZE) {
+                requireBucketSizes(region);
+            } else {
+                rebuild(region, OutputStream.nullOutputStream());
             }
         }
         return contents;
@@ -102,7 +125,8 @@ final class GitSnapshotReader {
     /**
      * Reads and checks a snapshot while writing its files into an empty staging folder. The
      * commit and manifest are checked against the expected manifest before any file is written,
-     * and every LFS object is hashed as it is copied into place.
+     * and every LFS object is hashed as it is copied into place. A bucketed region is written as
+     * its rebuilt file, the compacted region file its index describes.
      */
     Contents restore(GitSnapshot snapshot, BackupManifest expected, Path staging)
             throws IOException, InterruptedException, GitStorageException {
@@ -112,7 +136,42 @@ final class GitSnapshotReader {
                 lfs.copyTo(file.getValue(), target);
             }
         }
+        for (GitRegionFile region : contents.regions()) {
+            try (OutputStream target = new BufferedOutputStream(create(staging, region.path()), BUFFER_BYTES)) {
+                rebuild(region, target);
+            }
+        }
         return contents;
+    }
+
+    /**
+     * The bucketed regions of a snapshot by world path, read with one {@code ls-tree} and one
+     * {@code cat-file --batch}, for the next backup to reuse. Nothing here is checked against the
+     * LFS store: the writer checks each bucket object it reuses. A snapshot whose regions cannot
+     * be read offers none, and the next backup writes every region again.
+     */
+    Map<String, GitRegionFile> reusableRegions(GitSnapshot snapshot) throws IOException, InterruptedException {
+        try {
+            List<GitTreeValidator.Listing> listing = new ArrayList<>(1);
+            repository.stream(GitCommand.Input.NONE, output -> listing.add(GitTreeValidator.read(output)),
+                    "ls-tree", "-r", "-z", "--full-tree", snapshot.commitId(), "--", GitRegionFile.TREE_FOLDER);
+            List<GitTreeValidator.RegionParts> parts = listing.getFirst().regions();
+            Map<String, GitRegionFile> regions = new HashMap<>();
+            if (parts.isEmpty()) {
+                return regions;
+            }
+            StringBuilder request = new StringBuilder();
+            parts.forEach(region -> appendRequest(request, region));
+            repository.stream(GitCommand.Input.utf8(request.toString()), output -> {
+                GitObjectStream objects = new GitObjectStream(output);
+                for (GitTreeValidator.RegionParts region : parts) {
+                    regions.put(region.path(), readRegion(region, objects));
+                }
+            }, "cat-file", "--batch");
+            return regions;
+        } catch (GitStorageException exception) {
+            return Map.of();
+        }
     }
 
     /**
@@ -200,18 +259,21 @@ final class GitSnapshotReader {
      */
     private Contents read(GitSnapshot snapshot, Optional<Restore> restore)
             throws IOException, InterruptedException, GitStorageException {
-        List<GitTreeEntry> entries = new ArrayList<>();
-        repository.stream(GitCommand.Input.NONE, output -> entries.addAll(GitTreeValidator.read(output)),
+        List<GitTreeValidator.Listing> listing = new ArrayList<>(1);
+        repository.stream(GitCommand.Input.NONE, output -> listing.add(GitTreeValidator.read(output)),
                 "ls-tree", "-r", "-z", "--full-tree", snapshot.commitId());
+        List<GitTreeEntry> entries = new ArrayList<>(listing.getFirst().files());
+        List<GitTreeValidator.RegionParts> regions = listing.getFirst().regions();
         GitTreeEntry manifestEntry = entries.stream()
                 .filter(entry -> entry.path().equals(GitTreeValidator.MANIFEST_PATH))
                 .findFirst()
                 .orElseThrow(() -> new GitStorageException("The Git snapshot has no WorldArchive manifest"));
         entries.remove(manifestEntry);
-        FileReader files = new FileReader(snapshot, entries, restore);
+        FileReader files = new FileReader(snapshot, entries, regions, restore);
         StringBuilder request = new StringBuilder(snapshot.commitId()).append('\n')
                 .append(manifestEntry.objectId()).append('\n');
         entries.forEach(entry -> request.append(entry.objectId()).append('\n'));
+        regions.forEach(region -> appendRequest(request, region));
         repository.stream(GitCommand.Input.utf8(request.toString()), files, "cat-file", "--batch");
         WorldInventory inventory = files.inventory();
         BackupManifest backup = files.manifest().manifest();
@@ -221,7 +283,86 @@ final class GitSnapshotReader {
                 || !inventory.inventorySha256().equals(backup.inventorySha256())) {
             throw new GitStorageException("The files in the Git snapshot do not match its manifest");
         }
-        return new Contents(files.manifest(), inventory, files.lfsFiles);
+        return new Contents(files.manifest(), inventory, files.lfsFiles, files.regions);
+    }
+
+    /** Requires each bucket object of a region to exist with its size. */
+    private void requireBucketSizes(GitRegionFile region) throws IOException, GitStorageException {
+        try {
+            for (GitLfsPointer bucket : region.buckets().values()) {
+                lfs.requireSize(bucket);
+            }
+        } catch (GitStorageException exception) {
+            throw damaged(region.path(), exception);
+        }
+    }
+
+    /**
+     * Writes the rebuilt file of a bucketed region to {@code target}. Each bucket object's bytes
+     * must hash to its pointer first, so a damaged object is set aside and the next backup or
+     * download writes it again; then the file rebuilt from the objects must have the size and
+     * SHA-256 of its index. Memory stays a few buffers per bucket.
+     */
+    private void rebuild(GitRegionFile region, OutputStream target)
+            throws IOException, InterruptedException, GitStorageException {
+        if (Thread.interrupted()) {
+            throw new InterruptedException("Reading a Git snapshot was cancelled");
+        }
+        try {
+            for (GitLfsPointer bucket : region.buckets().values()) {
+                lfs.requireContent(bucket);
+            }
+            RegionAssembler.StoredRegion rebuilt = RegionAssembler.fromBuckets(List.copyOf(region.buckets().keySet()),
+                    number -> lfs.open(region.buckets().get(number)), target);
+            if (rebuilt.size() != region.index().storedSize() || !rebuilt.sha256().equals(region.index().storedSha256())) {
+                throw new GitStorageException("Its buckets do not rebuild the file the snapshot recorded; the snapshot is"
+                        + " damaged");
+            }
+        } catch (GitStorageException exception) {
+            throw damaged(region.path(), exception);
+        }
+    }
+
+    private static GitStorageException damaged(String path, GitStorageException exception) {
+        return new GitStorageException("The region file " + path + " of this backup cannot be restored. "
+                + exception.getMessage(), exception);
+    }
+
+    /** Asks {@code cat-file --batch} for a region's index and then its buckets in ascending number. */
+    private static void appendRequest(StringBuilder request, GitTreeValidator.RegionParts region) {
+        request.append(region.index().objectId()).append('\n');
+        region.buckets().values().forEach(bucket -> request.append(bucket.objectId()).append('\n'));
+    }
+
+    /** Reads what {@link #appendRequest} asked for: the index, which must be valid, and a pointer per bucket. */
+    private static GitRegionFile readRegion(GitTreeValidator.RegionParts region, GitObjectStream objects)
+            throws IOException, GitStorageException {
+        try {
+            RegionIndex index = RegionIndex.decode(smallBlob(objects, region.index().path()));
+            SortedMap<Integer, GitLfsPointer> buckets = new TreeMap<>();
+            for (Map.Entry<Integer, GitTreeEntry> bucket : region.buckets().entrySet()) {
+                GitLfsPointer pointer = GitLfsPointer.parse(smallBlob(objects, bucket.getValue().path()))
+                        .orElseThrow(() -> new GitStorageException("The snapshot stores " + bucket.getValue().path()
+                                + " as something other than a Git LFS pointer; the snapshot is damaged"));
+                buckets.put(bucket.getKey(), pointer);
+            }
+            return new GitRegionFile(region.path(), index, buckets);
+        } catch (GitStorageException exception) {
+            throw damaged(region.path(), exception);
+        }
+    }
+
+    /** One blob smaller than a Git LFS pointer can be. */
+    private static byte[] smallBlob(GitObjectStream objects, String path) throws IOException, GitStorageException {
+        GitObjectStream.Header header = objects.next(path);
+        if (header.missing() || !header.type().equals("blob")) {
+            throw new GitStorageException("The Git snapshot is missing " + path);
+        }
+        if (header.size() >= GitLfsPointer.MAXIMUM_BYTES) {
+            objects.skip(header);
+            throw new GitStorageException("The snapshot holds " + path + " larger than it can be; the snapshot is damaged");
+        }
+        return objects.bytes(header, GitLfsPointer.MAXIMUM_BYTES);
     }
 
     /** What a restore must find and where it writes. */
@@ -320,17 +461,23 @@ final class GitSnapshotReader {
 
         private final List<GitTreeEntry> entries;
 
+        private final List<GitTreeValidator.RegionParts> regionParts;
+
         private final Optional<Restore> restore;
 
         private final List<WorldInventory.Entry> files = new ArrayList<>();
 
         private final Map<String, GitLfsPointer> lfsFiles = new HashMap<>();
 
+        private final List<GitRegionFile> regions = new ArrayList<>();
+
         private GitSnapshotManifest manifest;
 
-        FileReader(GitSnapshot snapshot, List<GitTreeEntry> entries, Optional<Restore> restore) {
+        FileReader(GitSnapshot snapshot, List<GitTreeEntry> entries, List<GitTreeValidator.RegionParts> regionParts,
+                Optional<Restore> restore) {
             this.snapshot = snapshot;
             this.entries = entries;
+            this.regionParts = regionParts;
             this.restore = restore;
         }
 
@@ -350,6 +497,10 @@ final class GitSnapshotReader {
             if (restore.filter(target -> !target.expected().equals(manifest.manifest())).isPresent()) {
                 throw new GitStorageException("The Git snapshot does not match the backup in the catalog");
             }
+            if (!regionParts.isEmpty() && manifest.storageFormatVersion() != GitSnapshotManifest.REGION_BUCKETS_VERSION) {
+                throw new GitStorageException("The Git snapshot holds region buckets, which its storage format does not"
+                        + " allow; the snapshot is damaged");
+            }
             for (GitTreeEntry entry : entries) {
                 if (Thread.interrupted()) {
                     throw new InterruptedException("Reading a Git snapshot was cancelled");
@@ -359,6 +510,11 @@ final class GitSnapshotReader {
                     throw new GitStorageException("The Git snapshot is missing the file " + entry.path());
                 }
                 files.add(readFile(entry, file, objects));
+            }
+            for (GitTreeValidator.RegionParts parts : regionParts) {
+                GitRegionFile region = readRegion(parts, objects);
+                regions.add(region);
+                files.add(inventoryEntry(region.path(), region.index().sourceSize(), region.index().sourceSha256()));
             }
         }
 

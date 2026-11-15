@@ -24,6 +24,7 @@ import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.HashMap;
@@ -363,8 +364,9 @@ final class GitWorldRepository {
             throws IOException, InterruptedException, GitStorageException {
         repository.prepare();
         BackupManifest manifest = capture.manifest();
-        GitSnapshotWriter.Written written = writer.write(
-                capture, GitSnapshotManifest.create(manifest, repository.settings().lfsPatterns()));
+        Optional<GitSnapshot> newest = snapshots().stream().max(Comparator.comparing(GitSnapshot::committedAt));
+        GitSnapshotWriter.Written written = writer.write(capture, repository.settings().lfsPatterns(),
+                newest.isPresent() ? reader.reusableRegions(newest.get()) : Map.of());
         GitSnapshot snapshot = new GitSnapshot(worldId, manifest.backupId(), GitSnapshot.refName(worldId, manifest.backupId()),
                 written.commitId(), manifest.createdAt().truncatedTo(ChronoUnit.SECONDS));
         progress.report(OperationPhase.VERIFYING, "Verifying the Git snapshot");
