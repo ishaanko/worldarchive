@@ -10,18 +10,21 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
  * One world's remote. It lists the world's backup branches with one {@code ls-remote}, uploads a
- * snapshot (LFS objects first, then the branch and {@code main} in one push), fetches a snapshot
- * back, and changes several branches in one all-or-nothing push that leases every branch it
+ * snapshot (LFS objects first, then the branch and {@code main} in one push), replaces the old
+ * form of a converted backup under a lease, fetches a snapshot back, and changes several branches in one all-or-nothing push that leases every branch it
  * touches, so a remote that refuses or changed meanwhile keeps every branch where it was.
  */
 final class GitRemote {
     private static final Logger LOGGER = LoggerFactory.getLogger("WorldArchive");
+
+    private static final String SOURCE_IDENTITY = "source-identity: ";
 
     private final GitRepository repository;
 
@@ -107,21 +110,28 @@ final class GitRemote {
      * push when asked, so a new remote makes {@code main} its default branch. The branch must
      * arrive; {@code main} may be protected. A host that refuses a whole push because of a
      * protected {@code main} (as a pre-receive hook does) gets the branch alone in a second push.
+     *
+     * @param replacing the commit the remote's branch holds when it is to be replaced, which the
+     *     push leases, so a branch that moved meanwhile is kept; empty for a plain push, which
+     *     the remote refuses for a branch that holds an unrelated commit
      */
-    void upload(GitSnapshot snapshot, MainBranch main) throws IOException, InterruptedException, GitStorageException {
+    void upload(GitSnapshot snapshot, MainBranch main, Optional<String> replacing)
+            throws IOException, InterruptedException, GitStorageException {
         repository.connectRemote();
         repository.network("lfs", "push", remoteName(), snapshot.refName());
         String branch = GitRemoteSnapshotRef.current(snapshot);
         String branchRefspec = snapshot.refName() + ":" + branch;
+        List<String> lease = replacing.map(commit -> List.of("--force-with-lease=" + branch + ":" + commit))
+                .orElse(List.of());
         GitCommandResult result = main == MainBranch.MOVE
-                ? push(branchRefspec, "+" + snapshot.refName() + ":" + GitRemoteSnapshotRef.DEFAULT_BRANCH)
-                : push(branchRefspec);
+                ? push(lease, branchRefspec, "+" + snapshot.refName() + ":" + GitRemoteSnapshotRef.DEFAULT_BRANCH)
+                : push(lease, branchRefspec);
         Map<String, Boolean> outcome = refOutcomes(result.standardOutput());
         if (outcome.get(GitRemoteSnapshotRef.DEFAULT_BRANCH) == Boolean.FALSE) {
             LOGGER.warn("The Git remote kept its main branch; it may be protected. {}",
                     GitRepository.failureMessage(result));
             if (outcome.get(branch) != Boolean.TRUE) {
-                result = push(branchRefspec);
+                result = push(lease, branchRefspec);
                 outcome = refOutcomes(result.standardOutput());
             }
         }
@@ -130,8 +140,10 @@ final class GitRemote {
         }
     }
 
-    private GitCommandResult push(String... refspecs) throws IOException, InterruptedException {
-        List<String> arguments = new ArrayList<>(List.of("push", "--porcelain", "--no-verify", "--progress", remoteName()));
+    private GitCommandResult push(List<String> lease, String... refspecs) throws IOException, InterruptedException {
+        List<String> arguments = new ArrayList<>(List.of("push", "--porcelain", "--no-verify", "--progress"));
+        arguments.addAll(lease);
+        arguments.add(remoteName());
         arguments.addAll(List.of(refspecs));
         return repository.networkResult(arguments.toArray(String[]::new));
     }
@@ -143,6 +155,39 @@ final class GitRemote {
                 "+" + branch.refName() + ":" + privateRef);
         return repository.resolve(privateRef)
                 .orElseThrow(() -> new GitStorageException("The Git remote did not send the backup"));
+    }
+
+    /**
+     * Whether a remote branch holds the same backup as the local commit, in another form: its
+     * commit, fetched without LFS objects, carries the same {@code source-identity} in its
+     * message, which binds a snapshot to exactly one manifest. A backup that was converted to the
+     * bucket format here is such a pair. The fetched commit is not kept.
+     */
+    boolean holdsSameBackup(Branch branch, String localCommit) throws IOException, InterruptedException, GitStorageException {
+        Optional<String> local = sourceIdentity(localCommit);
+        if (local.isEmpty()) {
+            return false;
+        }
+        String privateRef = "refs/worldarchive/fetch/" + UUID.randomUUID();
+        try {
+            String fetched = fetch(branch, privateRef);
+            return fetched.equals(branch.commitId()) && sourceIdentity(fetched).equals(local);
+        } finally {
+            GitRepository.uninterruptibly(() -> repository.result("update-ref", "-d", privateRef));
+        }
+    }
+
+    /** The {@code source-identity} line of a snapshot commit's message; empty when it has none. */
+    private Optional<String> sourceIdentity(String commit) throws IOException, InterruptedException, GitStorageException {
+        String object = repository.git("cat-file", "commit", commit);
+        int message = object.indexOf("\n\n");
+        return message < 0
+                ? Optional.empty()
+                : object.substring(message + 2).lines()
+                        .filter(line -> line.startsWith(SOURCE_IDENTITY))
+                        .map(line -> line.substring(SOURCE_IDENTITY.length()))
+                        .filter(GitRepository::isSha256)
+                        .findFirst();
     }
 
     /** Downloads the LFS objects that a fetched commit uses. */

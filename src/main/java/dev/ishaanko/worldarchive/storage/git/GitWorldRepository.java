@@ -128,7 +128,7 @@ final class GitWorldRepository {
                     return remote.isPresent() ? local.withSync(SyncStatus.NOT_SYNCED) : local;
                 }
                 progress.report(OperationPhase.PUBLISHING, "Uploading the Git snapshot");
-                return upload(snapshot, () -> main, day);
+                return upload(snapshot, () -> new UploadPlan(main, Optional.empty(), List.of()), day);
             });
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
@@ -306,7 +306,11 @@ final class GitWorldRepository {
         return locked(() -> remote.get().branches().commits());
     }
 
-    /** Uploads this computer's copy of a backup; problems with the remote leave it pending. */
+    /**
+     * Uploads this computer's copy of a backup; problems with the remote leave it pending. A
+     * remote branch that holds the same backup in its old form, as after a conversion here, is
+     * replaced; a branch that holds anything else is left, and the remote refuses the upload.
+     */
     DestinationResult sync(BackupId backupId) throws IOException, InterruptedException, GitStorageException {
         return locked(() -> {
             GitSnapshot snapshot = snapshot(backupId).orElseThrow(GitWorldRepository::noLocalCopy);
@@ -317,7 +321,7 @@ final class GitWorldRepository {
             // A repository that an older version wrote gets the current settings before it uploads.
             repository.prepare();
             LocalDate today = LocalDate.now(repository.settings().clock());
-            return upload(snapshot, () -> mainAfterSync(snapshot), today);
+            return upload(snapshot, () -> syncPlan(snapshot), today);
         });
     }
 
@@ -342,6 +346,28 @@ final class GitWorldRepository {
             deleteUnreferencedLfsObjects(referenced);
             return null;
         });
+    }
+
+    /**
+     * Rewrites each old Git backup of this world in the bucket format, oldest first, then frees
+     * the objects only the old forms used; see {@link GitSnapshotConverter}.
+     */
+    GitConversion convert(ProgressListener listener) throws IOException, InterruptedException, GitStorageException {
+        if (!repository.exists()) {
+            return new GitConversion(List.of(), 0, List.of(), 0, false);
+        }
+        return locked(() -> {
+            repository.prepare();
+            return new GitSnapshotConverter(this, writer).convert(listener);
+        });
+    }
+
+    /** How many of this world's Git backups a conversion would rewrite, judged from their region files' tables. */
+    int oldFormatCount() throws IOException, InterruptedException, GitStorageException {
+        if (!repository.exists()) {
+            return 0;
+        }
+        return locked(() -> new GitSnapshotConverter(this, writer).oldFormatCount());
     }
 
     /** Downloads the LFS objects of an imported snapshot from its source and checks it fully. */
@@ -447,12 +473,12 @@ final class GitWorldRepository {
      * not count, and one whose copy on this computer is gone still does. A branch that versions
      * 0.1.0 to 0.1.3 named has no time; its snapshot on this computer supplies it.
      */
-    private GitRemote.MainBranch mainAfterSync(GitSnapshot snapshot)
+    private GitRemote.MainBranch mainAfterSync(GitSnapshot snapshot, GitRemote.Branches branches)
             throws IOException, InterruptedException, GitStorageException {
         Instant own = snapshot.committedAt().truncatedTo(ChronoUnit.SECONDS);
         Map<BackupId, Instant> here = new HashMap<>();
         snapshots().forEach(other -> here.put(other.backupId(), other.committedAt()));
-        return remote.orElseThrow().branches().snapshots().stream()
+        return branches.snapshots().stream()
                 .flatMap(branch -> GitRemoteSnapshotRef.committedAt(branch.refName())
                         .or(() -> Optional.ofNullable(here.get(branch.backupId())))
                         .stream())
@@ -461,16 +487,55 @@ final class GitWorldRepository {
                 : GitRemote.MainBranch.MOVE;
     }
 
-    /** Decides what an upload does with {@code main}; asking the remote can fail like the upload itself. */
+    /**
+     * What a Sync does on the remote, from one listing: whether {@code main} moves, and the
+     * commit of the backup's branch when that branch holds the same backup in another form.
+     */
+    private UploadPlan syncPlan(GitSnapshot snapshot) throws IOException, InterruptedException, GitStorageException {
+        GitRemote.Branches branches = remote.orElseThrow().branches();
+        String name = GitRemoteSnapshotRef.current(snapshot);
+        Optional<String> replacing = Optional.empty();
+        List<GitRemote.Change> oldNames = new ArrayList<>();
+        for (GitRemote.Branch branch : branches.of(snapshot.backupId())) {
+            if (branch.commitId().equals(snapshot.commitId())
+                    || !remote.get().holdsSameBackup(branch, snapshot.commitId())) {
+                continue;
+            }
+            if (branch.refName().equals(name)) {
+                replacing = Optional.of(branch.commitId());
+            } else {
+                oldNames.add(GitRemote.Change.delete(branch.refName(), branch.commitId()));
+            }
+        }
+        return new UploadPlan(mainAfterSync(snapshot, branches), replacing, oldNames);
+    }
+
+    /**
+     * Whether an upload moves {@code main}, the remote commit it replaces under a lease, if any,
+     * and the branches that versions 0.1.0 to 0.1.3 named for the same backup in its old form,
+     * which are deleted under a lease once the upload is there: left behind, they would keep the
+     * old form on the remote beside the new one.
+     */
+    private record UploadPlan(GitRemote.MainBranch main, Optional<String> replacing, List<GitRemote.Change> oldNames) {
+        UploadPlan {
+            oldNames = List.copyOf(oldNames);
+        }
+    }
+
+    /** Decides what an upload does; asking the remote can fail like the upload itself. */
     @FunctionalInterface
-    private interface MainChoice {
-        GitRemote.MainBranch decide() throws IOException, InterruptedException, GitStorageException;
+    private interface UploadChoice {
+        UploadPlan decide() throws IOException, InterruptedException, GitStorageException;
     }
 
     /** Uploads a published snapshot and records the day; a failed or cancelled upload leaves it pending. */
-    private DestinationResult upload(GitSnapshot snapshot, MainChoice main, LocalDate day) {
+    private DestinationResult upload(GitSnapshot snapshot, UploadChoice choice, LocalDate day) {
         try {
-            remote.orElseThrow().upload(snapshot, main.decide());
+            UploadPlan plan = choice.decide();
+            remote.orElseThrow().upload(snapshot, plan.main(), plan.replacing());
+            if (!plan.oldNames().isEmpty()) {
+                remote.get().change(plan.oldNames());
+            }
             recordUpload(day);
             return DestinationResult.success(DestinationType.GIT, snapshot.refName()).withSync(SyncStatus.SYNCED);
         } catch (InterruptedException exception) {

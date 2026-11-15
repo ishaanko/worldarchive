@@ -6,5 +6,7 @@ public enum BackupOperation {
     VERIFY,
     SYNC,
     DELETE,
-    RESTORE
+    RESTORE,
+    /** Rewrites a world's old Git backups in the bucket format. */
+    CONVERT
 }

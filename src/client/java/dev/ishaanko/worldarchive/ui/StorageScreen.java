@@ -8,6 +8,7 @@ import dev.ishaanko.worldarchive.ui.model.BackupText;
 import dev.ishaanko.worldarchive.ui.model.BackupWorldContext;
 import dev.ishaanko.worldarchive.ui.model.ScreenGeometry;
 import dev.ishaanko.worldarchive.ui.model.StoragePolicyInput;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -23,8 +24,9 @@ import net.minecraft.network.chat.CommonComponents;
 import net.minecraft.network.chat.Component;
 
 /**
- * One world's storage use, its storage limit and keep counts, and the way into a cleanup that the
- * player reviews before anything is deleted.
+ * One world's storage use, its storage limit and keep counts, the way into a cleanup that the
+ * player reviews before anything is deleted, and, while any of the world's Git backups are in the
+ * old format, the way into converting them.
  */
 final class StorageScreen extends Screen {
     private static final int CONTENT_MIN = 230;
@@ -32,6 +34,12 @@ final class StorageScreen extends Screen {
     private static final int CONTENT_MAX = 430;
 
     private static final int CONTENT_MARGIN = 24;
+
+    /** Where the convert row sits, below the keep help. */
+    private static final int CONVERSION_ROW_Y = 214;
+
+    /** The shortest screen on which the convert row clears the status line above the bottom buttons. */
+    private static final int CONVERSION_ROW_SCREEN_HEIGHT = CONVERSION_ROW_Y + 20 + 48;
 
     private final Screen parent;
 
@@ -55,6 +63,9 @@ final class StorageScreen extends Screen {
     private String monthly = Integer.toString(StoragePolicy.DEFAULT_MONTHLY_COPIES);
 
     private boolean busy = true;
+
+    /** The world's Git backups in the old format; the convert line shows only when there is one. */
+    private int oldGitBackups;
 
     /** The fields differ from the saved policy; cleanup would still use the saved one. */
     private boolean edited;
@@ -91,7 +102,51 @@ final class StorageScreen extends Screen {
         }
         addUsage(x, contentWidth);
         addPolicyFields(x, contentWidth);
-        addActions(x, contentWidth);
+        boolean conversionRow = oldGitBackups > 0 && height >= CONVERSION_ROW_SCREEN_HEIGHT;
+        if (conversionRow) {
+            addConversion(x, contentWidth);
+        }
+        addActions(x, contentWidth, oldGitBackups > 0 && !conversionRow);
+    }
+
+    /**
+     * How many Git backups are in the old format, and a button that converts them after a
+     * confirmation. The row sits below the keep help; a screen too short for it gets the button
+     * in the bottom row instead, with the line as its tooltip.
+     */
+    private void addConversion(int x, int contentWidth) {
+        int buttonWidth = 80;
+        Component line = conversionLine();
+        StringWidget lineWidget = new StringWidget(x, CONVERSION_ROW_Y, contentWidth - buttonWidth - Widgets.GAP, 20,
+                line.copy().withStyle(ChatFormatting.GRAY), font);
+        lineWidget.setTooltip(Tooltip.create(line));
+        addRenderableOnly(lineWidget);
+        Button convert = convertButton();
+        convert.setRectangle(buttonWidth, 20, x + contentWidth - buttonWidth, CONVERSION_ROW_Y);
+        addRenderableWidget(convert);
+    }
+
+    private Component conversionLine() {
+        return oldGitBackups == 1
+                ? Component.translatable("screen.worldarchive.storage.old_git_one")
+                : Component.translatable("screen.worldarchive.storage.old_git_many", oldGitBackups);
+    }
+
+    private Button convertButton() {
+        Button convert = Button.builder(Component.translatable("screen.worldarchive.storage.convert"),
+                        ignored -> confirmConversion())
+                .build();
+        convert.active = !busy;
+        return convert;
+    }
+
+    private void confirmConversion() {
+        Component title = Component.translatable("screen.worldarchive.storage.convert_title");
+        minecraft.setScreenAndShow(new BackupConfirmationScreen(this, title,
+                Component.translatable("screen.worldarchive.storage.convert_prompt", oldGitBackups, world.displayName()),
+                Component.translatable("screen.worldarchive.storage.convert"),
+                () -> minecraft.setScreenAndShow(BackupOperationScreen.conversion(this, title.getString(),
+                        listener -> facade.convertGitBackups(world.worldId(), listener)))));
     }
 
     private void addUsage(int x, int contentWidth) {
@@ -170,7 +225,7 @@ final class StorageScreen extends Screen {
         return field;
     }
 
-    private void addActions(int x, int contentWidth) {
+    private void addActions(int x, int contentWidth, boolean withConvert) {
         int y = height - 28;
         Button save = Button.builder(Component.translatable("screen.worldarchive.storage.save"), ignored -> save()).build();
         save.active = !busy;
@@ -183,7 +238,13 @@ final class StorageScreen extends Screen {
         }
         Button back = Button.builder(CommonComponents.GUI_BACK, ignored -> onClose()).build();
         back.active = !busy;
-        List<Button> buttons = List.of(save, review, back);
+        List<Button> buttons = new ArrayList<>(List.of(save, review));
+        if (withConvert) {
+            Button convert = convertButton();
+            convert.setTooltip(Tooltip.create(conversionLine()));
+            buttons.add(convert);
+        }
+        buttons.add(back);
         Widgets.row(x, y, contentWidth, buttons);
         buttons.forEach(this::addRenderableWidget);
         StringWidget statusWidget = new StringWidget(x, y - 20, contentWidth, 16, status, font);
@@ -199,6 +260,13 @@ final class StorageScreen extends Screen {
     private void load() {
         busy = true;
         calls.start(() -> facade.storageOverview(world.worldId()), this::showOverview, this::showFailure);
+        calls.start(() -> facade.oldFormatGitBackups(world.worldId()), count -> {
+            oldGitBackups = count;
+            rebuildWidgets();
+        }, failure -> {
+            oldGitBackups = 0;
+            rebuildWidgets();
+        });
     }
 
     private void showOverview(StorageOverview loaded) {

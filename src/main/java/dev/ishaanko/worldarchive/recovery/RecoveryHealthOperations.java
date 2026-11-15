@@ -2,6 +2,7 @@ package dev.ishaanko.worldarchive.recovery;
 
 import dev.ishaanko.worldarchive.catalog.BackupCatalog;
 import dev.ishaanko.worldarchive.core.WorldOperationGate;
+import dev.ishaanko.worldarchive.model.ArtifactOwnership;
 import dev.ishaanko.worldarchive.model.BackupId;
 import dev.ishaanko.worldarchive.model.BackupOperation;
 import dev.ishaanko.worldarchive.model.BackupRecord;
@@ -16,6 +17,7 @@ import dev.ishaanko.worldarchive.model.SafeText;
 import dev.ishaanko.worldarchive.model.SyncStatus;
 import dev.ishaanko.worldarchive.model.VerificationStatus;
 import dev.ishaanko.worldarchive.model.WorldId;
+import dev.ishaanko.worldarchive.storage.git.GitConversion;
 import java.io.IOException;
 import java.time.Clock;
 import java.util.ArrayList;
@@ -29,9 +31,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Verifies a backup's copies and uploads its pending Git copy. Verify and sync record their outcome in the catalog; a cancelled verify
- * records nothing, and a sync records what the upload did before it stopped. A sync of several backups records each one as it
- * finishes.
+ * Verifies a backup's copies, uploads its pending Git copy, and converts a world's old Git backups to the bucket format. Verify and
+ * sync record their outcome in the catalog; a cancelled verify records nothing, and a sync records what the upload did before it
+ * stopped. A sync of several backups records each one as it finishes. A conversion records each backup it converted, also when it
+ * was cancelled.
  */
 final class RecoveryHealthOperations {
     private static final Logger LOGGER = LoggerFactory.getLogger("WorldArchive");
@@ -157,6 +160,41 @@ final class RecoveryHealthOperations {
             }
         }
         return results;
+    }
+
+    /**
+     * Rewrites the world's old Git backups in the bucket format. A converted backup has a new
+     * commit that the remote does not hold, so its Git copy, when synced or pending, becomes not
+     * synced until a Sync uploads it again.
+     */
+    GitConversion convertGit(WorldId worldId, ProgressListener listener, CancellableTask<?> task) throws Exception {
+        task.checkpoint();
+        try (WorldOperationGate.Permit ignored = operationGate.enter(worldId)) {
+            task.checkpoint();
+            GitConversion conversion = git.convert(worldId, listener);
+            task.mandatoryCommit(() -> {
+                for (BackupId backupId : conversion.converted()) {
+                    catalog.update(backupId, existing -> RecoverySupport.withDestinations(existing,
+                            existing.result().destinations().stream().map(RecoveryHealthOperations::needsUpload).toList()));
+                }
+                return null;
+            });
+            task.checkpoint();
+            return conversion;
+        }
+    }
+
+    /**
+     * A converted Git copy that counted as uploaded is not synced any more: the remote holds its
+     * old form. An imported copy keeps its state, because Sync never uploads one to the remote it
+     * came from, so nothing could clear a not-synced mark on it.
+     */
+    private static DestinationResult needsUpload(DestinationResult copy) {
+        boolean uploaded = copy.syncStatus() == SyncStatus.SYNCED || copy.syncStatus() == SyncStatus.PENDING;
+        return copy.destination() == DestinationType.GIT && copy.isDurable() && uploaded
+                && copy.ownership() == ArtifactOwnership.MANAGED
+                ? copy.withState(DestinationStatus.SUCCESS, Optional.empty(), SyncStatus.NOT_SYNCED)
+                : copy;
     }
 
     /** Checks one copy; one that cannot be read is UNAVAILABLE, and the log says why. */

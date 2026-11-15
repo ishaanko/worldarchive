@@ -8,11 +8,13 @@ import dev.ishaanko.worldarchive.model.BackupStatus;
 import dev.ishaanko.worldarchive.model.OperationProgress;
 import dev.ishaanko.worldarchive.model.ProgressListener;
 import dev.ishaanko.worldarchive.model.SafeText;
+import dev.ishaanko.worldarchive.storage.git.GitConversion;
 import dev.ishaanko.worldarchive.support.AsyncTasks;
 import dev.ishaanko.worldarchive.ui.model.BackupOutcomeSummary;
 import dev.ishaanko.worldarchive.ui.model.BackupRow;
 import dev.ishaanko.worldarchive.ui.model.BackupText;
 import dev.ishaanko.worldarchive.ui.model.DeleteBatchSummary;
+import dev.ishaanko.worldarchive.ui.model.GitConversionSummary;
 import dev.ishaanko.worldarchive.ui.model.ScreenGeometry;
 import dev.ishaanko.worldarchive.ui.model.SyncBatch;
 import java.util.ArrayList;
@@ -34,8 +36,8 @@ import net.minecraft.network.chat.CommonComponents;
 import net.minecraft.network.chat.Component;
 
 /**
- * Runs one backup operation and shows its progress and outcome. Create, Restore, Sync and Verify
- * show Cancel while they run; Delete shows a wait notice until it finishes. A backup that failed
+ * Runs one backup operation and shows its progress and outcome. Create, Restore, Sync, Verify and
+ * Convert show Cancel while they run; Delete shows a wait notice until it finishes. A backup that failed
  * because the world changed while it was copied offers Retry.
  */
 final class BackupOperationScreen<T> extends Screen {
@@ -199,6 +201,53 @@ final class BackupOperationScreen<T> extends Screen {
         Component fallback = Component.translatable("screen.worldarchive.operation.sync_batch_not_uploaded");
         summary.shown().forEach(failure -> lines.add(Component.literal(failure.name() + BackupText.SEPARATOR
                 + failure.reason().orElseGet(fallback::getString))));
+        if (summary.more() > 0) {
+            lines.add(Component.translatable("screen.worldarchive.operation.sync_batch_more", summary.more()));
+        }
+        return lines;
+    }
+
+    /**
+     * Converts a world's old Git backups to the bucket format and shows how many were converted,
+     * the space freed, and the ones that could not be converted. The engine's progress line says
+     * which backup it is on, and the bar covers them all.
+     */
+    static BackupOperationScreen<GitConversion> conversion(
+            Screen parent,
+            String title,
+            OperationStarter<GitConversion> starter) {
+        return new BackupOperationScreen<>(parent, BackupOperation.CONVERT, title, starter, conversion -> {
+            GitConversionSummary summary = GitConversionSummary.of(conversion);
+            return Presentation.finished(conversionHeadline(summary), color(summary.status(), BackupOperation.CONVERT),
+                    conversionDetails(summary));
+        }, ignored -> {
+        });
+    }
+
+    private static Component conversionHeadline(GitConversionSummary summary) {
+        return switch (summary.outcome()) {
+            case CONVERTED -> summary.converted() == 1
+                    ? Component.translatable("screen.worldarchive.operation.convert_done_one")
+                    : Component.translatable("screen.worldarchive.operation.convert_done_many", summary.converted());
+            case NOTHING_TO_CONVERT -> Component.translatable("screen.worldarchive.operation.convert_nothing");
+            case PARTIAL -> Component.translatable("screen.worldarchive.operation.convert_partial",
+                    summary.converted(), summary.shown().size() + summary.more());
+            case NONE_CONVERTED -> Component.translatable("screen.worldarchive.operation.convert_none");
+        };
+    }
+
+    /** The counts, the space freed, the reminder to sync, and each backup left in the old format with why. */
+    private static List<Component> conversionDetails(GitConversionSummary summary) {
+        List<Component> lines = new ArrayList<>();
+        if (summary.unchanged() > 0) {
+            lines.add(Component.translatable("screen.worldarchive.operation.convert_unchanged", summary.unchanged()));
+        }
+        if (summary.converted() > 0) {
+            lines.add(Component.translatable("screen.worldarchive.operation.convert_freed", summary.freed()));
+            lines.add(Component.translatable("screen.worldarchive.operation.convert_sync"));
+        }
+        summary.shown().forEach(failure -> lines.add(Component.literal(failure.name() + BackupText.SEPARATOR
+                + failure.reason())));
         if (summary.more() > 0) {
             lines.add(Component.translatable("screen.worldarchive.operation.sync_batch_more", summary.more()));
         }
@@ -458,6 +507,10 @@ final class BackupOperationScreen<T> extends Screen {
                     "screen.worldarchive.operation.restore_cancelling",
                     "screen.worldarchive.operation.restore_cancelled",
                     "screen.worldarchive.operation.restore_cancelled_detail"));
+            case CONVERT -> Optional.of(new CancelText(
+                    "screen.worldarchive.operation.convert_cancelling",
+                    "screen.worldarchive.operation.convert_cancelled",
+                    "screen.worldarchive.operation.convert_cancelled_detail"));
             case DELETE -> Optional.empty();
         };
     }
