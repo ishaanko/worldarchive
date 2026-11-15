@@ -15,6 +15,7 @@ import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
@@ -177,13 +178,17 @@ final class GitSnapshotWriter {
         return pointer;
     }
 
-    /** Whether the bucket objects rebuild exactly the file {@code expected} describes. */
+    /**
+     * Whether the bucket objects rebuild exactly the file {@code expected} describes. A bucket
+     * object that is gone counts as one that does not: another worker whose region shares the
+     * bucket may have set it aside as damaged a moment ago, and the caller then writes it again.
+     */
     private boolean rebuilds(SortedMap<Integer, GitLfsPointer> buckets, RegionAssembler.StoredRegion expected)
             throws IOException {
         try {
             return expected.equals(RegionAssembler.fromBuckets(List.copyOf(buckets.keySet()),
                     number -> lfs.open(buckets.get(number)), OutputStream.nullOutputStream()));
-        } catch (GitStorageException exception) {
+        } catch (GitStorageException | NoSuchFileException exception) {
             return false;
         }
     }

@@ -45,18 +45,24 @@ class GitLfsObjectsTest {
         CountDownLatch releaseFirst = new CountDownLatch(1);
         CountDownLatch releaseSecond = new CountDownLatch(1);
         try (ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor()) {
-            Future<?> first = workers.submit(() -> store(lfs, pointer, bytes, bothWriting, releaseFirst));
-            Future<?> second = workers.submit(() -> store(lfs, pointer, bytes, bothWriting, releaseSecond));
-            assertTrue(bothWriting.await(10, TimeUnit.SECONDS));
-            releaseFirst.countDown();
-            first.get(10, TimeUnit.SECONDS);
-            Path object = lfs.path(pointer.sha256());
-            Object placed = Files.readAttributes(object, BasicFileAttributes.class).fileKey();
-            try (InputStream reader = lfs.open(pointer)) {
+            try {
+                Future<?> first = workers.submit(() -> store(lfs, pointer, bytes, bothWriting, releaseFirst));
+                Future<?> second = workers.submit(() -> store(lfs, pointer, bytes, bothWriting, releaseSecond));
+                assertTrue(bothWriting.await(10, TimeUnit.SECONDS));
+                releaseFirst.countDown();
+                first.get(10, TimeUnit.SECONDS);
+                Path object = lfs.path(pointer.sha256());
+                Object placed = Files.readAttributes(object, BasicFileAttributes.class).fileKey();
+                try (InputStream reader = lfs.open(pointer)) {
+                    releaseSecond.countDown();
+                    second.get(10, TimeUnit.SECONDS);
+                    assertEquals(placed, Files.readAttributes(object, BasicFileAttributes.class).fileKey());
+                    assertArrayEquals(bytes, reader.readAllBytes());
+                }
+            } finally {
+                // A failed assertion must not leave a writer waiting, or closing the executor never returns.
+                releaseFirst.countDown();
                 releaseSecond.countDown();
-                second.get(10, TimeUnit.SECONDS);
-                assertEquals(placed, Files.readAttributes(object, BasicFileAttributes.class).fileKey());
-                assertArrayEquals(bytes, reader.readAllBytes());
             }
         }
         try (Stream<Path> left = Files.list(repository.temporaryFolder())) {
